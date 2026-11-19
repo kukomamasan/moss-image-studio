@@ -5,7 +5,7 @@ param([switch]$SetupOnly,[switch]$ReturnToGenerator)
 
 $ErrorActionPreference = 'Stop'
 $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$script:AppVersion = '0.1.10'
+$script:AppVersion = '0.1.11'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic' }
@@ -21,6 +21,21 @@ $script:AdultCodeSetup = 'Undecided'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+function Hide-MossConsoleWindow {
+    if(-not ('MossNativeWindow' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class MossNativeWindow {
+    [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+"@
+    }
+    $consoleHandle=[MossNativeWindow]::GetConsoleWindow()
+    if($consoleHandle -ne [IntPtr]::Zero){[void][MossNativeWindow]::ShowWindow($consoleHandle,0)}
+}
 
 function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history') {
     $dialog = New-Object System.Windows.Forms.Form
@@ -654,6 +669,7 @@ try {
                 return
             } catch {
                 [System.Windows.Forms.MessageBox]::Show(('MOSS could not download or prepare the update: '+$_.Exception.Message),'MOSS updater',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null
+                if($tempRoot -and (Test-Path -LiteralPath $tempRoot)){Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue}
                 return
             }
         } else {[System.Windows.Forms.MessageBox]::Show("MOSS found release '$($release.tag_name)' but could not compare its version automatically.",'MOSS updates',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null}
@@ -1251,6 +1267,7 @@ try {
     })
     $openOut.Add_Click({$folder=Get-AbsoluteAppPath $out.Text;if(Test-Path -LiteralPath $folder){Start-Process explorer.exe -ArgumentList (Quote-ProcessArgument $folder)}})
     $f.Add_FormClosing({if($script:GenState.IsRunning){Stop-MossGen}})
+    $f.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     [void]$f.ShowDialog()
     if($preview.Image){$preview.Image.Dispose()}
     if($f.Tag -eq 'SETUP'){
@@ -1261,6 +1278,7 @@ try {
 
 # Show setup on first run or when explicitly requested. Otherwise open the generator directly.
 if ($SetupOnly -or -not [bool]$script:Settings.HardwareSetupComplete) {
+    $form.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     [void]$form.ShowDialog()
 }
 if ((-not $SetupOnly -or $ReturnToGenerator) -and [bool]$script:Settings.HardwareSetupComplete) {
