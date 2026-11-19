@@ -5,6 +5,7 @@ param([switch]$SetupOnly,[switch]$ReturnToGenerator)
 
 $ErrorActionPreference = 'Stop'
 $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$script:AppVersion = '0.1.9'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic' }
@@ -309,7 +310,7 @@ $script:Inventory = @(Get-GpuInventory)
 $script:RecommendedBackend = Get-BackendRecommendation $script:Inventory
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'MOSS Image Studio | Hardware Setup'
+$form.Text = "MOSS Image Studio v$($script:AppVersion) | Hardware Setup"
 $form.Size = New-Object System.Drawing.Size(900,650)
 $form.MinimumSize = New-Object System.Drawing.Size(760,560)
 $form.StartPosition = 'CenterScreen'
@@ -321,7 +322,7 @@ $header = New-Object System.Windows.Forms.Panel
 $header.Dock='Top'; $header.Height=76; $header.BackColor=[System.Drawing.Color]::FromArgb(25,32,45)
 $form.Controls.Add($header)
 $title = New-Object System.Windows.Forms.Label
-$title.Text='MOSS  /  IMAGE STUDIO'; $title.Font=New-Object System.Drawing.Font('Segoe UI Semibold',17,[System.Drawing.FontStyle]::Bold)
+$title.Text="MOSS  /  IMAGE STUDIO  v$($script:AppVersion)"; $title.Font=New-Object System.Drawing.Font('Segoe UI Semibold',17,[System.Drawing.FontStyle]::Bold)
 $title.AutoSize=$true; $title.Location=New-Object System.Drawing.Point(22,12); $header.Controls.Add($title)
 $sub = New-Object System.Windows.Forms.Label
 $sub.Text='PORTABLE HARDWARE CONFIGURATION'; $sub.ForeColor=[System.Drawing.Color]::FromArgb(142,158,181)
@@ -581,21 +582,86 @@ function Show-GeneratorWindow {
     $script:GeneratedFiles = New-Object System.Collections.ArrayList
 
     $f = New-Object System.Windows.Forms.Form
-    $f.Text = 'MOSS Image Studio | Generator'; $f.Size = New-Object System.Drawing.Size(1180,850); $f.MinimumSize = New-Object System.Drawing.Size(1000,740); $f.StartPosition='CenterScreen'
+    $f.Text = "MOSS Image Studio v$($script:AppVersion) | Generator"; $f.Size = New-Object System.Drawing.Size(1180,850); $f.MinimumSize = New-Object System.Drawing.Size(1000,740); $f.StartPosition='CenterScreen'
     $f.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $f.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $f.Font=New-Object System.Drawing.Font('Segoe UI',9)
     $cPanel=[System.Drawing.Color]::FromArgb(25,32,45); $cCard=[System.Drawing.Color]::FromArgb(27,34,47); $cText=[System.Drawing.Color]::FromArgb(230,236,245); $cMuted=[System.Drawing.Color]::FromArgb(145,161,185); $cAccent=[System.Drawing.Color]::FromArgb(45,112,173)
 
     $head=New-Object System.Windows.Forms.Panel; $head.Dock='Top'; $head.Height=68; $head.BackColor=$cPanel; $f.Controls.Add($head)
-    $ttl=New-Object System.Windows.Forms.Label; $ttl.Text='MOSS  /  IMAGE STUDIO'; $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',17,[System.Drawing.FontStyle]::Bold); $ttl.AutoSize=$true; $ttl.Location=New-Object System.Drawing.Point(20,9); $head.Controls.Add($ttl)
+    $ttl=New-Object System.Windows.Forms.Label; $ttl.Text="MOSS  /  IMAGE STUDIO  v$($script:AppVersion)"; $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',17,[System.Drawing.FontStyle]::Bold); $ttl.AutoSize=$true; $ttl.Location=New-Object System.Drawing.Point(20,9); $head.Controls.Add($ttl)
     $subt=New-Object System.Windows.Forms.Label; $subt.Text='LOCAL IMAGE GENERATION  -  RTX / CPU'; $subt.ForeColor=$cMuted; $subt.AutoSize=$true; $subt.Location=New-Object System.Drawing.Point(23,42); $head.Controls.Add($subt)
     $backendText=[string]$script:Settings.Backend; if (-not $script:Settings.BackendSelectionSaved) { $backendText='Not configured' }
     $backendBadge=New-Object System.Windows.Forms.Label; $backendBadge.Text="BACKEND  $backendText"; $backendBadge.AutoSize=$true; $backendBadge.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $backendBadge.Location=New-Object System.Drawing.Point(710,25); $backendBadge.Anchor='Top,Right'; $head.Controls.Add($backendBadge)
     $setupBtn=New-Object System.Windows.Forms.Button; $setupBtn.Text='Hardware / Setup'; $setupBtn.Size=New-Object System.Drawing.Size(130,30); $setupBtn.Location=New-Object System.Drawing.Point(1025,18); $setupBtn.Anchor='Top,Right'; $setupBtn.FlatStyle='Flat'; $setupBtn.BackColor=$cAccent; $setupBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($setupBtn)
     $setupBtn.Add_Click({ $f.Tag='SETUP'; $f.Close() })
-$updateBtn=New-Object System.Windows.Forms.Button; $updateBtn.Text='Update MOSS'; $updateBtn.Size=New-Object System.Drawing.Size(130,30); $updateBtn.Location=New-Object System.Drawing.Point(880,18); $updateBtn.Anchor='Top,Right'; $updateBtn.FlatStyle='Flat'; $updateBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $updateBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($updateBtn)
+$updateBtn=New-Object System.Windows.Forms.Button; $updateBtn.Text='Check updates'; $updateBtn.Size=New-Object System.Drawing.Size(130,30); $updateBtn.Location=New-Object System.Drawing.Point(880,18); $updateBtn.Anchor='Top,Right'; $updateBtn.FlatStyle='Flat'; $updateBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $updateBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($updateBtn)
 $updateBtn.Add_Click({
-    [System.Windows.Forms.MessageBox]::Show('The private MOSS releases page will open. Download MOSS-Image-Studio.zip, close MOSS, and extract the app files over the existing folder. Keep config, models, and outputs.','Update MOSS',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
-    try { Start-Process 'https://github.com/kukomamasan/moss-image-studio/releases/latest' } catch { [System.Windows.Forms.MessageBox]::Show('The releases page could not be opened. Go to the MOSS repository on GitHub and open Releases.','Update MOSS')|Out-Null }
+    $release=$null
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol=[System.Net.SecurityProtocolType]::Tls12
+        $release=Invoke-RestMethod -Uri 'https://api.github.com/repos/kukomamasan/moss-image-studio/releases/latest' -Method Get -Headers @{Accept='application/vnd.github+json';'User-Agent'='MOSS-Image-Studio'} -TimeoutSec 8
+    } catch { $release=$null }
+    if($release -and $release.tag_name){
+        $latestVersion=$null; $currentVersion=$null; $tagText=([string]$release.tag_name).TrimStart('v','V')
+        if([version]::TryParse($tagText,[ref]$latestVersion) -and [version]::TryParse([string]$script:AppVersion,[ref]$currentVersion)){
+            if($latestVersion -eq $currentVersion){[System.Windows.Forms.MessageBox]::Show("MOSS is up to date (v$($script:AppVersion)).",'MOSS updates',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return}
+            if($latestVersion -lt $currentVersion){[System.Windows.Forms.MessageBox]::Show("This MOSS build (v$($script:AppVersion)) is newer than the latest published release (v$tagText).",'MOSS updates',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return}
+            $answer=[System.Windows.Forms.MessageBox]::Show("A new MOSS version is available: v$tagText (you have v$($script:AppVersion)). Download and install it now? MOSS will close, replace the app files, keep config/models/outputs, and restart.",'MOSS update available',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Information)
+            if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
+            $asset=@($release.assets | Where-Object { $_.name -eq 'MOSS-Image-Studio.zip' } | Select-Object -First 1)
+            if(-not $asset -or -not $asset[0].browser_download_url){[System.Windows.Forms.MessageBox]::Show('This release does not include MOSS-Image-Studio.zip, so MOSS cannot install it automatically.','MOSS updater',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null;return}
+            try {
+                $tempRoot=Join-Path ([System.IO.Path]::GetTempPath()) ('MOSS-Update-'+[guid]::NewGuid().ToString('N'))
+                New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+                $zipPath=Join-Path $tempRoot 'MOSS-Image-Studio.zip'
+                Invoke-WebRequest -Uri ([string]$asset[0].browser_download_url) -OutFile $zipPath -UseBasicParsing -TimeoutSec 180
+                Add-Type -AssemblyName System.IO.Compression.FileSystem
+                $archive=[System.IO.Compression.ZipFile]::OpenRead($zipPath)
+                try {
+                    $archiveNames=@($archive.Entries | ForEach-Object { $_.FullName })
+                    $allowedNames=@('MOSS-Image-Studio.ps1','MOSS-Image-Studio.bat','MOSS-Image-Studio.vbs','README.txt')
+                    if($archiveNames -notcontains 'MOSS-Image-Studio.ps1' -or @($archiveNames | Where-Object { $_ -notin $allowedNames }).Count -gt 0){throw 'The release ZIP contains unexpected files.'}
+                } finally { $archive.Dispose() }
+                $helperPath=Join-Path $tempRoot 'Install-MOSS-Update.ps1'
+                $helperBody=@'
+param([int]$ProcessId,[string]$AppRoot,[string]$ZipPath,[string]$TempRoot)
+$ErrorActionPreference='Stop'
+try {
+    $running=Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if($running){$running.WaitForExit()}
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    Add-Type -AssemblyName System.Windows.Forms
+    $stage=Join-Path $TempRoot 'stage'
+    New-Item -ItemType Directory -Path $stage -Force | Out-Null
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath,$stage)
+    $allowed=@('MOSS-Image-Studio.ps1','MOSS-Image-Studio.bat','MOSS-Image-Studio.vbs','README.txt')
+    $backup=Join-Path $TempRoot 'backup'
+    New-Item -ItemType Directory -Path $backup -Force | Out-Null
+    foreach($name in $allowed){$current=Join-Path $AppRoot $name;if(Test-Path -LiteralPath $current -PathType Leaf){Copy-Item -LiteralPath $current -Destination (Join-Path $backup $name) -Force}}
+    try {foreach($name in $allowed){$source=Join-Path $stage $name;if(Test-Path -LiteralPath $source -PathType Leaf){Copy-Item -LiteralPath $source -Destination (Join-Path $AppRoot $name) -Force}}}
+    catch {foreach($name in $allowed){$saved=Join-Path $backup $name;if(Test-Path -LiteralPath $saved -PathType Leaf){Copy-Item -LiteralPath $saved -Destination (Join-Path $AppRoot $name) -Force}};throw}
+    $launcher=Join-Path $AppRoot 'MOSS-Image-Studio.vbs'
+    if(Test-Path -LiteralPath $launcher){Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList ('"'+$launcher+'"')}
+} catch {
+    [System.Windows.Forms.MessageBox]::Show(('MOSS update failed: '+$_.Exception.Message),'MOSS updater',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null
+} finally {Remove-Item -LiteralPath $TempRoot -Recurse -Force -ErrorAction SilentlyContinue}
+'@
+                Set-Content -LiteralPath $helperPath -Value $helperBody -Encoding UTF8
+                $helperArgs='-NoProfile -ExecutionPolicy Bypass -File "'+$helperPath+'" -ProcessId '+[string]$PID+' -AppRoot "'+$script:AppRoot+'" -ZipPath "'+$zipPath+'" -TempRoot "'+$tempRoot+'"'
+                $powershellExe=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                Start-Process -FilePath $powershellExe -ArgumentList $helperArgs -WindowStyle Hidden | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("MOSS v$tagText is downloaded. This window will close while the app files are replaced; MOSS will restart when the update is complete.",'MOSS updater',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+                $f.Close()
+                return
+            } catch {
+                [System.Windows.Forms.MessageBox]::Show(('MOSS could not download or prepare the update: '+$_.Exception.Message),'MOSS updater',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null
+                return
+            }
+        } else {[System.Windows.Forms.MessageBox]::Show("MOSS found release '$($release.tag_name)' but could not compare its version automatically.",'MOSS updates',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null}
+    } else {
+        $answer=[System.Windows.Forms.MessageBox]::Show("MOSS could not read the GitHub release feed. Open the releases page to check manually? The automatic updater needs publicly readable releases.",'MOSS update check',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+        if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
+    }
+    try { Start-Process 'https://github.com/kukomamasan/moss-image-studio/releases/latest' } catch { [System.Windows.Forms.MessageBox]::Show('The releases page could not be opened. Go to the MOSS repository on GitHub and open Releases.','MOSS updates')|Out-Null }
 })
 
     $left=New-Object System.Windows.Forms.Panel; $left.Location=New-Object System.Drawing.Point(18,84); $left.Size=New-Object System.Drawing.Size(700,710); $left.Anchor='Top,Bottom,Left'; $left.BackColor=$cCard; $f.Controls.Add($left)
@@ -618,26 +684,39 @@ $updateBtn.Add_Click({
     $historyPick.Add_SelectedIndexChanged({if($historyPick.SelectedIndex -ge 0){$prompt.Text=[string]$historyPick.SelectedItem}})
 
     Add-Label $left 'IMAGE SETTINGS' 18 202 160 | Out-Null
-    Add-Label $left 'VISUAL STYLE' 205 202 100 | Out-Null
-    $style=New-Object System.Windows.Forms.ComboBox; $style.DropDownStyle='DropDownList'; $style.Location=New-Object System.Drawing.Point(290,199); $style.Size=New-Object System.Drawing.Size(250,28); $style.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $style.ForeColor=$cText; foreach($item in @('Photorealistic','Anime','Digital illustration','Oil painting','Watercolor','3D render','Comic book','Cinematic')){[void]$style.Items.Add($item)}; $style.SelectedItem=[string]$script:Settings.ImageStyle; if($style.SelectedIndex -lt 0){$style.SelectedIndex=0}; $left.Controls.Add($style)
-    Add-Label $left 'Resolution' 18 231 90 | Out-Null
-    $res=New-Object System.Windows.Forms.ComboBox; $res.DropDownStyle='DropDownList'; $res.Location=New-Object System.Drawing.Point(18,254); $res.Size=New-Object System.Drawing.Size(250,28); $res.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $res.ForeColor=$cText
+    Add-Label $left 'VISUAL STYLE' 18 231 130 | Out-Null
+    $style=New-Object System.Windows.Forms.ComboBox; $style.DropDownStyle='DropDownList'; $style.Location=New-Object System.Drawing.Point(18,254); $style.Size=New-Object System.Drawing.Size(250,28); $style.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $style.ForeColor=$cText; foreach($item in @('Photorealistic','Anime','Digital illustration','Oil painting','Watercolor','3D render','Comic book','Cinematic')){[void]$style.Items.Add($item)}; $style.SelectedItem=[string]$script:Settings.ImageStyle; if($style.SelectedIndex -lt 0){$style.SelectedIndex=0}; $left.Controls.Add($style)
+    Add-Label $left 'Resolution' 300 231 90 | Out-Null
+    $res=New-Object System.Windows.Forms.ComboBox; $res.DropDownStyle='DropDownList'; $res.Location=New-Object System.Drawing.Point(300,254); $res.Size=New-Object System.Drawing.Size(250,28); $res.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $res.ForeColor=$cText
     $resItems=@('Landscape 16:9  |  1360 x 768','Square  |  1024 x 1024','Portrait 3:4  |  768 x 1024','Landscape 4:3  |  1280 x 960','Portrait 9:16  |  768 x 1360','2K Landscape  |  2560 x 1440','2K Square  |  2048 x 2048','2K Portrait  |  1536 x 2048','2K 4:3  |  2048 x 1536','2K 9:16  |  1440 x 2560','4K Landscape  |  3840 x 2160','4K Square  |  4096 x 4096','4K Portrait  |  3072 x 4096','4K 4:3  |  4096 x 3072','4K 9:16  |  2160 x 3840','Custom dimensions')
     foreach($ri in $resItems){[void]$res.Items.Add($ri)}; $left.Controls.Add($res)
-    $wBox=Add-TextBox $left ([string]$script:Settings.Width) 300 254 82; $hBox=Add-TextBox $left ([string]$script:Settings.Height) 395 254 82
-    Add-Label $left 'Width' 300 231 80 | Out-Null; Add-Label $left 'Height' 395 231 80 | Out-Null
+    $wBox=Add-TextBox $left ([string]$script:Settings.Width) 300 324 82; $hBox=Add-TextBox $left ([string]$script:Settings.Height) 395 324 82
+    Add-Label $left 'Width' 300 301 80 | Out-Null; Add-Label $left 'Height' 395 301 80 | Out-Null
     $resMap=@(@(1360,768),@(1024,1024),@(768,1024),@(1280,960),@(768,1360),@(2560,1440),@(2048,2048),@(1536,2048),@(2048,1536),@(1440,2560),@(3840,2160),@(4096,4096),@(3072,4096),@(4096,3072),@(2160,3840))
     $matched=-1; for($ri=0;$ri -lt $resMap.Count;$ri++){if([int]$script:Settings.Width -eq $resMap[$ri][0] -and [int]$script:Settings.Height -eq $resMap[$ri][1]){$matched=$ri;break}}; if($matched -ge 0){$res.SelectedIndex=$matched}else{$res.SelectedIndex=15}
     $res.Add_SelectedIndexChanged({ if($res.SelectedIndex -ge 0 -and $res.SelectedIndex -lt $resMap.Count){$wBox.Text=[string]$resMap[$res.SelectedIndex][0];$hBox.Text=[string]$resMap[$res.SelectedIndex][1]} })
-    Add-Label $left 'Steps' 18 302 70 | Out-Null; $steps=Add-TextBox $left ([string]$script:Settings.Steps) 18 325 75
-    Add-Label $left 'CFG scale' 110 302 90 | Out-Null; $cfg=Add-TextBox $left ([string]$script:Settings.CfgScale) 110 325 75
-    Add-Label $left 'Images' 202 302 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDownList'; $count.Location=New-Object System.Drawing.Point(202,325); $count.Size=New-Object System.Drawing.Size(75,26); foreach($n in @(1,2,4,8)){[void]$count.Items.Add([string]$n)}; $count.SelectedItem=[string]$script:Settings.ImageCount; if($count.SelectedIndex -lt 0){$count.SelectedIndex=0}; $left.Controls.Add($count)
-    Add-Label $left 'Seed (-1 = random)' 300 302 150 | Out-Null; $seed=Add-TextBox $left ([string]$script:Settings.Seed) 300 325 90
-    $performance=New-Object System.Windows.Forms.Label; $performance.Text='Performance: Automatic'; $performance.Location=New-Object System.Drawing.Point(410,327); $performance.Size=New-Object System.Drawing.Size(270,24); $performance.ForeColor=$cMuted; $left.Controls.Add($performance)
-    Add-Label $left 'ADMIN OUTPUT FOLDER' 18 372 190 | Out-Null
-    $out=Add-TextBox $left ([string]$script:Settings.OutputPath) 18 397 540; $out.Anchor='Top,Left,Right'; $out.ReadOnly=$true; $outBrowse=Add-Button $left 'Browse...' 570 396 110; $outBrowse.Anchor='Top,Right'; $outBrowse.Enabled=$false
+    Add-Label $left 'Steps' 18 354 70 | Out-Null; $steps=Add-TextBox $left ([string]$script:Settings.Steps) 18 377 75
+    Add-Label $left 'CFG scale' 110 354 90 | Out-Null; $cfg=Add-TextBox $left ([string]$script:Settings.CfgScale) 110 377 75
+    Add-Label $left 'Images' 202 354 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDownList'; $count.Location=New-Object System.Drawing.Point(202,377); $count.Size=New-Object System.Drawing.Size(75,26); foreach($n in @(1,2,4,8)){[void]$count.Items.Add([string]$n)}; $count.SelectedItem=[string]$script:Settings.ImageCount; if($count.SelectedIndex -lt 0){$count.SelectedIndex=0}; $left.Controls.Add($count)
+    Add-Label $left 'Seed (-1 = random)' 300 354 150 | Out-Null; $seed=Add-TextBox $left ([string]$script:Settings.Seed) 300 377 90
+    $performance=New-Object System.Windows.Forms.Label; $performance.Text='Performance: Automatic'; $performance.Location=New-Object System.Drawing.Point(410,379); $performance.Size=New-Object System.Drawing.Size(270,24); $performance.ForeColor=$cMuted; $left.Controls.Add($performance)
+    Add-Label $left 'OUTPUT FOLDER' 18 414 190 | Out-Null
+    $out=Add-TextBox $left ([string]$script:Settings.OutputPath) 18 439 540; $out.Anchor='Top,Left,Right'; $out.ReadOnly=$true; $outBrowse=Add-Button $left 'Browse...' 570 438 110; $outBrowse.Anchor='Top,Right'; $outBrowse.Enabled=$true
+    $outBrowse.Add_Click({
+        $dlg=New-Object System.Windows.Forms.FolderBrowserDialog
+        $dlg.Description='Select the output folder for generated images.'
+        $dlg.ShowNewFolderButton=$true
+        $current=Get-AbsoluteAppPath $out.Text
+        if(Test-Path -LiteralPath $current -PathType Container){$dlg.SelectedPath=$current}
+        elseif(-not [string]::IsNullOrWhiteSpace($current)){
+            $currentParent=Split-Path -Parent $current
+            if(Test-Path -LiteralPath $currentParent -PathType Container){$dlg.SelectedPath=$currentParent}
+        }
+        if($dlg.ShowDialog($f) -eq 'OK'){$out.Text=$dlg.SelectedPath}
+        $dlg.Dispose()
+    }.GetNewClosure())
 
-    Add-Label $left 'MODEL FILES  (defaults use the portable models folder)' 18 440 500 | Out-Null
+    Add-Label $left 'MODEL FILES  (defaults use the portable models folder)' 18 472 500 | Out-Null
     $modelRows=@(
       @('Diffusion model','DiffusionModelPath','moss_image_sft_int8_convrot.safetensors'),
       @('LLM','LlmPath','Qwen3.5-9B-Q4_K_M.gguf'),
@@ -645,14 +724,14 @@ $updateBtn.Add_Click({
       @('Tokenizer','TokenizerPath','tokenizer_qwen3.5.json')
     )
     $modelControls=@{}
-    $yy=466
+    $yy=498
     foreach($mr in $modelRows){
         Add-Label $left $mr[0] 18 ($yy+3) 105 | Out-Null
         $val=[string]$script:Settings[$mr[1]]; if([string]::IsNullOrWhiteSpace($val)){$val=Join-Path $script:AppRoot ('models\'+$mr[2])} else {$val=Get-AbsoluteAppPath $val}
         $tb=Add-TextBox $left $val 125 $yy 445; $tb.Anchor='Top,Left,Right'
-        $br=Add-Button $left '...' 580 ($yy-1) 100; $br.Anchor='Top,Right'
+        $br=Add-Button $left '...' 580 ($yy-1) 100 27; $br.Anchor='Top,Right'
         $key=$mr[1]; $br.Add_Click({$dlg=New-Object System.Windows.Forms.OpenFileDialog;$dlg.Title="Select $($mr[0]) file";$dlg.Filter='Model and data files|*.safetensors;*.gguf;*.json|All files (*.*)|*.*';$dlg.CheckFileExists=$true;$cur=Get-AbsoluteAppPath $tb.Text;if(Test-Path -LiteralPath $cur -PathType Leaf){$dlg.InitialDirectory=Split-Path -Parent $cur;$dlg.FileName=Split-Path -Leaf $cur}else{$modelsDir=Join-Path $script:AppRoot 'models';if(Test-Path -LiteralPath $modelsDir -PathType Container){$dlg.InitialDirectory=$modelsDir}};if($dlg.ShowDialog($f) -eq 'OK'){$tb.Text=$dlg.FileName};$dlg.Dispose()}.GetNewClosure())
-        $modelControls[$key]=$tb; $yy+=34
+        $modelControls[$key]=$tb; $yy+=29
     }
 
     $generate=Add-Button $left 'GENERATE IMAGES' 18 615 205 42; $generate.BackColor=$cAccent; $generate.ForeColor=[System.Drawing.Color]::White; $generate.Font=New-Object System.Drawing.Font('Segoe UI Semibold',10,[System.Drawing.FontStyle]::Bold)
