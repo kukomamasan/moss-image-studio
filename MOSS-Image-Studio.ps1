@@ -691,6 +691,9 @@ $updateBtn.Add_Click({
         LastStderr = ''
         LastExitCode = $null
         LastReport = ''
+        ImageStartedAt = $null
+        ImageDurations = New-Object System.Collections.ArrayList
+        ImageProgress = 0
     }
 
     function Stop-MossGen {
@@ -808,6 +811,58 @@ $updateBtn.Add_Click({
         }
     }
 
+    function Format-MossDuration([double]$Seconds) {
+        if ($Seconds -lt 0) { $Seconds = 0 }
+        $span = [TimeSpan]::FromSeconds([Math]::Min([int]::MaxValue, [Math]::Ceiling($Seconds)))
+        if ($span.TotalHours -ge 1) { return $span.ToString('h\:mm\:ss') }
+        return $span.ToString('m\:ss')
+    }
+
+    function Update-MossLiveProgress {
+        $st = $script:GenState
+        if (-not $st.IsRunning -or $null -eq $st.Process -or $st.Process.HasExited) { return }
+        $elapsed = 0.0
+        if ($st.ImageStartedAt) { $elapsed = [Math]::Max(0, ((Get-Date) - $st.ImageStartedAt).TotalSeconds) }
+        $stdoutNow = [string]$st.StdOut.ToString()
+        $stderrNow = [string]$st.StdErr.ToString()
+        $engineProgress = $null
+        $matches = [regex]::Matches(($stdoutNow + "`n" + $stderrNow), '(?im)\b(\d{1,3})\s*%')
+        if ($matches.Count -gt 0) { $engineProgress = [Math]::Max(0, [Math]::Min(100, [int]$matches[$matches.Count - 1].Groups[1].Value)) }
+        if ($null -eq $engineProgress) {
+            $matches = [regex]::Matches(($stdoutNow + "`n" + $stderrNow), '(?im)(?:\bstep\s*[:#]?\s*(\d+)\s*/\s*(\d+)\b|\b(\d+)\s*/\s*(\d+)\s*steps?\b)')
+            if ($matches.Count -gt 0) {
+                $last = $matches[$matches.Count - 1]
+                if ($last.Groups[1].Success) { $numerator = [double]$last.Groups[1].Value; $denominator = [double]$last.Groups[2].Value }
+                else { $numerator = [double]$last.Groups[3].Value; $denominator = [double]$last.Groups[4].Value }
+                if ($denominator -gt 0) { $engineProgress = [Math]::Max(0, [Math]::Min(100, [int](($numerator * 100) / $denominator))) }
+            }
+        }
+        if ($null -ne $engineProgress) { $st.ImageProgress = [int]$engineProgress }
+        $job = $st.Job
+        $overall = [int][Math]::Floor((($st.Index * 100) + [int]$st.ImageProgress) / [Math]::Max(1, [int]$job.Count))
+        $overall = [Math]::Max(0, [Math]::Min(99, $overall))
+        if ($null -ne $engineProgress) {
+            $progress.Style = 'Continuous'
+            $progress.Value = $overall
+        } else {
+            $progress.Style = 'Marquee'
+            $progress.MarqueeAnimationSpeed = 28
+            $progress.Value = 0
+        }
+        $etaText = 'ETA calculating'
+        $remaining = $null
+        if ($null -ne $engineProgress -and $engineProgress -gt 0) {
+            $imageTotalEstimate = $elapsed * 100.0 / $engineProgress
+            $remaining = ($imageTotalEstimate - $elapsed) + ([Math]::Max(0, $job.Count - $st.Index - 1) * $imageTotalEstimate)
+        } elseif ($st.ImageDurations.Count -gt 0) {
+            $average = (($st.ImageDurations | Measure-Object -Average).Average)
+            $remaining = [Math]::Max(0, $average - $elapsed) + ([Math]::Max(0, $job.Count - $st.Index - 1) * $average)
+        }
+        if ($null -ne $remaining) { $etaText = "ETA ~$(Format-MossDuration $remaining)" }
+        $progressNote = if ($null -ne $engineProgress) { " · image $([int]$st.ImageProgress)%" } else { '' }
+        $status.Text = "Image $($st.Index + 1) of $($job.Count) · $overall% overall$progressNote · elapsed $(Format-MossDuration $elapsed) · $etaText"
+    }
+
 
     function Complete-MossGen {
         param([string]$FinalStatus)
@@ -815,6 +870,8 @@ $updateBtn.Add_Click({
         $generate.Enabled = $true
         $cancel.Enabled = $false
         if ($FinalStatus) { $status.Text = $FinalStatus }
+        $progress.Style = 'Continuous'
+        $progress.MarqueeAnimationSpeed = 0
         $progress.Value = 100
     }
 
@@ -895,6 +952,10 @@ $updateBtn.Add_Click({
             $proc.BeginErrorReadLine()
             $st.Process = $proc
             $script:ActiveProcess = $proc
+            $st.ImageStartedAt = Get-Date
+            $st.ImageProgress = 0
+            $progress.Style = 'Marquee'
+            $progress.MarqueeAnimationSpeed = 28
             $status.Text = ("Starting image {0} of {1} (seed {2})..." -f ($i + 1), $job.Count, $thisSeed)
             $progress.Value = [int](($i * 100) / [Math]::Max(1, $job.Count))
         } catch {
@@ -909,7 +970,7 @@ $updateBtn.Add_Click({
     function On-MossGenTimerTick {
         $st = $script:GenState
         if ($null -eq $st.Process) { return }
-        if (-not $st.Process.HasExited) { return }
+        if (-not $st.Process.HasExited) { Update-MossLiveProgress; return }
 
         # Process finished
         $exitCode = $st.Process.ExitCode
@@ -918,6 +979,7 @@ $updateBtn.Add_Click({
         $thisSeed = $st.CurrentSeed
         $i = $st.Index
         $job = $st.Job
+        if ($st.ImageStartedAt) { [void]$st.ImageDurations.Add([Math]::Max(0.1, ((Get-Date) - $st.ImageStartedAt).TotalSeconds)) }
 
         $stdout = [string]$st.StdOut.ToString()
         $stderr = [string]$st.StdErr.ToString()

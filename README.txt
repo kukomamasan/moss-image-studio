@@ -14,6 +14,8 @@ Image generation
 - Choose a visual style: Photorealistic, Anime, Digital illustration, Oil painting,
   Watercolor, 3D render, Comic book, or Cinematic.
 - MOSS adds the selected style guidance to the generation prompt.
+- During generation, MOSS shows elapsed time, overall progress, and an ETA when
+  the engine reports step progress or enough previous images have completed.
 - Images are saved under outputs\admin\.
 
 Updating MOSS
