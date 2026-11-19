@@ -72,6 +72,14 @@ function Show-MossAdminCodeSetupChoice {
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
 }
 
+function Show-MossAdminCodeRecoveryChoice {
+    $f=New-Object System.Windows.Forms.Form; $f.Text='Administrator code'; $f.Size=New-Object System.Drawing.Size(540,220); $f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'; $f.MaximizeBox=$false; $f.MinimizeBox=$false; $f.Topmost=$true
+    $label=New-Object System.Windows.Forms.Label; $label.Text='The administrator code was not accepted. Try entering it again, or remove the administrator code and continue without code protection.'; $label.Location=New-Object System.Drawing.Point(18,18); $label.Size=New-Object System.Drawing.Size(490,52); $f.Controls.Add($label)
+    $retry=New-Object System.Windows.Forms.Button; $retry.Text='Try again'; $retry.Location=New-Object System.Drawing.Point(82,100); $retry.Size=New-Object System.Drawing.Size(160,44); $retry.Add_Click({$f.Tag='retry';$f.Close()}.GetNewClosure()); $f.Controls.Add($retry)
+    $skip=New-Object System.Windows.Forms.Button; $skip.Text='Continue without code'; $skip.Location=New-Object System.Drawing.Point(270,100); $skip.Size=New-Object System.Drawing.Size(190,44); $skip.Add_Click({$f.Tag='skip';$f.Close()}.GetNewClosure()); $f.Controls.Add($skip)
+    try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'retry' } finally { $f.Dispose() }
+}
+
 function Protect-MossPayload([string]$Text,[string]$Password) {
     $salt=New-Object byte[] 16; $rng=[System.Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($salt)
     $iv=New-Object byte[] 16; $rng.GetBytes($iv); $rng.Dispose(); $iterations=250000
@@ -132,9 +140,15 @@ function Confirm-MossAdminAccess {
     if($script:AdultAccessVerifier){
         while($true){
             $code=Get-MossHistoryPassphrase $false 'administrator access'
-            if(-not $code){return $false}
-            if(Test-MossHistoryPassphrase $code $script:AdultAccessVerifier){$script:AdultPassphrase=$code;break}
-            [System.Windows.Forms.MessageBox]::Show('The administrator code is incorrect. Enter the code that was set earlier, or cancel to close MOSS.','Access denied')|Out-Null
+            if($code -and (Test-MossHistoryPassphrase $code $script:AdultAccessVerifier)){$script:AdultPassphrase=$code;break}
+            $choice=Show-MossAdminCodeRecoveryChoice
+            if($choice -eq 'skip'){
+                $script:AdultAccessVerifier=$null
+                $script:AdultPassphrase=$null
+                $script:AdultCodeSetup='Skipped'
+                [void](Save-Settings)
+                return $true
+            }
         }
         return $true
     }
