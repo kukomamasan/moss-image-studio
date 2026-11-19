@@ -6,8 +6,9 @@ Run MOSS-Image-Studio.ps1 as usual.
 
 This build uses one administrator account. On first use, you can create an
 administrator code or continue without one. If a code has already been set,
-MOSS asks you to enter that code. MOSS has no additional user profiles or child
-settings.
+MOSS asks you to enter it. If it is forgotten, choose Continue without code to
+remove the administrator code and proceed. MOSS has no additional user profiles
+or child settings.
 
 Image generation
 - Choose a visual style: Photorealistic, Anime, Digital illustration, Oil painting,
