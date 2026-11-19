@@ -4,8 +4,10 @@ Unpack this ZIP into your MOSS folder (for example E:\MOSS\) so that
 MOSS-Image-Studio.ps1 sits beside the bin\, models\, config\, and outputs\ folders.
 Run MOSS-Image-Studio.ps1 as usual.
 
-This build uses one administrator account. On first use, set an administrator
-access code. MOSS has no additional user profiles or child settings.
+This build uses one administrator account. On first use, you can create an
+administrator code or continue without one. If a code has already been set,
+MOSS asks you to enter that code. MOSS has no additional user profiles or child
+settings.
 
 Image generation
 - Choose a visual style: Photorealistic, Anime, Digital illustration, Oil painting,
@@ -20,6 +22,7 @@ Updating MOSS
 - The app's updater source is the private repository kukomamasan/moss-image-studio.
 
 Privacy and portability
+- The administrator code is optional and is separate from the prompt-history code.
 - Prompt history is encrypted with a code you choose; the code is not stored.
 - New history codes must be 4-16 characters; letters, numbers, and symbols are allowed.
 - If an existing history code is wrong or cancelled, MOSS can continue without history
