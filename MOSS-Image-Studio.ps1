@@ -682,14 +682,22 @@ $updateBtn.Add_Click({
             $fileList.Visible = $true
             $logTitle.Visible = $true
             $log.Visible = $true
+            $panelHeight = $right.ClientSize.Height
+            $fileHeight = [Math]::Min(150,[Math]::Max(80,[int][Math]::Round($panelHeight * 150.0 / 710.0)))
+            $logTargetHeight = [Math]::Min(130,[Math]::Max(70,[int][Math]::Round($panelHeight * 130.0 / 710.0)))
+            $previewHeight = [Math]::Max(180,$panelHeight - 145 - $fileHeight - $logTargetHeight)
+            $filesTop = 42 + $previewHeight + 15
+            $listTop = $filesTop + 26
+            $logTitleTop = $listTop + $fileHeight + 17
+            $logTop = $logTitleTop + 25
             $preview.Location = New-Object System.Drawing.Point(16,42)
-            $preview.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),285)
-            $filesTitle.Location = New-Object System.Drawing.Point(16,342)
-            $fileList.Location = New-Object System.Drawing.Point(16,368)
-            $fileList.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),150)
-            $logTitle.Location = New-Object System.Drawing.Point(16,535)
-            $log.Location = New-Object System.Drawing.Point(16,560)
-            $log.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),[Math]::Max(50,$right.ClientSize.Height - 580))
+            $preview.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),$previewHeight)
+            $filesTitle.Location = New-Object System.Drawing.Point(16,$filesTop)
+            $fileList.Location = New-Object System.Drawing.Point(16,$listTop)
+            $fileList.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),$fileHeight)
+            $logTitle.Location = New-Object System.Drawing.Point(16,$logTitleTop)
+            $log.Location = New-Object System.Drawing.Point(16,$logTop)
+            $log.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),[Math]::Max(70,$panelHeight - $logTop - 20))
         }
     }.GetNewClosure())
 
