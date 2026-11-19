@@ -14,4 +14,4 @@ If Not fso.FileExists(powershell) Then
 End If
 
 command = Chr(34) & powershell & Chr(34) & " -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File " & Chr(34) & fso.BuildPath(root, "MOSS-Image-Studio.ps1") & Chr(34)
-shell.Run command, 0, False
+shell.Run command, 1, False
