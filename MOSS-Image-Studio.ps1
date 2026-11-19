@@ -664,11 +664,34 @@ $updateBtn.Add_Click({
 
     Add-Label $right 'OUTPUT PREVIEW' 16 14 200 | Out-Null
     $preview=New-Object System.Windows.Forms.PictureBox; $preview.Location=New-Object System.Drawing.Point(16,42); $preview.Size=New-Object System.Drawing.Size(383,285); $preview.Anchor='Top,Left,Right'; $preview.SizeMode='Zoom'; $preview.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $right.Controls.Add($preview)
-    Add-Label $right 'GENERATED FILES' 16 342 200 | Out-Null
+    $filesTitle=Add-Label $right 'GENERATED FILES' 16 342 200
     $fileList=New-Object System.Windows.Forms.ListBox; $fileList.Location=New-Object System.Drawing.Point(16,368); $fileList.Size=New-Object System.Drawing.Size(383,150); $fileList.Anchor='Top,Left,Right'; $fileList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $fileList.ForeColor=$cText; $right.Controls.Add($fileList)
     $fileList.Add_SelectedIndexChanged({if($fileList.SelectedItem){$p=[string]$fileList.SelectedItem;if(Test-Path -LiteralPath $p){try{$old=$preview.Image;$preview.Image=[System.Drawing.Image]::FromFile($p);if($old){$old.Dispose()}}catch{}}}})
-    Add-Label $right 'GENERATION LOG' 16 535 200 | Out-Null
+    $logTitle=Add-Label $right 'GENERATION LOG' 16 535 200
     $log=New-Object System.Windows.Forms.TextBox; $log.Multiline=$true; $log.ReadOnly=$true; $log.ScrollBars='Vertical'; $log.Location=New-Object System.Drawing.Point(16,560); $log.Size=New-Object System.Drawing.Size(383,130); $log.Anchor='Top,Bottom,Left,Right'; $log.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $log.ForeColor=$cMuted; $right.Controls.Add($log)
+    $right.Add_Resize({
+        if ($f.WindowState -eq [System.Windows.Forms.FormWindowState]::Maximized) {
+            $filesTitle.Visible = $false
+            $fileList.Visible = $false
+            $logTitle.Visible = $false
+            $log.Visible = $false
+            $preview.Location = New-Object System.Drawing.Point(16,42)
+            $preview.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),[Math]::Max(100,$right.ClientSize.Height - 60))
+        } else {
+            $filesTitle.Visible = $true
+            $fileList.Visible = $true
+            $logTitle.Visible = $true
+            $log.Visible = $true
+            $preview.Location = New-Object System.Drawing.Point(16,42)
+            $preview.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),285)
+            $filesTitle.Location = New-Object System.Drawing.Point(16,342)
+            $fileList.Location = New-Object System.Drawing.Point(16,368)
+            $fileList.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),150)
+            $logTitle.Location = New-Object System.Drawing.Point(16,535)
+            $log.Location = New-Object System.Drawing.Point(16,560)
+            $log.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),[Math]::Max(50,$right.ClientSize.Height - 580))
+        }
+    }.GetNewClosure())
 
     # --- Timer + Process generation worker (no BackgroundWorker) ---
     $script:GenState = @{
@@ -706,7 +729,12 @@ $updateBtn.Add_Click({
         if ($null -ne $script:GenState.Process) {
             try {
                 if (-not $script:GenState.Process.HasExited) {
-                    $script:GenState.Process.Kill()
+                    $processId = $script:GenState.Process.Id
+                    $taskkill = Join-Path $env:WINDIR 'System32\taskkill.exe'
+                    if (Test-Path -LiteralPath $taskkill -PathType Leaf) {
+                        try { Start-Process -FilePath $taskkill -ArgumentList @('/PID',[string]$processId,'/T','/F') -WindowStyle Hidden -Wait | Out-Null } catch {}
+                    }
+                    if (-not $script:GenState.Process.HasExited) { $script:GenState.Process.Kill() }
                     [void]$script:GenState.Process.WaitForExit(4000)
                 }
             } catch {}
@@ -1119,7 +1147,21 @@ $updateBtn.Add_Click({
         $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Offload=$autoOffload;Prompt=$generationPrompt}
         $generate.Enabled=$false;$cancel.Enabled=$true;$log.Clear();$fileList.Items.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
     })
-    $cancel.Add_Click({if($script:GenState.IsRunning){Stop-MossGen;$status.Text='Cancelling...';$generate.Enabled=$true;$cancel.Enabled=$false}})
+    $cancel.Add_Click({
+        if ($script:GenState.IsRunning) {
+            $cancel.Enabled = $false
+            $generate.Enabled = $false
+            $status.Text = 'Cancelling generation...'
+            $log.AppendText("`r`nCancellation requested. Stopping the engine and any child processes...")
+            $f.Refresh()
+            Stop-MossGen
+            $generate.Enabled = $true
+            $cancel.Enabled = $false
+            $elapsedText = if ($script:GenState.JobStartedAt) { Format-MossDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds } else { '0:00' }
+            $status.Text = "Generation cancelled | total elapsed $elapsedText"
+            $log.AppendText("`r`nGeneration cancelled. No further images will be started.")
+        }
+    })
     $openOut.Add_Click({$folder=Get-AbsoluteAppPath $out.Text;if(Test-Path -LiteralPath $folder){Start-Process explorer.exe -ArgumentList (Quote-ProcessArgument $folder)}})
     $f.Add_FormClosing({if($script:GenState.IsRunning){Stop-MossGen}})
     [void]$f.ShowDialog()
