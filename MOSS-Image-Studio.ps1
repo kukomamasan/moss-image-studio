@@ -16,6 +16,7 @@ $script:HistoryPasswordVerifier = $null
 $script:HistoryEnabled = $true
 $script:AdultAccessVerifier = $null
 $script:AdultPassphrase = $null
+$script:AdultCodeSetup = 'Undecided'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -60,6 +61,14 @@ function Show-MossHistorySetupChoice {
     $items=@(@('Create a history code','create'),@('Continue without history','skip'),@('Turn off prompt history','disable'))
     $positions=@(@(18,72),@(175,72),@(332,72))
     for($i=0;$i -lt $items.Count;$i++) { $b=New-Object System.Windows.Forms.Button; $b.Text=$items[$i][0]; $b.Location=New-Object System.Drawing.Point($positions[$i][0],$positions[$i][1]); $b.Size=New-Object System.Drawing.Size(145,45); $choiceTag=[string]$items[$i][1]; $b.Add_Click({$f.Tag=$choiceTag;$f.Close()}.GetNewClosure()); $f.Controls.Add($b) }
+    try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
+}
+
+function Show-MossAdminCodeSetupChoice {
+    $f=New-Object System.Windows.Forms.Form; $f.Text='Administrator code'; $f.Size=New-Object System.Drawing.Size(540,220); $f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'; $f.MaximizeBox=$false; $f.MinimizeBox=$false; $f.Topmost=$true
+    $label=New-Object System.Windows.Forms.Label; $label.Text='No administrator code is set. You can create one now, or continue without using an administrator code.'; $label.Location=New-Object System.Drawing.Point(18,18); $label.Size=New-Object System.Drawing.Size(490,48); $f.Controls.Add($label)
+    $create=New-Object System.Windows.Forms.Button; $create.Text='Create a code'; $create.Location=New-Object System.Drawing.Point(72,98); $create.Size=New-Object System.Drawing.Size(170,44); $create.Add_Click({$f.Tag='create';$f.Close()}.GetNewClosure()); $f.Controls.Add($create)
+    $skip=New-Object System.Windows.Forms.Button; $skip.Text='Continue without a code'; $skip.Location=New-Object System.Drawing.Point(270,98); $skip.Size=New-Object System.Drawing.Size(190,44); $skip.Add_Click({$f.Tag='skip';$f.Close()}.GetNewClosure()); $f.Controls.Add($skip)
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
 }
 
@@ -120,20 +129,28 @@ function Disable-MossHistory {
 }
 
 function Confirm-MossAdminAccess {
-    if(-not $script:AdultAccessVerifier){
-        $code=Get-MossHistoryPassphrase $true 'administrator access'
-        if(-not $code){return $false}
-        $script:AdultAccessVerifier=Protect-MossPayload 'MOSS-ADULT-ACCESS-CHECK-V1' $code
-        $script:AdultPassphrase=$code
-        [void](Save-Settings)
-    } else {
+    if($script:AdultAccessVerifier){
         while($true){
             $code=Get-MossHistoryPassphrase $false 'administrator access'
             if(-not $code){return $false}
             if(Test-MossHistoryPassphrase $code $script:AdultAccessVerifier){$script:AdultPassphrase=$code;break}
-            [System.Windows.Forms.MessageBox]::Show('Administrator code was not accepted. Try again.','Access denied')|Out-Null
+            [System.Windows.Forms.MessageBox]::Show('The administrator code is incorrect. Enter the code that was set earlier, or cancel to close MOSS.','Access denied')|Out-Null
         }
+        return $true
     }
+    if($script:AdultCodeSetup -eq 'Skipped'){return $true}
+    $choice=Show-MossAdminCodeSetupChoice
+    if($choice -eq 'create'){
+        $code=Get-MossHistoryPassphrase $true 'administrator access'
+        if(-not $code){return $false}
+        $script:AdultAccessVerifier=Protect-MossPayload 'MOSS-ADULT-ACCESS-CHECK-V1' $code
+        $script:AdultPassphrase=$code
+        $script:AdultCodeSetup='Enabled'
+        [void](Save-Settings)
+        return $true
+    }
+    $script:AdultCodeSetup='Skipped'
+    [void](Save-Settings)
     return $true
 }
 
@@ -146,6 +163,7 @@ function Load-Settings([switch]$UnlockHistory) {
             }
             if ($saved.HistoryPasswordVerifier) { $script:HistoryPasswordVerifier=[string]$saved.HistoryPasswordVerifier }
             if ($saved.AdultAccessVerifier) { $script:AdultAccessVerifier=[string]$saved.AdultAccessVerifier }
+            if ($saved.AdultCodeSetup) { $script:AdultCodeSetup=[string]$saved.AdultCodeSetup }
             if ($saved.PSObject.Properties.Name -contains 'PromptHistoryEnabled') { $script:HistoryEnabled=[bool]$saved.PromptHistoryEnabled }
             $script:HistoryStoredEnvelope=[string]$saved.PromptHistoryProtected
             if ($script:HistoryEnabled -and $saved.PromptHistoryProtected) {
@@ -189,6 +207,7 @@ function Save-Settings {
     foreach ($key in $script:Settings.Keys) { if ($key -ne 'PromptHistory') { $persist[$key] = $script:Settings[$key] } }
     $persist.PromptHistoryEnabled=[bool]$script:HistoryEnabled
     $persist.AdultAccessVerifier=$script:AdultAccessVerifier
+    $persist.AdultCodeSetup=$script:AdultCodeSetup
     $history = @($script:Settings.PromptHistory)
     if (-not $script:HistoryEnabled) {
         # Disabled means no prompt history or password verifier is persisted.
