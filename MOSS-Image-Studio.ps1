@@ -599,7 +599,7 @@ $updateBtn.Add_Click({
     $historyPick=New-Object System.Windows.Forms.ComboBox; $historyPick.DropDownStyle='DropDownList'; $historyPick.Location=New-Object System.Drawing.Point(315,9); $historyPick.Size=New-Object System.Drawing.Size(200,27); $historyPick.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $historyPick.ForeColor=$cText; $left.Controls.Add($historyPick)
     $resetHistoryCode=Add-Button $left 'Reset history code' 525 8 155 28
     $resetHistoryCode.Add_Click({ if(Reset-MossHistoryPassword){$history=@();$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('New history code saved. The old history was cleared.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
-    `$resetHistoryCode.Enabled=$true
+    $resetHistoryCode.Enabled=$true
     foreach($oldPrompt in @($history | Select-Object -First 10)){[void]$historyPick.Items.Add([string]$oldPrompt)}
     $paste=Add-Button $left 'Paste from clipboard' 525 9 155
     $paste.Enabled=$true
