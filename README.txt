@@ -2,7 +2,8 @@ MOSS Image Studio - portable build
 =================================
 Unpack this ZIP into your MOSS folder (for example E:\MOSS\) so that
 MOSS-Image-Studio.ps1 sits beside the bin\, models\, config\, and outputs\ folders.
-Run MOSS-Image-Studio.ps1 as usual.
+Run MOSS-Image-Studio.vbs to start MOSS without a command window. MOSS shows
+its current version in the application title and header.
 
 This build uses one administrator account. On first use, you can create an
 administrator code or continue without one. If a code has already been set,
@@ -21,10 +22,13 @@ Image generation
 - Images are saved under outputs\admin\.
 
 Updating MOSS
-- Select Update MOSS in the generator to open the private GitHub Releases page.
-- Download MOSS-Image-Studio.zip, close MOSS, and extract its app files over the
-  existing MOSS folder. Keep config\, models\, and outputs\ unchanged.
-- The app's updater source is the private repository kukomamasan/moss-image-studio.
+- Select Check updates in the generator. MOSS checks the latest GitHub release
+  and reports whether this version is current or a newer release is available.
+- If an update is available, choose Yes to download it. MOSS asks before changing
+  local files, closes, replaces only the app files, preserves config\, models\,
+  and outputs\, and restarts.
+- The repository and release assets must be publicly readable for the automatic updater to work. If MOSS
+  cannot read the release feed, it offers to open the Releases page instead.
 
 Privacy and portability
 - The administrator code is optional and is separate from the prompt-history code.
