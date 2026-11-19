@@ -2,8 +2,9 @@ MOSS Image Studio - portable build
 =================================
 Unpack this ZIP into your MOSS folder (for example E:\MOSS\) so that
 MOSS-Image-Studio.ps1 sits beside the bin\, models\, config\, and outputs\ folders.
-Run MOSS-Image-Studio.vbs to start MOSS without a command window. MOSS shows
-its current version in the application title and header.
+Run MOSS-Image-Studio.bat to close the first launcher window after startup.
+The MOSS application window stays visible and shows its current version in the
+title and header.
 
 This build uses one administrator account. On first use, you can create an
 administrator code or continue without one. If a code has already been set,
