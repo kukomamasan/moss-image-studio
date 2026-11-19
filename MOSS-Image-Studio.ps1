@@ -567,6 +567,15 @@ function Show-GeneratorWindow {
         Steps = 25; CfgScale = 3.0; Width = 1360; Height = 768; ImageCount = 1; Seed = -1
     }
     foreach ($key in $defaults.Keys) { if (-not $script:Settings.Contains($key) -or [string]::IsNullOrWhiteSpace([string]$script:Settings[$key])) { $script:Settings[$key] = $defaults[$key] } }
+    # Resolve saved model paths against the portable app folder. If an old
+    # absolute path no longer exists, reuse the matching file in this app's models folder.
+    foreach ($key in @('DiffusionModelPath','LlmPath','VaePath','TokenizerPath')) {
+        $savedPath = Get-AbsoluteAppPath ([string]$script:Settings[$key])
+        if (-not (Test-Path -LiteralPath $savedPath -PathType Leaf)) {
+            $portablePath = Join-Path (Join-Path $script:AppRoot 'models') ([System.IO.Path]::GetFileName([string]$script:Settings[$key]))
+            if (Test-Path -LiteralPath $portablePath -PathType Leaf) { $script:Settings[$key] = Get-RelativeAppPath $portablePath }
+        }
+    }
     $history = @()
     if ($script:HistoryEnabled -and -not $script:HistoryLocked -and $script:Settings.PromptHistory) { $history = @($script:Settings.PromptHistory) }
     $script:GeneratedFiles = New-Object System.Collections.ArrayList
@@ -639,10 +648,10 @@ $updateBtn.Add_Click({
     $yy=466
     foreach($mr in $modelRows){
         Add-Label $left $mr[0] 18 ($yy+3) 105 | Out-Null
-        $val=[string]$script:Settings[$mr[1]]; if([string]::IsNullOrWhiteSpace($val)){$val=Join-Path $script:AppRoot ('models\'+$mr[2])}
+        $val=[string]$script:Settings[$mr[1]]; if([string]::IsNullOrWhiteSpace($val)){$val=Join-Path $script:AppRoot ('models\'+$mr[2])} else {$val=Get-AbsoluteAppPath $val}
         $tb=Add-TextBox $left $val 125 $yy 445; $tb.Anchor='Top,Left,Right'
         $br=Add-Button $left '...' 580 ($yy-1) 100; $br.Anchor='Top,Right'
-        $key=$mr[1]; $br.Add_Click({$dlg=New-Object System.Windows.Forms.OpenFileDialog;$dlg.Title="Select $($mr[0]) file";$dlg.Filter='Model and data files|*.safetensors;*.gguf;*.json|All files (*.*)|*.*';$dlg.CheckFileExists=$true;$cur=$tb.Text;if(Test-Path -LiteralPath $cur){$dlg.InitialDirectory=Split-Path -Parent $cur;$dlg.FileName=Split-Path -Leaf $cur};if($dlg.ShowDialog($f) -eq 'OK'){$tb.Text=$dlg.FileName};$dlg.Dispose()}.GetNewClosure())
+        $key=$mr[1]; $br.Add_Click({$dlg=New-Object System.Windows.Forms.OpenFileDialog;$dlg.Title="Select $($mr[0]) file";$dlg.Filter='Model and data files|*.safetensors;*.gguf;*.json|All files (*.*)|*.*';$dlg.CheckFileExists=$true;$cur=Get-AbsoluteAppPath $tb.Text;if(Test-Path -LiteralPath $cur -PathType Leaf){$dlg.InitialDirectory=Split-Path -Parent $cur;$dlg.FileName=Split-Path -Leaf $cur}else{$modelsDir=Join-Path $script:AppRoot 'models';if(Test-Path -LiteralPath $modelsDir -PathType Container){$dlg.InitialDirectory=$modelsDir}};if($dlg.ShowDialog($f) -eq 'OK'){$tb.Text=$dlg.FileName};$dlg.Dispose()}.GetNewClosure())
         $modelControls[$key]=$tb; $yy+=34
     }
 
