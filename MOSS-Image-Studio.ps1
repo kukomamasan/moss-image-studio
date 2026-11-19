@@ -8,7 +8,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 $script:AppVersion = '0.1.12'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
-$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic' }
+$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
 $script:HistoryPassphrase = $null
 $script:HistoryLocked = $false
 $script:LockedHistoryEnvelope = $null
@@ -47,7 +47,6 @@ function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history') {
     if ($Create) { $confirmLabel=New-Object System.Windows.Forms.Label; $confirmLabel.Text='Confirm password'; $confirmLabel.Location=New-Object System.Drawing.Point(18,91); $confirmLabel.Size=New-Object System.Drawing.Size(150,18); $dialog.Controls.Add($confirmLabel); $confirm = New-Object System.Windows.Forms.TextBox; $confirm.Location=New-Object System.Drawing.Point(18,111); $confirm.Size=New-Object System.Drawing.Size(385,25); $confirm.UseSystemPasswordChar=$true; $dialog.Controls.Add($confirm) }
     $ok=New-Object System.Windows.Forms.Button; $ok.Text='Continue'; $ok.Location=New-Object System.Drawing.Point(218,145); $ok.DialogResult=[System.Windows.Forms.DialogResult]::OK; $dialog.Controls.Add($ok)
     $cancel=New-Object System.Windows.Forms.Button; $cancel.Text='Cancel'; $cancel.Location=New-Object System.Drawing.Point(308,145); $cancel.DialogResult=[System.Windows.Forms.DialogResult]::Cancel; $dialog.Controls.Add($cancel); $dialog.AcceptButton=$ok; $dialog.CancelButton=$cancel
-    $dialog.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     try {
         while ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             $maxLength = if ($Create) { 16 } else { 64 }
@@ -69,7 +68,6 @@ function Show-MossHistoryRecoveryChoice {
     $items=@(@('Try again','retry'),@('Continue without history','skip'),@('Set a new code','reset'),@('Turn off prompt history','disable'))
     $positions=@(@(18,70),@(258,70),@(18,125),@(258,125))
     for($i=0;$i -lt $items.Count;$i++) { $b=New-Object System.Windows.Forms.Button; $b.Text=$items[$i][0]; $b.Location=New-Object System.Drawing.Point($positions[$i][0],$positions[$i][1]); $b.Size=New-Object System.Drawing.Size(220,38); $choiceTag=[string]$items[$i][1]; $b.Add_Click({$f.Tag=$choiceTag;$f.Close()}.GetNewClosure()); $f.Controls.Add($b) }
-    $f.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
 }
 
@@ -79,7 +77,6 @@ function Show-MossHistorySetupChoice {
     $items=@(@('Create a history code','create'),@('Continue without history','skip'),@('Turn off prompt history','disable'))
     $positions=@(@(18,72),@(175,72),@(332,72))
     for($i=0;$i -lt $items.Count;$i++) { $b=New-Object System.Windows.Forms.Button; $b.Text=$items[$i][0]; $b.Location=New-Object System.Drawing.Point($positions[$i][0],$positions[$i][1]); $b.Size=New-Object System.Drawing.Size(145,45); $choiceTag=[string]$items[$i][1]; $b.Add_Click({$f.Tag=$choiceTag;$f.Close()}.GetNewClosure()); $f.Controls.Add($b) }
-    $f.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
 }
 
@@ -88,7 +85,6 @@ function Show-MossAdminCodeSetupChoice {
     $label=New-Object System.Windows.Forms.Label; $label.Text='No administrator code is set. You can create one now, or continue without using an administrator code.'; $label.Location=New-Object System.Drawing.Point(18,18); $label.Size=New-Object System.Drawing.Size(490,48); $f.Controls.Add($label)
     $create=New-Object System.Windows.Forms.Button; $create.Text='Create a code'; $create.Location=New-Object System.Drawing.Point(72,98); $create.Size=New-Object System.Drawing.Size(170,44); $create.Add_Click({$f.Tag='create';$f.Close()}.GetNewClosure()); $f.Controls.Add($create)
     $skip=New-Object System.Windows.Forms.Button; $skip.Text='Continue without a code'; $skip.Location=New-Object System.Drawing.Point(270,98); $skip.Size=New-Object System.Drawing.Size(190,44); $skip.Add_Click({$f.Tag='skip';$f.Close()}.GetNewClosure()); $f.Controls.Add($skip)
-    $f.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
 }
 
@@ -97,7 +93,6 @@ function Show-MossAdminCodeRecoveryChoice {
     $label=New-Object System.Windows.Forms.Label; $label.Text='The administrator code was not accepted. Try entering it again, or remove the administrator code and continue without code protection.'; $label.Location=New-Object System.Drawing.Point(18,18); $label.Size=New-Object System.Drawing.Size(490,52); $f.Controls.Add($label)
     $retry=New-Object System.Windows.Forms.Button; $retry.Text='Try again'; $retry.Location=New-Object System.Drawing.Point(82,100); $retry.Size=New-Object System.Drawing.Size(160,44); $retry.Add_Click({$f.Tag='retry';$f.Close()}.GetNewClosure()); $f.Controls.Add($retry)
     $skip=New-Object System.Windows.Forms.Button; $skip.Text='Continue without code'; $skip.Location=New-Object System.Drawing.Point(270,100); $skip.Size=New-Object System.Drawing.Size(190,44); $skip.Add_Click({$f.Tag='skip';$f.Close()}.GetNewClosure()); $f.Controls.Add($skip)
-    $f.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'retry' } finally { $f.Dispose() }
 }
 
@@ -331,8 +326,8 @@ $script:RecommendedBackend = Get-BackendRecommendation $script:Inventory
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "MOSS Image Studio v$($script:AppVersion) | Hardware Setup"
-$form.Size = New-Object System.Drawing.Size(900,650)
-$form.MinimumSize = New-Object System.Drawing.Size(760,560)
+$form.Size = New-Object System.Drawing.Size(900,700)
+$form.MinimumSize = New-Object System.Drawing.Size(780,660)
 $form.StartPosition = 'CenterScreen'
 $form.BackColor = [System.Drawing.Color]::FromArgb(18,22,31)
 $form.ForeColor = [System.Drawing.Color]::FromArgb(230,236,245)
@@ -388,9 +383,27 @@ $backend.SelectedIndex = [Math]::Max(0, $backend.Items.IndexOf($selected))
 # Add the selector to the form (previous build populated it but never displayed it).
 $form.Controls.Add($backend)
 
-$engineLabel=New-Object System.Windows.Forms.Label; $engineLabel.Text='Engine executable:'; $engineLabel.Location=New-Object System.Drawing.Point(24,496); $engineLabel.AutoSize=$true; $form.Controls.Add($engineLabel)
-$engine=New-Object System.Windows.Forms.TextBox; $engine.Location=New-Object System.Drawing.Point(145,492); $engine.Size=New-Object System.Drawing.Size(590,26); $engine.Anchor='Top,Left,Right'; $engine.Text=[string]$script:Settings.EnginePath; $form.Controls.Add($engine)
-$browse=New-Object System.Windows.Forms.Button; $browse.Text='Browse...'; $browse.Location=New-Object System.Drawing.Point(746,490); $browse.Size=New-Object System.Drawing.Size(114,30); $browse.Anchor='Top,Right'; $form.Controls.Add($browse)
+# Multi-GPU support: let the user pick a physical card. Virtual display adapters
+# are never offered as generation hardware.
+$gpuLabel=New-Object System.Windows.Forms.Label; $gpuLabel.Text='Select GPU (for multi-GPU computers):'; $gpuLabel.Location=New-Object System.Drawing.Point(24,496); $gpuLabel.AutoSize=$true; $form.Controls.Add($gpuLabel)
+$gpu=New-Object System.Windows.Forms.ComboBox
+$gpu.DropDownStyle=[System.Windows.Forms.ComboBoxStyle]::DropDownList
+$gpu.Location=New-Object System.Drawing.Point(365,492)
+$gpu.Size=New-Object System.Drawing.Size(285,30)
+$gpu.DropDownWidth=320
+$gpu.IntegralHeight=$true
+[void]$gpu.Items.Add('All compatible GPUs (automatic)')
+$physGpuCount=0
+foreach($g in $script:Inventory){ if(-not $g.IsVirtual){ [void]$gpu.Items.Add(('{0}: {1}' -f $physGpuCount,$g.Name)); $physGpuCount++ } }
+$savedGpu=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $savedGpu=[int]$script:Settings.PreferredGpuIndex } catch { $savedGpu=-1 } }
+$gpuSelectedIndex=0
+for($gi=0;$gi -lt $gpu.Items.Count;$gi++){ if($savedGpu -ge 0 -and ([string]$gpu.Items[$gi]) -match ('^'+$savedGpu+'\s*:')){ $gpuSelectedIndex=$gi;break} }
+$gpu.SelectedIndex=$gpuSelectedIndex
+$form.Controls.Add($gpu)
+
+$engineLabel=New-Object System.Windows.Forms.Label; $engineLabel.Text='Engine executable:'; $engineLabel.Location=New-Object System.Drawing.Point(24,536); $engineLabel.AutoSize=$true; $form.Controls.Add($engineLabel)
+$engine=New-Object System.Windows.Forms.TextBox; $engine.Location=New-Object System.Drawing.Point(145,532); $engine.Size=New-Object System.Drawing.Size(590,26); $engine.Anchor='Top,Left,Right'; $engine.Text=[string]$script:Settings.EnginePath; $form.Controls.Add($engine)
+$browse=New-Object System.Windows.Forms.Button; $browse.Text='Browse...'; $browse.Location=New-Object System.Drawing.Point(746,530); $browse.Size=New-Object System.Drawing.Size(114,30); $browse.Anchor='Top,Right'; $form.Controls.Add($browse)
 $browse.Add_Click({
     $d = New-Object System.Windows.Forms.OpenFileDialog
     $d.Filter = 'MOSS engine (sd-cli.exe)|sd-cli.exe|Executable files (*.exe)|*.exe|All files (*.*)|*.*'
@@ -433,14 +446,14 @@ $browse.Add_Click({
     $d.Dispose()
 })
 
-$note=New-Object System.Windows.Forms.Label; $note.Location=New-Object System.Drawing.Point(24,535); $note.Size=New-Object System.Drawing.Size(830,36); $note.ForeColor=[System.Drawing.Color]::FromArgb(150,166,190)
-$note.Text='Note: Windows display enumeration cannot prove CUDA / ROCm / SYCL support. The selected sd-cli.exe must be compiled for the chosen backend.'; $form.Controls.Add($note)
+$note=New-Object System.Windows.Forms.Label; $note.Location=New-Object System.Drawing.Point(24,572); $note.Size=New-Object System.Drawing.Size(830,30); $note.ForeColor=[System.Drawing.Color]::FromArgb(150,166,190)
+$note.Text='Note: display enumeration cannot prove CUDA / ROCm / SYCL support. The selected sd-cli.exe must be compiled for the chosen backend.'; $form.Controls.Add($note)
 
-$refresh=New-Object System.Windows.Forms.Button; $refresh.Text='Rescan hardware'; $refresh.Location=New-Object System.Drawing.Point(24,580); $refresh.Size=New-Object System.Drawing.Size(130,32); $refresh.Anchor='Bottom,Left'; $form.Controls.Add($refresh)
-$setupHistoryCode=New-Object System.Windows.Forms.Button; $setupHistoryCode.Text='Set / reset history code'; $setupHistoryCode.Location=New-Object System.Drawing.Point(350,580); $setupHistoryCode.Size=New-Object System.Drawing.Size(190,32); $setupHistoryCode.Anchor='Bottom,Left'; $form.Controls.Add($setupHistoryCode)
+$refresh=New-Object System.Windows.Forms.Button; $refresh.Text='Rescan hardware'; $refresh.Location=New-Object System.Drawing.Point(24,612); $refresh.Size=New-Object System.Drawing.Size(130,32); $refresh.Anchor='Bottom,Left'; $form.Controls.Add($refresh)
+$setupHistoryCode=New-Object System.Windows.Forms.Button; $setupHistoryCode.Text='Set / reset history code'; $setupHistoryCode.Location=New-Object System.Drawing.Point(350,612); $setupHistoryCode.Size=New-Object System.Drawing.Size(190,32); $setupHistoryCode.Anchor='Bottom,Left'; $form.Controls.Add($setupHistoryCode)
 $setupHistoryCode.Add_Click({ if(Reset-MossHistoryPassword){[System.Windows.Forms.MessageBox]::Show('New history code saved. No prompt history is stored yet.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
-$test=New-Object System.Windows.Forms.Button; $test.Text='Check backend support'; $test.Location=New-Object System.Drawing.Point(166,580); $test.Size=New-Object System.Drawing.Size(170,32); $test.Anchor='Bottom,Left'; $form.Controls.Add($test)
-$save=New-Object System.Windows.Forms.Button; $save.Text='Save setup'; $save.Location=New-Object System.Drawing.Point(720,580); $save.Size=New-Object System.Drawing.Size(140,32); $save.Anchor='Bottom,Right'; $save.BackColor=[System.Drawing.Color]::FromArgb(45,112,173); $save.ForeColor=[System.Drawing.Color]::White; $save.FlatStyle='Flat'; $form.Controls.Add($save)
+$test=New-Object System.Windows.Forms.Button; $test.Text='Check backend support'; $test.Location=New-Object System.Drawing.Point(166,612); $test.Size=New-Object System.Drawing.Size(170,32); $test.Anchor='Bottom,Left'; $form.Controls.Add($test)
+$save=New-Object System.Windows.Forms.Button; $save.Text='Save setup'; $save.Location=New-Object System.Drawing.Point(720,612); $save.Size=New-Object System.Drawing.Size(140,32); $save.Anchor='Bottom,Right'; $save.BackColor=[System.Drawing.Color]::FromArgb(45,112,173); $save.ForeColor=[System.Drawing.Color]::White; $save.FlatStyle='Flat'; $form.Controls.Add($save)
 $refresh.Add_Click({ [System.Windows.Forms.MessageBox]::Show('Close and reopen MOSS Image Studio to perform a fresh hardware scan.','Hardware scan',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null; $form.Close() })
 $test.Add_Click({
     $choice = [string]$backend.SelectedItem
@@ -544,11 +557,17 @@ $save.Add_Click({
     }
     $script:Settings.Backend = switch ($choice) { 'CUDA (NVIDIA)' {'CUDA'} 'HIP/ROCm (AMD)' {'HIP/ROCm'} 'SYCL (Intel)' {'SYCL'} 'CPU only' {'CPU'} 'Manual / virtual GPU' {'Manual'} default {$choice} }
     $script:Settings.BackendSelectionSaved=$true
+    # Remember which physical GPU the user picked so generation can target it.
+    $gpuChoice=[string]$gpu.SelectedItem
+    $gpuIdx=-1; if($gpuChoice -match '^(\d+)\s*:'){ $gpuIdx=[int]$Matches[1] }
+    $script:Settings.PreferredGpuIndex=$gpuIdx
+    $script:Settings.PreferredGpuName= if($gpuIdx -ge 0){ ([string]$gpuChoice) -replace '^\d+\s*:\s*','' } else { '' }
     $script:Settings.EnginePath=$engine.Text.Trim()
     $script:Settings.HardwareSetupComplete=$true
     Save-Settings
     $savedBackend = [string]$script:Settings.Backend
-    $backendDisplay = "Backend: $savedBackend"
+    $gpuSavedText = if([int]$script:Settings.PreferredGpuIndex -ge 0){ "  |  GPU: $($script:Settings.PreferredGpuName)" } else { '  |  GPU: automatic' }
+    $backendDisplay = "Backend: $savedBackend$gpuSavedText"
     $msg="Settings saved to:`r`n$script:ConfigFile`r`n`r`n$backendDisplay`r`nEngine: $($script:Settings.EnginePath)"
     if (-not (Test-Path -LiteralPath $script:Settings.EnginePath)) { $msg += "`r`n`r`nWARNING: Engine executable not found at this path. You can browse to it later." }
     [System.Windows.Forms.MessageBox]::Show($msg,'MOSS setup saved',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
@@ -558,6 +577,17 @@ $save.Add_Click({
 $form.Add_Shown({ if (-not $script:Settings.HardwareSetupComplete) { [System.Windows.Forms.MessageBox]::Show('Welcome to MOSS Image Studio. Review the detected adapters and choose the backend that matches your engine build.','First-run setup',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null } })
 
 # ---------------- IMAGE GENERATOR ----------------
+function Write-MossErrorLog([string]$Title,[string]$Body) {
+    # Always keep a local copy, even if later uploading fails or the PC is offline.
+    try {
+        $logDir = Join-Path $script:AppRoot 'logs'
+        if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+        $file = Join-Path $logDir ('error-' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.txt')
+        ("$Title`r`n$Body") | Set-Content -LiteralPath $file -Encoding UTF8
+        return $file
+    } catch { return $null }
+}
+
 function Get-AbsoluteAppPath([string]$value) {
     if ([string]::IsNullOrWhiteSpace($value)) { return '' }
     if ([System.IO.Path]::IsPathRooted($value)) { return [System.IO.Path]::GetFullPath($value) }
@@ -608,9 +638,11 @@ function Show-GeneratorWindow {
 
     $head=New-Object System.Windows.Forms.Panel; $head.Dock='Top'; $head.Height=68; $head.BackColor=$cPanel; $f.Controls.Add($head)
     $ttl=New-Object System.Windows.Forms.Label; $ttl.Text="MOSS  /  IMAGE STUDIO  v$($script:AppVersion)"; $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',17,[System.Drawing.FontStyle]::Bold); $ttl.AutoSize=$true; $ttl.Location=New-Object System.Drawing.Point(20,9); $head.Controls.Add($ttl)
-    $subt=New-Object System.Windows.Forms.Label; $subt.Text='LOCAL IMAGE GENERATION  -  RTX / CPU'; $subt.ForeColor=$cMuted; $subt.AutoSize=$true; $subt.Location=New-Object System.Drawing.Point(23,42); $head.Controls.Add($subt)
+    $subt=New-Object System.Windows.Forms.Label; $subt.Text='LOCAL IMAGE GENERATION'; $subt.ForeColor=$cMuted; $subt.AutoSize=$true; $subt.Location=New-Object System.Drawing.Point(23,42); $head.Controls.Add($subt)
     $backendText=[string]$script:Settings.Backend; if (-not $script:Settings.BackendSelectionSaved) { $backendText='Not configured' }
-    $backendBadge=New-Object System.Windows.Forms.Label; $backendBadge.Text="BACKEND  $backendText"; $backendBadge.AutoSize=$true; $backendBadge.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $backendBadge.Location=New-Object System.Drawing.Point(710,25); $backendBadge.Anchor='Top,Right'; $head.Controls.Add($backendBadge)
+    $gpuBadge=''
+    if($script:Settings.Contains('PreferredGpuIndex') -and [int]$script:Settings.PreferredGpuIndex -ge 0){ $gpuBadge="  |  GPU $($script:Settings.PreferredGpuName)" }
+    $backendBadge=New-Object System.Windows.Forms.Label; $backendBadge.Text="BACKEND  $backendText$gpuBadge"; $backendBadge.AutoSize=$true; $backendBadge.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $backendBadge.Location=New-Object System.Drawing.Point(640,25); $backendBadge.Anchor='Top,Right'; $head.Controls.Add($backendBadge)
     $setupBtn=New-Object System.Windows.Forms.Button; $setupBtn.Text='Hardware / Setup'; $setupBtn.Size=New-Object System.Drawing.Size(130,30); $setupBtn.Location=New-Object System.Drawing.Point(1025,18); $setupBtn.Anchor='Top,Right'; $setupBtn.FlatStyle='Flat'; $setupBtn.BackColor=$cAccent; $setupBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($setupBtn)
     $setupBtn.Add_Click({ $f.Tag='SETUP'; $f.Close() })
 $updateBtn=New-Object System.Windows.Forms.Button; $updateBtn.Text='Check updates'; $updateBtn.Size=New-Object System.Drawing.Size(130,30); $updateBtn.Location=New-Object System.Drawing.Point(880,18); $updateBtn.Anchor='Top,Right'; $updateBtn.FlatStyle='Flat'; $updateBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $updateBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($updateBtn)
@@ -692,16 +724,16 @@ try {
     function Add-Button($parent,[string]$text,[int]$x,[int]$y,[int]$w,[int]$h=29) { $b=New-Object System.Windows.Forms.Button; $b.Text=$text; $b.Location=New-Object System.Drawing.Point($x,$y); $b.Size=New-Object System.Drawing.Size($w,$h); $b.FlatStyle='Flat'; $b.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $b.ForeColor=$cText; $parent.Controls.Add($b); return $b }
 
     Add-Label $left 'PROMPT' 18 14 180 | Out-Null
-    $historyPick=New-Object System.Windows.Forms.ComboBox; $historyPick.DropDownStyle='DropDownList'; $historyPick.Location=New-Object System.Drawing.Point(315,9); $historyPick.Size=New-Object System.Drawing.Size(200,27); $historyPick.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $historyPick.ForeColor=$cText; $left.Controls.Add($historyPick)
-    $resetHistoryCode=Add-Button $left 'Reset history code' 525 8 155 28
+    $historyPick=New-Object System.Windows.Forms.ComboBox; $historyPick.DropDownStyle='DropDownList'; $historyPick.Location=New-Object System.Drawing.Point(315,9); $historyPick.Size=New-Object System.Drawing.Size(150,27); $historyPick.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $historyPick.ForeColor=$cText; $left.Controls.Add($historyPick)
+    $resetHistoryCode=Add-Button $left 'History code...' 471 8 90 28
     $resetHistoryCode.Add_Click({ if(Reset-MossHistoryPassword){$history=@();$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('New history code saved. The old history was cleared.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
     $resetHistoryCode.Enabled=$true
     foreach($oldPrompt in @($history | Select-Object -First 10)){[void]$historyPick.Items.Add([string]$oldPrompt)}
-    $paste=Add-Button $left 'Paste from clipboard' 525 9 155
+    $paste=Add-Button $left 'Paste' 567 8 95 28
     $paste.Enabled=$true
     $prompt=New-Object System.Windows.Forms.TextBox; $prompt.Multiline=$true; $prompt.AcceptsReturn=$true; $prompt.AcceptsTab=$true; $prompt.ScrollBars='Vertical'; $prompt.Location=New-Object System.Drawing.Point(18,39); $prompt.Size=New-Object System.Drawing.Size(662,150); $prompt.Anchor='Top,Left,Right'; $prompt.Font=New-Object System.Drawing.Font('Segoe UI',10); $prompt.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $prompt.ForeColor=$cText; $prompt.BorderStyle='FixedSingle'; $left.Controls.Add($prompt)
     $prompt.ReadOnly=$false
-    $paste.Add_Click({ try { if ([System.Windows.Forms.Clipboard]::ContainsText()) { $prompt.Text=[System.Windows.Forms.Clipboard]::GetText() } } catch { [System.Windows.Forms.MessageBox]::Show('Clipboard text could not be read.','Clipboard') | Out-Null } })
+    $paste.Add_Click({ try { if ([System.Windows.Forms.Clipboard]::ContainsText()) { $clipText=[System.Windows.Forms.Clipboard]::GetText(); $prompt.Text=$clipText; $status.Text=('Pasted {0} characters from clipboard.' -f $clipText.Length) } else { $status.Text='The clipboard does not contain any text.' } } catch { [System.Windows.Forms.MessageBox]::Show('Clipboard text could not be read.','Clipboard') | Out-Null } })
     $historyPick.Add_SelectedIndexChanged({if($historyPick.SelectedIndex -ge 0){$prompt.Text=[string]$historyPick.SelectedItem}})
 
     Add-Label $left 'IMAGE SETTINGS' 18 202 160 | Out-Null
@@ -942,6 +974,25 @@ try {
                 $report | Set-Content -LiteralPath $reportFile -Encoding UTF8
                 $status.Text = "Error report copied + saved to logs\\$(Split-Path -Leaf $reportFile)"
             } catch {}
+            # Optional, consent-gated diagnostic upload. Nothing is sent without an
+            # explicit Yes from the user, and a local copy always exists first.
+            try {
+                $uploadUrl = [string]$script:Settings.ErrorReportUrl
+                $answer = [System.Windows.Forms.MessageBox]::Show('Upload this anonymous error report now for investigation? Technical details only; prompts and personal paths are omitted.','Send error report',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
+                if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+                    if ([string]::IsNullOrWhiteSpace($uploadUrl)) {
+                        [System.Windows.Forms.MessageBox]::Show('No upload address is configured in moss settings (ErrorReportUrl). The report stays on this computer in the logs folder.','Send error report',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                    } else {
+                        try {
+                            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+                            Invoke-WebRequest -Uri $uploadUrl -Method Post -Body $report -ContentType 'text/plain' -UseBasicParsing -TimeoutSec 20 | Out-Null
+                            $status.Text = 'Error report uploaded. A local copy also remains in logs.'
+                        } catch {
+                            [System.Windows.Forms.MessageBox]::Show(('Upload failed ('+$_.Exception.Message+'). The local copy in logs is preserved; please try again when online.'),'Send error report',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                        }
+                    }
+                }
+            } catch {}
         } catch {
             [System.Windows.Forms.MessageBox]::Show(('Could not build/copy report: ' + $_.Exception.Message), 'Error report') | Out-Null
         }
@@ -1087,6 +1138,11 @@ try {
         $psi.CreateNoWindow = $true
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
+        # Target a specific physical GPU when the user selected one in setup.
+        if ($job.GpuIndex -ge 0) {
+            $deviceEnv = switch -Regex ([string]$job.Backend) { '^CUDA' { 'CUDA_VISIBLE_DEVICES'; break } '^HIP' { 'HIP_VISIBLE_DEVICES'; break } 'Vulkan' { 'GGML_VK_VISIBLE_DEVICES'; break } default { $null } }
+            if ($deviceEnv) { $psi.EnvironmentVariables[$deviceEnv] = [string]$job.GpuIndex }
+        }
 
         $proc = New-Object System.Diagnostics.Process
         $proc.StartInfo = $psi
@@ -1121,6 +1177,7 @@ try {
         } catch {
             $msg = "Failed to start engine: $($_.Exception.Message)"
             $log.AppendText("`r`n$msg")
+            [void](Write-MossErrorLog 'MOSS engine start failure' $msg)
             [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = -1; Seed = $thisSeed; Output = $msg })
             $st.Index++
             Start-MossNextImage
@@ -1190,8 +1247,10 @@ try {
         }
         if ($exitCode -ne 0) {
             $outputText = "ERROR: Engine process returned exit code $exitCode.`r`n" + $outputText
+            [void](Write-MossErrorLog ("MOSS generation error - image {0} of {1} (exit {2})" -f ($i + 1), $job.Count, $exitCode) $outputText)
         } elseif (-not (Test-Path -LiteralPath $file)) {
             $outputText = "ERROR: Engine returned exit code 0 but the expected image file was not created: $file`r`n" + $outputText
+            [void](Write-MossErrorLog ("MOSS generation error - missing output image {0} of {1}" -f ($i + 1), $job.Count) $outputText)
         }
 
         [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = $exitCode; Seed = $thisSeed; Output = $outputText })
@@ -1238,7 +1297,9 @@ try {
     # --- end Timer + Process worker ---
 
     $generate.Add_Click({
-        $p=$prompt.Text.Trim(); if(-not $p){[System.Windows.Forms.MessageBox]::Show('Enter an image prompt first.','Prompt required')|Out-Null;return}
+        # Prompts are sent to the engine as a single line; pasted multi-line text is
+        # flattened so no characters are lost or misinterpreted in process arguments.
+        $p=($prompt.Text -replace "(\r?\n)+",' ').Trim(); if(-not $p){[System.Windows.Forms.MessageBox]::Show('Enter an image prompt first.','Prompt required')|Out-Null;return}
         $enginePath=Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)
         $paths=@($enginePath,(Get-AbsoluteAppPath $modelControls.DiffusionModelPath.Text),(Get-AbsoluteAppPath $modelControls.LlmPath.Text),(Get-AbsoluteAppPath $modelControls.VaePath.Text),(Get-AbsoluteAppPath $modelControls.TokenizerPath.Text))
         foreach($path in $paths){if(-not(Test-Path -LiteralPath $path -PathType Leaf)){[System.Windows.Forms.MessageBox]::Show("Required file not found:`r`n$path`r`n`r`nCheck Hardware / Setup or the model file paths.",'Missing file',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null;return}}
@@ -1252,7 +1313,8 @@ try {
         $stylePrefix=switch([string]$style.SelectedItem){'Photorealistic'{'photorealistic, lifelike, realistic textures, natural lighting'}'Anime'{'anime style, expressive line art, cel shading'}'Digital illustration'{'polished digital illustration'}'Oil painting'{'oil painting, rich brush strokes'}'Watercolor'{'watercolor painting, soft pigment texture'}'3D render'{'high quality 3D render, detailed materials'}'Comic book'{'comic book art, inked outlines, bold colors'}'Cinematic'{'cinematic composition, dramatic lighting'}default{''}}
         $generationPrompt=if($stylePrefix){"$stylePrefix, $p"}else{$p}
         $autoOffload = Get-MossAutoOffload ([string]$script:Settings.Backend)
-        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Offload=$autoOffload;Prompt=$generationPrompt}
+        $gpuIndex=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIndex=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIndex=-1 } }
+        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Offload=$autoOffload;Prompt=$generationPrompt;GpuIndex=$gpuIndex}
         $generate.Enabled=$false;$cancel.Enabled=$true;$log.Clear();$fileList.Items.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
     })
     $cancel.Add_Click({
@@ -1282,16 +1344,24 @@ try {
 }
 
 # Show setup on first run or when explicitly requested. Otherwise open the generator directly.
-if ($SetupOnly -or -not [bool]$script:Settings.HardwareSetupComplete) {
-    $form.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
-    [void]$form.ShowDialog()
-}
-if ((-not $SetupOnly -or $ReturnToGenerator) -and [bool]$script:Settings.HardwareSetupComplete) {
-    Load-Settings
-    if(-not (Confirm-MossAdminAccess)){return}
-    Load-Settings -UnlockHistory
-    if($script:HistoryLocked){[System.Windows.Forms.MessageBox]::Show('MOSS will continue without prompt history. The encrypted adult history is preserved.','History locked')|Out-Null}
-    Show-GeneratorWindow
+try {
+    if ($SetupOnly -or -not [bool]$script:Settings.HardwareSetupComplete) {
+        $form.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
+        [void]$form.ShowDialog()
+    }
+    if ((-not $SetupOnly -or $ReturnToGenerator) -and [bool]$script:Settings.HardwareSetupComplete) {
+        Load-Settings
+        if(-not (Confirm-MossAdminAccess)){return}
+        Load-Settings -UnlockHistory
+        if($script:HistoryLocked){[System.Windows.Forms.MessageBox]::Show('MOSS will continue without prompt history. The encrypted adult history is preserved.','History locked')|Out-Null}
+        Show-GeneratorWindow
+    }
+} catch {
+    # A startup error must never disappear silently (the console may already be hidden).
+    $errText = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`n$($_.Exception.GetType().FullName): $($_.Exception.Message)`r`n$($_.ScriptStackTrace)"
+    try { [void](Write-MossErrorLog 'MOSS startup error' $errText) } catch {}
+    try { [System.Windows.Forms.MessageBox]::Show(('MOSS Image Studio could not start.`r`n`r`n'+$_.Exception.Message+"`r`n`r`nA technical report was saved to the logs folder."),'MOSS Image Studio',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null } catch {}
+    exit 1
 }
 
 
