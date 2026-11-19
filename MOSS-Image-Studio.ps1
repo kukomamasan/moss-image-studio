@@ -633,7 +633,7 @@ $updateBtn.Add_Click({
     Add-Label $left 'CFG scale' 110 302 90 | Out-Null; $cfg=Add-TextBox $left ([string]$script:Settings.CfgScale) 110 325 75
     Add-Label $left 'Images' 202 302 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDownList'; $count.Location=New-Object System.Drawing.Point(202,325); $count.Size=New-Object System.Drawing.Size(75,26); foreach($n in @(1,2,4,8)){[void]$count.Items.Add([string]$n)}; $count.SelectedItem=[string]$script:Settings.ImageCount; if($count.SelectedIndex -lt 0){$count.SelectedIndex=0}; $left.Controls.Add($count)
     Add-Label $left 'Seed (-1 = random)' 300 302 150 | Out-Null; $seed=Add-TextBox $left ([string]$script:Settings.Seed) 300 325 90
-    $offload=New-Object System.Windows.Forms.CheckBox; $offload.Text='Offload to CPU (recommended for this setup)'; $offload.Checked=$true; $offload.Location=New-Object System.Drawing.Point(410,327); $offload.Size=New-Object System.Drawing.Size(270,24); $offload.ForeColor=$cText; $left.Controls.Add($offload)
+    $performance=New-Object System.Windows.Forms.Label; $performance.Text='Performance: Automatic'; $performance.Location=New-Object System.Drawing.Point(410,327); $performance.Size=New-Object System.Drawing.Size(270,24); $performance.ForeColor=$cMuted; $left.Controls.Add($performance)
     Add-Label $left 'ADMIN OUTPUT FOLDER' 18 372 190 | Out-Null
     $out=Add-TextBox $left ([string]$script:Settings.OutputPath) 18 397 540; $out.Anchor='Top,Left,Right'; $out.ReadOnly=$true; $outBrowse=Add-Button $left 'Browse...' 570 396 110; $outBrowse.Anchor='Top,Right'; $outBrowse.Enabled=$false
 
@@ -661,7 +661,6 @@ $updateBtn.Add_Click({
     $btnReport=Add-Button $left 'Copy Error Report' 490 615 150 42
     $btnReport.Add_Click({ Copy-MossErrorReport })
     $status=New-Object System.Windows.Forms.Label; $status.Text='Ready'; $status.Location=New-Object System.Drawing.Point(18,670); $status.Size=New-Object System.Drawing.Size(660,24); $status.ForeColor=$cMuted; $left.Controls.Add($status)
-    $progress=New-Object System.Windows.Forms.ProgressBar; $progress.Location=New-Object System.Drawing.Point(18,644); $progress.Size=New-Object System.Drawing.Size(662,16); $progress.Style='Continuous'; $left.Controls.Add($progress)
 
     Add-Label $right 'OUTPUT PREVIEW' 16 14 200 | Out-Null
     $preview=New-Object System.Windows.Forms.PictureBox; $preview.Location=New-Object System.Drawing.Point(16,42); $preview.Size=New-Object System.Drawing.Size(383,285); $preview.Anchor='Top,Left,Right'; $preview.SizeMode='Zoom'; $preview.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $right.Controls.Add($preview)
@@ -694,6 +693,7 @@ $updateBtn.Add_Click({
         ImageStartedAt = $null
         ImageDurations = New-Object System.Collections.ArrayList
         ImageProgress = 0
+        JobStartedAt = $null
     }
 
     function Stop-MossGen {
@@ -818,11 +818,48 @@ $updateBtn.Add_Click({
         return $span.ToString('m\:ss')
     }
 
+    function Get-MossAutoOffload([string]$Backend) {
+        # Prefer GPU-only execution for speed. CPU offload is enabled only when
+        # available VRAM is below the model's approximate 12 GB working set.
+        if ($Backend -eq 'CPU') { return $false }
+        $freeMb = $null
+        if ($Backend -eq 'CUDA') {
+            $smi = Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue
+            if (-not $smi) {
+                foreach ($candidate in @("$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe", "$env:WINDIR\System32\nvidia-smi.exe")) {
+                    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $smi = Get-Item -LiteralPath $candidate; break }
+                }
+            }
+            if ($smi) {
+                try {
+                    $smiPath = if ($smi.PSObject.Properties.Name -contains 'Source' -and $smi.Source) { $smi.Source } else { $smi.FullName }
+                    $reported = & $smiPath --query-gpu=memory.free --format=csv,noheader,nounits 2>$null | Select-Object -First 1
+                    $parsed = 0
+                    if ([int]::TryParse(([string]$reported).Trim(), [ref]$parsed)) { $freeMb = $parsed }
+                } catch {}
+            }
+        } else {
+            # Windows reports AdapterRAM as a 32-bit value. A value below 4 GB
+            # proves the adapter is too small; larger values may be truncated.
+            try {
+                $controllers = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -notmatch '(?i)virtual|indirect|remote|displaylink' })
+                $match = $null
+                if ($Backend -match 'AMD|HIP|Vulkan') { $match = $controllers | Where-Object { $_.Name -match '(?i)AMD|Radeon' } | Select-Object -First 1 }
+                elseif ($Backend -match 'SYCL|Intel') { $match = $controllers | Where-Object { $_.Name -match '(?i)Intel' } | Select-Object -First 1 }
+                if ($match -and [long]$match.AdapterRAM -gt 0 -and [long]$match.AdapterRAM -lt 4294967295) { $freeMb = [Math]::Max(0, [Math]::Floor([long]$match.AdapterRAM / 1MB) - 2048) }
+            } catch {}
+        }
+        if ($null -ne $freeMb) { return ([double]$freeMb -lt 12288) }
+        return $false
+    }
+
     function Update-MossLiveProgress {
         $st = $script:GenState
         if (-not $st.IsRunning -or $null -eq $st.Process -or $st.Process.HasExited) { return }
         $elapsed = 0.0
-        if ($st.ImageStartedAt) { $elapsed = [Math]::Max(0, ((Get-Date) - $st.ImageStartedAt).TotalSeconds) }
+        if ($st.JobStartedAt) { $elapsed = [Math]::Max(0, ((Get-Date) - $st.JobStartedAt).TotalSeconds) }
+        $imageElapsed = 0.0
+        if ($st.ImageStartedAt) { $imageElapsed = [Math]::Max(0, ((Get-Date) - $st.ImageStartedAt).TotalSeconds) }
         $stdoutNow = [string]$st.StdOut.ToString()
         $stderrNow = [string]$st.StdErr.ToString()
         $engineProgress = $null
@@ -841,26 +878,18 @@ $updateBtn.Add_Click({
         $job = $st.Job
         $overall = [int][Math]::Floor((($st.Index * 100) + [int]$st.ImageProgress) / [Math]::Max(1, [int]$job.Count))
         $overall = [Math]::Max(0, [Math]::Min(99, $overall))
-        if ($null -ne $engineProgress) {
-            $progress.Style = 'Continuous'
-            $progress.Value = $overall
-        } else {
-            $progress.Style = 'Marquee'
-            $progress.MarqueeAnimationSpeed = 28
-            $progress.Value = 0
-        }
         $etaText = 'ETA calculating'
         $remaining = $null
         if ($null -ne $engineProgress -and $engineProgress -gt 0) {
-            $imageTotalEstimate = $elapsed * 100.0 / $engineProgress
-            $remaining = ($imageTotalEstimate - $elapsed) + ([Math]::Max(0, $job.Count - $st.Index - 1) * $imageTotalEstimate)
+            $imageTotalEstimate = $imageElapsed * 100.0 / $engineProgress
+            $remaining = ($imageTotalEstimate - $imageElapsed) + ([Math]::Max(0, $job.Count - $st.Index - 1) * $imageTotalEstimate)
         } elseif ($st.ImageDurations.Count -gt 0) {
             $average = (($st.ImageDurations | Measure-Object -Average).Average)
-            $remaining = [Math]::Max(0, $average - $elapsed) + ([Math]::Max(0, $job.Count - $st.Index - 1) * $average)
+            $remaining = [Math]::Max(0, $average - $imageElapsed) + ([Math]::Max(0, $job.Count - $st.Index - 1) * $average)
         }
         if ($null -ne $remaining) { $etaText = "ETA ~$(Format-MossDuration $remaining)" }
-        $progressNote = if ($null -ne $engineProgress) { " · image $([int]$st.ImageProgress)%" } else { '' }
-        $status.Text = "Image $($st.Index + 1) of $($job.Count) · $overall% overall$progressNote · elapsed $(Format-MossDuration $elapsed) · $etaText"
+        $progressNote = if ($null -ne $engineProgress) { " | image $([int]$st.ImageProgress)%" } else { '' }
+        $status.Text = "Image $($st.Index + 1) of $($job.Count) | $overall% overall$progressNote | total elapsed $(Format-MossDuration $elapsed) | $etaText"
     }
 
 
@@ -870,9 +899,7 @@ $updateBtn.Add_Click({
         $generate.Enabled = $true
         $cancel.Enabled = $false
         if ($FinalStatus) { $status.Text = $FinalStatus }
-        $progress.Style = 'Continuous'
-        $progress.MarqueeAnimationSpeed = 0
-        $progress.Value = 100
+        if ($script:GenState.JobStartedAt) { $status.Text += " | total elapsed $(Format-MossDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds)" }
     }
 
     function Start-MossNextImage {
@@ -954,10 +981,7 @@ $updateBtn.Add_Click({
             $script:ActiveProcess = $proc
             $st.ImageStartedAt = Get-Date
             $st.ImageProgress = 0
-            $progress.Style = 'Marquee'
-            $progress.MarqueeAnimationSpeed = 28
             $status.Text = ("Starting image {0} of {1} (seed {2})..." -f ($i + 1), $job.Count, $thisSeed)
-            $progress.Value = [int](($i * 100) / [Math]::Max(1, $job.Count))
         } catch {
             $msg = "Failed to start engine: $($_.Exception.Message)"
             $log.AppendText("`r`n$msg")
@@ -1037,7 +1061,6 @@ $updateBtn.Add_Click({
         [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = $exitCode; Seed = $thisSeed; Output = $outputText })
 
         # UI update (we are on the GUI thread via Timer)
-        $progress.Value = [Math]::Max(0, [Math]::Min(100, [int]((($i + 1) * 100) / [Math]::Max(1, $job.Count))))
         $status.Text = "Image $($i + 1) of $($job.Count) finished (exit $exitCode)"
         $log.AppendText("`r`n--- Image $($i + 1) | seed $thisSeed | exit $exitCode ---`r`n$outputText`r`n")
         if ($exitCode -eq 0 -and (Test-Path -LiteralPath $file)) {
@@ -1060,6 +1083,7 @@ $updateBtn.Add_Click({
         $script:GenState.Results = New-Object System.Collections.ArrayList
         $script:GenState.Process = $null
         $script:GenState.CurrentFile = $null
+        $script:GenState.JobStartedAt = Get-Date
 
         $timer = New-Object System.Windows.Forms.Timer
         $timer.Interval = 400
@@ -1069,7 +1093,6 @@ $updateBtn.Add_Click({
 
         $generate.Enabled = $false
         $cancel.Enabled = $true
-        $progress.Value = 0
         $log.Clear()
         $fileList.Items.Clear()
         $status.Text = 'Starting engine...'
@@ -1092,8 +1115,9 @@ $updateBtn.Add_Click({
         if (-not $script:HistoryLocked) { $hist=@($p)+@($history|Where-Object{$_ -ne $p});$history=@($hist|Select-Object -First 20);$script:Settings.PromptHistory=$history } else { $script:Settings.PromptHistory=@() };if(-not (Save-Settings)){[System.Windows.Forms.MessageBox]::Show('Set a password to save private prompt history. Generation was not started.','Password required')|Out-Null;return};if (-not $script:HistoryLocked) { if($historyPick.Items.Count -eq 0 -or [string]$historyPick.Items[0] -ne $p){$historyPick.Items.Insert(0,$p)};while($historyPick.Items.Count -gt 10){$historyPick.Items.RemoveAt($historyPick.Items.Count-1)} }
         $stylePrefix=switch([string]$style.SelectedItem){'Photorealistic'{'photorealistic, lifelike, realistic textures, natural lighting'}'Anime'{'anime style, expressive line art, cel shading'}'Digital illustration'{'polished digital illustration'}'Oil painting'{'oil painting, rich brush strokes'}'Watercolor'{'watercolor painting, soft pigment texture'}'3D render'{'high quality 3D render, detailed materials'}'Comic book'{'comic book art, inked outlines, bold colors'}'Cinematic'{'cinematic composition, dramatic lighting'}default{''}}
         $generationPrompt=if($stylePrefix){"$stylePrefix, $p"}else{$p}
-        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Offload=$offload.Checked;Prompt=$generationPrompt}
-        $generate.Enabled=$false;$cancel.Enabled=$true;$progress.Value=0;$log.Clear();$fileList.Items.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
+        $autoOffload = Get-MossAutoOffload ([string]$script:Settings.Backend)
+        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Offload=$autoOffload;Prompt=$generationPrompt}
+        $generate.Enabled=$false;$cancel.Enabled=$true;$log.Clear();$fileList.Items.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
     })
     $cancel.Add_Click({if($script:GenState.IsRunning){Stop-MossGen;$status.Text='Cancelling...';$generate.Enabled=$true;$cancel.Enabled=$false}})
     $openOut.Add_Click({$folder=Get-AbsoluteAppPath $out.Text;if(Test-Path -LiteralPath $folder){Start-Process explorer.exe -ArgumentList (Quote-ProcessArgument $folder)}})
