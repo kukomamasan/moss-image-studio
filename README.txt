@@ -38,6 +38,10 @@ Privacy and portability
   history and portable settings.
 
 Other features
+- Cancel stops the active engine process and its child processes, then reports
+  that generation was cancelled.
+- Maximizing MOSS expands the image preview and hides the file list and log;
+  restoring the window brings them back.
 - Timer-based generation worker.
 - Copy Error Report button omits prompts for privacy and suggests asking an AI coding
   assistant such as ChatGPT or Grok to diagnose a script error.
