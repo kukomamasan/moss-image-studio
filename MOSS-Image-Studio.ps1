@@ -5,7 +5,7 @@ param([switch]$SetupOnly,[switch]$ReturnToGenerator)
 
 $ErrorActionPreference = 'Stop'
 $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$script:AppVersion = '0.1.11'
+$script:AppVersion = '0.1.12'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic' }
@@ -47,6 +47,7 @@ function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history') {
     if ($Create) { $confirmLabel=New-Object System.Windows.Forms.Label; $confirmLabel.Text='Confirm password'; $confirmLabel.Location=New-Object System.Drawing.Point(18,91); $confirmLabel.Size=New-Object System.Drawing.Size(150,18); $dialog.Controls.Add($confirmLabel); $confirm = New-Object System.Windows.Forms.TextBox; $confirm.Location=New-Object System.Drawing.Point(18,111); $confirm.Size=New-Object System.Drawing.Size(385,25); $confirm.UseSystemPasswordChar=$true; $dialog.Controls.Add($confirm) }
     $ok=New-Object System.Windows.Forms.Button; $ok.Text='Continue'; $ok.Location=New-Object System.Drawing.Point(218,145); $ok.DialogResult=[System.Windows.Forms.DialogResult]::OK; $dialog.Controls.Add($ok)
     $cancel=New-Object System.Windows.Forms.Button; $cancel.Text='Cancel'; $cancel.Location=New-Object System.Drawing.Point(308,145); $cancel.DialogResult=[System.Windows.Forms.DialogResult]::Cancel; $dialog.Controls.Add($cancel); $dialog.AcceptButton=$ok; $dialog.CancelButton=$cancel
+    $dialog.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     try {
         while ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             $maxLength = if ($Create) { 16 } else { 64 }
@@ -68,6 +69,7 @@ function Show-MossHistoryRecoveryChoice {
     $items=@(@('Try again','retry'),@('Continue without history','skip'),@('Set a new code','reset'),@('Turn off prompt history','disable'))
     $positions=@(@(18,70),@(258,70),@(18,125),@(258,125))
     for($i=0;$i -lt $items.Count;$i++) { $b=New-Object System.Windows.Forms.Button; $b.Text=$items[$i][0]; $b.Location=New-Object System.Drawing.Point($positions[$i][0],$positions[$i][1]); $b.Size=New-Object System.Drawing.Size(220,38); $choiceTag=[string]$items[$i][1]; $b.Add_Click({$f.Tag=$choiceTag;$f.Close()}.GetNewClosure()); $f.Controls.Add($b) }
+    $f.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
 }
 
@@ -77,6 +79,7 @@ function Show-MossHistorySetupChoice {
     $items=@(@('Create a history code','create'),@('Continue without history','skip'),@('Turn off prompt history','disable'))
     $positions=@(@(18,72),@(175,72),@(332,72))
     for($i=0;$i -lt $items.Count;$i++) { $b=New-Object System.Windows.Forms.Button; $b.Text=$items[$i][0]; $b.Location=New-Object System.Drawing.Point($positions[$i][0],$positions[$i][1]); $b.Size=New-Object System.Drawing.Size(145,45); $choiceTag=[string]$items[$i][1]; $b.Add_Click({$f.Tag=$choiceTag;$f.Close()}.GetNewClosure()); $f.Controls.Add($b) }
+    $f.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
 }
 
@@ -85,6 +88,7 @@ function Show-MossAdminCodeSetupChoice {
     $label=New-Object System.Windows.Forms.Label; $label.Text='No administrator code is set. You can create one now, or continue without using an administrator code.'; $label.Location=New-Object System.Drawing.Point(18,18); $label.Size=New-Object System.Drawing.Size(490,48); $f.Controls.Add($label)
     $create=New-Object System.Windows.Forms.Button; $create.Text='Create a code'; $create.Location=New-Object System.Drawing.Point(72,98); $create.Size=New-Object System.Drawing.Size(170,44); $create.Add_Click({$f.Tag='create';$f.Close()}.GetNewClosure()); $f.Controls.Add($create)
     $skip=New-Object System.Windows.Forms.Button; $skip.Text='Continue without a code'; $skip.Location=New-Object System.Drawing.Point(270,98); $skip.Size=New-Object System.Drawing.Size(190,44); $skip.Add_Click({$f.Tag='skip';$f.Close()}.GetNewClosure()); $f.Controls.Add($skip)
+    $f.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
 }
 
@@ -93,6 +97,7 @@ function Show-MossAdminCodeRecoveryChoice {
     $label=New-Object System.Windows.Forms.Label; $label.Text='The administrator code was not accepted. Try entering it again, or remove the administrator code and continue without code protection.'; $label.Location=New-Object System.Drawing.Point(18,18); $label.Size=New-Object System.Drawing.Size(490,52); $f.Controls.Add($label)
     $retry=New-Object System.Windows.Forms.Button; $retry.Text='Try again'; $retry.Location=New-Object System.Drawing.Point(82,100); $retry.Size=New-Object System.Drawing.Size(160,44); $retry.Add_Click({$f.Tag='retry';$f.Close()}.GetNewClosure()); $f.Controls.Add($retry)
     $skip=New-Object System.Windows.Forms.Button; $skip.Text='Continue without code'; $skip.Location=New-Object System.Drawing.Point(270,100); $skip.Size=New-Object System.Drawing.Size(190,44); $skip.Add_Click({$f.Tag='skip';$f.Close()}.GetNewClosure()); $f.Controls.Add($skip)
+    $f.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'retry' } finally { $f.Dispose() }
 }
 

@@ -3,8 +3,8 @@ MOSS Image Studio - portable build
 Unpack this ZIP into your MOSS folder (for example E:\MOSS\) so that
 MOSS-Image-Studio.ps1 sits beside the bin\, models\, config\, and outputs\ folders.
 Run MOSS-Image-Studio.bat to close the first launcher window after startup.
-After the MOSS form appears, it hides only the PowerShell console; the MOSS
-application stays visible and shows its current version in the title and header.
+As soon as the first MOSS dialog appears, including the password prompt, it hides
+only the PowerShell console; MOSS stays visible and shows its version in the title.
 Closing MOSS ends its launcher and PowerShell host, and stops active image-engine
 processes. Temporary update files are removed after installation or download failure.
 
