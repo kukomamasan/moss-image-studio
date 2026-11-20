@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.57)
+MOSS Image Studio - portable build (v0.1.58)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -120,6 +120,7 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
+What is new in v0.1.58----------------------- The automatic memory retry now steps down gradually: Exact -> 4x ->  8x -> Fast, so very large improvements (e.g. 5440 x 3072, where even  the half-size render was too much) still land a picture. Each retry  renders smaller with all steps and enlarges to the full target.- The visual style prefix is no longer doubled when the prompt already  starts with it (e.g. a prompt picked from the history dropdown).
 What is new in v0.1.57----------------------- The 'Improve this image' dialog was re-laid-out: every explanation  label now has room for its text (no more clipped/overlapping lines),  shorter wording, taller dialog with the buttons in their own row.
 What is new in v0.1.56----------------------- Automatic half-size retry for improvements: if a native image-to-image  render dies instantly with no output (almost always out of GPU or  system memory, e.g. 2720 x 1536 on a 12 GB card), MOSS now retries  the same improvement at HALF SIZE with all steps and enlarges the  result to the full target - composition still kept from the image.  The log explains the retry. Previously this just failed.
 What is new in v0.1.55----------------------- The progress bar is now pinned to the very bottom edge of the left  panel (it used to float mid-panel when the window was taller or  maximized), with a numeric readout to its right showing the overall  percentage and the engine's step counter (e.g. '38%  step 17/50',  or 'starting...' while the engine warms up). The status line sits  directly above and stays with it.

@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.57'
+$script:AppVersion = '0.1.58'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -2604,12 +2604,21 @@ try {
                 $oomHint = ("`r`nHint: the engine stopped without any message. At {0} x {1} ({2} MP, {3} steps) the most common cause is running out of GPU or system memory. Try a smaller size, fewer steps, or a fast speed mode (which renders small and enlarges)." -f $job.Width, $job.Height, $mp, $job.Steps)
                 # AUTO-RETRY for improves: an img2img job that dies instantly
                 # with EMPTY output is almost always out of GPU/system memory
-                # at the native render size. Re-queue the SAME improvement
-                # ONCE at half size (fast-mode pipeline, all steps, enlarged
-                # afterwards) so the user gets a result instead of an error.
-                if ($job.InitImage -and [string]$job.SpeedMode -eq 'Exact' -and $mp -gt 2.0 -and -not $st.CancelRequested) {
-                    [void]$script:RefineQueue.Insert(0,[pscustomobject]@{ File=[string]$job.InitImage; W=[int]$job.Width; H=[int]$job.Height; Seed=[long]$job.Seed; Prompt=[string]$job.Prompt; NegativePrompt=[string]$job.NegativePrompt; SamplingMethod=$job.SamplingMethod; Scheduler=$job.Scheduler; Strength=[double]$job.InitStrength; Steps=[int]$job.Steps; Cfg=[double]$job.Cfg; Tag='hq'; ForceHalf=$true })
-                    $oomHint += "`r`n`r`nMOSS will now AUTOMATICALLY RETRY this improvement at HALF SIZE (all steps, then enlarged to full size) - the composition still comes from your image."
+                # at the render size. Retry the SAME improvement with the
+                # next smaller speed mode: Exact -> 4x (50%) -> 8x (25%) ->
+                # Fast (smallest). Each retry renders at a smaller size with
+                # ALL steps and enlarges to the full target afterwards.
+                $retryMode = $null
+                if ($job.InitImage -and $mp -gt 2.0 -and -not $st.CancelRequested) {
+                    switch ([string]$job.SpeedMode) {
+                        'Exact' { $retryMode = '4x' }
+                        '4x'    { $retryMode = '8x' }
+                        '8x'    { $retryMode = 'Fast' }
+                    }
+                }
+                if ($retryMode) {
+                    [void]$script:RefineQueue.Insert(0,[pscustomobject]@{ File=[string]$job.InitImage; W=[int]$job.Width; H=[int]$job.Height; Seed=[long]$job.Seed; Prompt=[string]$job.Prompt; NegativePrompt=[string]$job.NegativePrompt; SamplingMethod=$job.SamplingMethod; Scheduler=$job.Scheduler; Strength=[double]$job.InitStrength; Steps=[int]$job.Steps; Cfg=[double]$job.Cfg; Tag='hq'; ForcedSpeed=$retryMode })
+                    $oomHint += "`r`n`r`nMOSS will now AUTOMATICALLY RETRY this improvement with a SMALLER render size ($retryMode speed mode: rendered small with all steps, then enlarged to the full target) - the composition still comes from your image."
                 }
                 $log.AppendText($oomHint)
             }
@@ -3124,17 +3133,17 @@ try {
         # pipeline as the fast generation speed modes (no second sampling pass).
         $isFresh = $false; if ($item.PSObject.Properties['FreshRender']) { $isFresh = [bool]$item.FreshRender }
         # An automatic retry after an out-of-memory failure: force the
-        # half-size pipeline regardless of the MP threshold.
-        $forceHalf = $false; if ($item.PSObject.Properties['ForceHalf']) { $forceHalf = [bool]$item.ForceHalf }
+        # given smaller speed mode regardless of the MP threshold.
+        $forcedSpeed = $null; if ($item.PSObject.Properties['ForcedSpeed']) { $forcedSpeed = [string]$item.ForcedSpeed }
         $refineSpeed = 'Exact'
         $targetMP = ([double]$item.W * [double]$item.H) / 1000000.0
-        if ($targetMP -gt 4.5 -and -not $forceHalf) {
+        if ($targetMP -gt 4.5 -and -not $forcedSpeed) {
             $refineSpeed = '4x'
             $log.AppendText(("`r`nNote: {0} x {1} is too large for a native render on most GPUs - rendering at half size with all {2} steps and enlarging to full size (fast-mode pipeline, never distorted)." -f $item.W, $item.H, $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})))
         }
-        if ($forceHalf) {
-            $refineSpeed = '4x'
-            $log.AppendText(("`r`nRetrying the improvement at HALF SIZE after the native render ran out of memory: target {0} x {1}, rendering at half with all {2} steps and enlarging to full size (composition kept from the image)." -f $item.W, $item.H, $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})))
+        if ($forcedSpeed) {
+            $refineSpeed = $forcedSpeed
+            $log.AppendText(("`r`nRetrying the improvement with a SMALLER render size ({0} speed mode) after the previous render ran out of memory: target {1} x {2}, all {3} steps, enlarged to full size (composition kept from the image)." -f $forcedSpeed, $item.W, $item.H, $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})))
         }
         $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps});Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode=$refineSpeed;InitImage=$(if($isFresh){$null}else{[string]$item.File});InitStrength=$(if($isFresh){0.0}else{[double]$item.Strength});RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler}
         $status.Text = ("Improving image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
@@ -3179,7 +3188,10 @@ try {
         # 'None (no style)' falls through to default{''}: the prompt is sent
         # exactly as typed, with nothing prepended.
         $stylePrefix=switch([string]$style.SelectedItem){'Photorealistic'{'photorealistic, lifelike, realistic textures, natural lighting'}'Anime'{'anime style, expressive line art, cel shading'}'Digital illustration'{'polished digital illustration'}'Oil painting'{'oil painting, rich brush strokes'}'Watercolor'{'watercolor painting, soft pigment texture'}'3D render'{'high quality 3D render, detailed materials'}'Comic book'{'comic book art, inked outlines, bold colors'}'Cinematic'{'cinematic composition, dramatic lighting'}'Fantasy art'{'epic fantasy art, dramatic lighting, highly detailed'}'Dark fantasy / gothic'{'dark fantasy, gothic atmosphere, moody dramatic shadows'}'Cyberpunk / sci-fi'{'cyberpunk, neon lights, futuristic, rain-slick streets'}'Studio portrait'{'professional studio portrait, softbox lighting, clean background'}'Sketch / pencil drawing'{'detailed pencil sketch, graphite shading, white background'}'Pixel art'{'pixel art, 16-bit retro game style, crisp pixels'}'Synthwave / retro 80s'{'retro 80s synthwave, neon grid, sunset glow'}'Low poly 3D'{'low poly 3d render, flat shaded, minimalist'}default{''}}
-        $generationPrompt=if($stylePrefix){"$stylePrefix, $p"}else{$p}
+        # Do not double the style prefix: a prompt picked from the history
+        # dropdown already carries it (user saw 'photorealistic, lifelike...'
+        # twice in the engine command line).
+        $generationPrompt=if($stylePrefix -and -not $p.ToLowerInvariant().StartsWith($stylePrefix.ToLowerInvariant())){"$stylePrefix, $p"}else{$p}
         $gpuIndex=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIndex=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIndex=-1 } }
         $speedMode=switch([string]$speedCombo.SelectedItem){'~2x faster (upscale from 70%)'{'2x'}'~4x faster (upscale from 50%)'{'4x'}'~8x faster (upscale from 35%)'{'8x'}'Fastest (upscale from smallest)'{'Fast'}default{'Exact'}}
         $negPrompt=[string]$script:Settings.NegativePrompt
