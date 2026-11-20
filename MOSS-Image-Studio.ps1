@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.25'
+$script:AppVersion = '0.1.26'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -552,6 +552,20 @@ function Get-RelativeAppPath([string]$value) {
         return $full
     } catch { return $value }
 }
+function ConvertTo-MossDouble([string]$text,[ref]$out) {
+    # Locale-safe decimal parsing: accept both '0.6' and '0,6' regardless of
+    # the Windows regional format (e.g. Danish uses comma and would otherwise
+    # read '0.6' as the integer 6 because the dot is the thousands separator).
+    $norm = ([string]$text).Trim().Replace(',','.')
+    return [double]::TryParse($norm,[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,$out)
+}
+
+function ConvertFrom-MossDouble([double]$value) {
+    # Locale-safe decimal formatting for engine arguments and stored settings:
+    # always '0.6' style, never the regional '0,6' that the engine cannot read.
+    return $value.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Quote-ProcessArgument([string]$value) {
     if ($null -eq $value) { return '""' }
     return '"' + ($value -replace '(\\*)"','$1$1\"' -replace '(\\+)$','$1$1') + '"'
@@ -817,8 +831,8 @@ try {
             $script:Settings.NegativePrompt=($box.Text -replace "(\r?\n)+",' ').Trim()
             $script:Settings.SamplingMethod=[string]$optSampler.SelectedItem
             $script:Settings.Scheduler=[string]$optSched.SelectedItem
-            if(-not [double]::TryParse($impStrengthBox.Text,[ref]$impCheck) -or $impCheck -lt 0.05 -or $impCheck -gt 0.95){[System.Windows.Forms.MessageBox]::Show('Improve strength must be between 0.05 and 0.95.','Invalid strength')|Out-Null;return}
-            $script:Settings.ImproveStrength=[string]$impStrengthBox.Text
+            if(-not (ConvertTo-MossDouble $impStrengthBox.Text ([ref]$impCheck)) -or $impCheck -lt 0.05 -or $impCheck -gt 0.95){[System.Windows.Forms.MessageBox]::Show('Improve strength must be between 0.05 and 0.95 (use a dot or a comma for decimals, e.g. 0.6 or 0,6).','Invalid strength')|Out-Null;return}
+            $script:Settings.ImproveStrength=ConvertFrom-MossDouble $impCheck
             $negState.Text=if($script:Settings.NegativePrompt){('negative prompt: set ('+$script:Settings.NegativePrompt.Length+' chars)')}else{'negative prompt: not set'}
             $g.Close()
         })
@@ -1313,7 +1327,7 @@ try {
         $argsList.Add('--llm'); $argsList.Add((Quote-ProcessArgument $job.Llm))
         $argsList.Add('--vae'); $argsList.Add((Quote-ProcessArgument $job.Vae))
         $argsList.Add('--tokenizer'); $argsList.Add((Quote-ProcessArgument $job.Tokenizer))
-        $argsList.Add('--cfg-scale'); $argsList.Add([string]$job.Cfg)
+        $argsList.Add('--cfg-scale'); $argsList.Add((ConvertFrom-MossDouble ([double]$job.Cfg)))
         $argsList.Add('--steps'); $argsList.Add([string]$job.Steps)
         $argsList.Add('-H'); $argsList.Add([string]$job.Height)
         $argsList.Add('-W'); $argsList.Add([string]$job.Width)
@@ -1352,7 +1366,7 @@ try {
         # preview) and re-synthesize it at full size. Same composition, new detail.
         if ($job.InitImage -and (Test-Path -LiteralPath ([string]$job.InitImage) -PathType Leaf)) {
             $argsList.Add('-i'); $argsList.Add((Quote-ProcessArgument ([string]$job.InitImage)))
-            $argsList.Add('--strength'); $argsList.Add([string]$job.InitStrength)
+            $argsList.Add('--strength'); $argsList.Add((ConvertFrom-MossDouble ([double]$job.InitStrength)))
         }
         # Optional sampler/scheduler: 'Default (model)' means the flag is omitted
         # so the engine keeps its model-specific choice.
@@ -1690,7 +1704,7 @@ try {
         if ($d.Error -eq 'size') { [System.Windows.Forms.MessageBox]::Show('Could not determine the image size.','Improve image')|Out-Null;return }
         if (($d.TW -ge 2560 -or $d.TH -ge 2560) -and [System.Windows.Forms.MessageBox]::Show(("Improving will render at {0} x {1}. Large renders use substantial VRAM/RAM and take a long time. Continue?" -f $d.TW,$d.TH),'Large image improvement',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne [System.Windows.Forms.DialogResult]::Yes){return}
         if ($d.Seed -lt 0) { $d.Seed = Get-Random -Minimum 1 -Maximum 2147483000 }
-        $quickStrength=0.6; try { $t=[double]$script:Settings.ImproveStrength; if($t -ge 0.05 -and $t -le 0.95){ $quickStrength=$t } } catch {}
+        $quickStrength=0.6; $t=0.0; if (ConvertTo-MossDouble ([string]$script:Settings.ImproveStrength) ([ref]$t)) { if($t -ge 0.05 -and $t -le 0.95){ $quickStrength=$t } }
         $quickStrength=Get-MossImproveStrength $d.File $quickStrength
         [void]$script:RefineQueue.Add([pscustomobject]@{ File=$d.File; W=$d.TW; H=$d.TH; Seed=$d.Seed; Prompt=[string]$d.Prompt; NegativePrompt=[string]$d.NegativePrompt; SamplingMethod=$d.SamplingMethod; Scheduler=$d.Scheduler; Strength=$quickStrength; Steps=$null; Cfg=$null; Tag=$(if($sizeFactor -gt 1){'hq2x'}else{'hq'}) })
         $script:RefineTotal = $script:RefineQueue.Count
@@ -1712,11 +1726,11 @@ try {
         if(-not [int]::TryParse($wBox.Text,[ref]$cw) -or -not [int]::TryParse($hBox.Text,[ref]$chh) -or $cw -lt 64 -or $chh -lt 64 -or $cw -gt 8192 -or $chh -gt 8192){[System.Windows.Forms.MessageBox]::Show('Width and height (main window) must be between 64 and 8192 pixels.','Invalid dimensions')|Out-Null;return}
         $cst=0; $ccf=0.0; $csd=0
         if(-not [int]::TryParse($steps.Text,[ref]$cst) -or $cst -lt 1 -or $cst -gt 200){[System.Windows.Forms.MessageBox]::Show('Steps (main window) must be between 1 and 200.','Invalid steps')|Out-Null;return}
-        if(-not [double]::TryParse($cfg.Text,[ref]$ccf) -or $ccf -le 0 -or $ccf -gt 30){[System.Windows.Forms.MessageBox]::Show('CFG scale (main window) must be greater than 0 and no more than 30.','Invalid CFG')|Out-Null;return}
+        if(-not (ConvertTo-MossDouble $cfg.Text ([ref]$ccf)) -or $ccf -le 0 -or $ccf -gt 30){[System.Windows.Forms.MessageBox]::Show('CFG scale (main window) must be greater than 0 and no more than 30.','Invalid CFG')|Out-Null;return}
         if(-not [int]::TryParse($seed.Text,[ref]$csd) -or $csd -lt -1){[System.Windows.Forms.MessageBox]::Show('Seed (main window) must be -1 (random) or a non-negative integer.','Invalid seed')|Out-Null;return}
         $cPrompt=($prompt.Text -replace "(\r?\n)+",' ').Trim()
         if(-not $cPrompt){[System.Windows.Forms.MessageBox]::Show('Enter a prompt in the main window first - it is used for the improvement.','Prompt required')|Out-Null;return}
-        $cStrength=0.6; try { $t=[double]$script:Settings.ImproveStrength; if($t -ge 0.05 -and $t -le 0.95){ $cStrength=$t } } catch {}
+        $cStrength=0.6; $t=0.0; if (ConvertTo-MossDouble ([string]$script:Settings.ImproveStrength) ([ref]$t)) { if($t -ge 0.05 -and $t -le 0.95){ $cStrength=$t } }
         $cStrength=Get-MossImproveStrength $selFile $cStrength
         $useSeed=$csd; if($useSeed -lt 0){ $useSeed=Get-Random -Minimum 1 -Maximum 2147483000 }
         if(($cw -ge 2560 -or $chh -ge 2560) -and [System.Windows.Forms.MessageBox]::Show(("Improving will render at {0} x {1}. Large renders use substantial VRAM/RAM and take a long time. Continue?" -f $cw,$chh),'Large image improvement',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne [System.Windows.Forms.DialogResult]::Yes){return}
@@ -1745,7 +1759,7 @@ try {
         if ($script:GeneratedFiles.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show('Generate images first.','Nothing to improve')|Out-Null;return }
         $script:GenState.CancelRequested = $false
         $curSteps=[int]$script:Settings.Steps; $curW=[int]$script:Settings.Width; $curH=[int]$script:Settings.Height
-        $bulkStrength=0.6; try { $t=[double]$script:Settings.ImproveStrength; if($t -ge 0.05 -and $t -le 0.95){ $bulkStrength=$t } } catch {}
+        $bulkStrength=0.6; $t=0.0; if (ConvertTo-MossDouble ([string]$script:Settings.ImproveStrength) ([ref]$t)) { if($t -ge 0.05 -and $t -le 0.95){ $bulkStrength=$t } }
         $improvedSources=New-Object System.Collections.Generic.List[string]
         foreach($f in @($script:GeneratedFiles)){
             $j=[System.IO.Path]::ChangeExtension([string]$f,'.json')
@@ -1943,7 +1957,7 @@ try {
         foreach($path in $paths){if(-not(Test-Path -LiteralPath $path -PathType Leaf)){[System.Windows.Forms.MessageBox]::Show("Required file not found:`r`n$path`r`n`r`nCheck Hardware / Setup or the model file paths.",'Missing file',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null;return}}
         $outPath=Get-AbsoluteAppPath $out.Text.Trim();if(-not $outPath){[System.Windows.Forms.MessageBox]::Show('Choose an output folder.','Output folder')|Out-Null;return};if(-not(Test-Path -LiteralPath $outPath)){New-Item -ItemType Directory -Path $outPath -Force|Out-Null}
         $wi=0;$he=0;if(-not [int]::TryParse($wBox.Text,[ref]$wi) -or -not [int]::TryParse($hBox.Text,[ref]$he) -or $wi -lt 64 -or $he -lt 64 -or $wi -gt 8192 -or $he -gt 8192){[System.Windows.Forms.MessageBox]::Show('Width and height must be between 64 and 8192 pixels.','Invalid dimensions')|Out-Null;return}
-        $st=0;$cf=0.0;$sd=0;if(-not [int]::TryParse($steps.Text,[ref]$st) -or $st -lt 1 -or $st -gt 200){[System.Windows.Forms.MessageBox]::Show('Steps must be between 1 and 200.','Invalid steps')|Out-Null;return};if(-not [double]::TryParse($cfg.Text,[ref]$cf) -or $cf -le 0 -or $cf -gt 30){[System.Windows.Forms.MessageBox]::Show('CFG scale must be greater than 0 and no more than 30.','Invalid CFG')|Out-Null;return};if(-not [int]::TryParse($seed.Text,[ref]$sd) -or $sd -lt -1){[System.Windows.Forms.MessageBox]::Show('Seed must be -1 (random) or a non-negative integer.','Invalid seed')|Out-Null;return}
+        $st=0;$cf=0.0;$sd=0;if(-not [int]::TryParse($steps.Text,[ref]$st) -or $st -lt 1 -or $st -gt 200){[System.Windows.Forms.MessageBox]::Show('Steps must be between 1 and 200.','Invalid steps')|Out-Null;return};if(-not (ConvertTo-MossDouble $cfg.Text ([ref]$cf)) -or $cf -le 0 -or $cf -gt 30){[System.Windows.Forms.MessageBox]::Show('CFG scale must be greater than 0 and no more than 30 (dot or comma both work, e.g. 3.5 or 3,5).','Invalid CFG')|Out-Null;return};if(-not [int]::TryParse($seed.Text,[ref]$sd) -or $sd -lt -1){[System.Windows.Forms.MessageBox]::Show('Seed must be -1 (random) or a non-negative integer.','Invalid seed')|Out-Null;return}
         # Image count: any whole number >= 1 - no artificial cap. Practical
         # limits (disk space, hours of runtime) are the user's choice, with a
         # plain-language warning for very large batches.
