@@ -9,10 +9,10 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.36'
+$script:AppVersion = '0.1.37'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
-$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = '' }
+$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
 $script:HistoryPassphrase = $null
 $script:HistoryLocked = $false
 $script:LockedHistoryEnvelope = $null
@@ -619,7 +619,7 @@ function Show-GeneratorWindow {
     $script:RefineTotal = 0
 
     $f = New-Object System.Windows.Forms.Form
-    $f.Text = "MOSS Image Studio v$($script:AppVersion) | Generator"; $f.Size = New-Object System.Drawing.Size(1180,850); $f.MinimumSize = New-Object System.Drawing.Size(1000,740); $f.StartPosition='CenterScreen'
+    $f.Text = "MOSS Image Studio v$($script:AppVersion) (GUI for sd-cli) | Generator"; $f.Size = New-Object System.Drawing.Size(1180,850); $f.MinimumSize = New-Object System.Drawing.Size(1000,740); $f.StartPosition='CenterScreen'
     $f.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $f.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $f.Font=New-Object System.Drawing.Font('Segoe UI',9)
     $cPanel=[System.Drawing.Color]::FromArgb(25,32,45); $cCard=[System.Drawing.Color]::FromArgb(27,34,47); $cText=[System.Drawing.Color]::FromArgb(230,236,245); $cMuted=[System.Drawing.Color]::FromArgb(145,161,185); $cAccent=[System.Drawing.Color]::FromArgb(45,112,173)
 
@@ -760,7 +760,7 @@ try {
         # scheduler. 'Default (model)' omits the flag so the engine keeps its
         # model-specific choice (euler for Flux/SD3/Wan).
         $g=New-Object System.Windows.Forms.Form
-        $g.Text='Generation options'; $g.Size=New-Object System.Drawing.Size(560,500); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
+        $g.Text='Generation options'; $g.Size=New-Object System.Drawing.Size(560,530); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
         $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
         $hint=New-Object System.Windows.Forms.Label; $hint.Text='Negative prompt - what the image should NOT contain, e.g. blurry, extra fingers, watermark. Left empty = none.'; $hint.Location=New-Object System.Drawing.Point(12,10); $hint.Size=New-Object System.Drawing.Size(520,20); $hint.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($hint)
         $box=New-Object System.Windows.Forms.TextBox; $box.Multiline=$true; $box.ScrollBars='Vertical'; $box.Text=[string]$script:Settings.NegativePrompt; $box.Location=New-Object System.Drawing.Point(12,34); $box.Size=New-Object System.Drawing.Size(520,120); $box.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $box.ForeColor=$cText; $box.BorderStyle='FixedSingle'; $g.Controls.Add($box)
@@ -832,9 +832,13 @@ try {
         $impStrengthBox=Add-TextBox $g ([string]$script:Settings.ImproveStrength) 12 314 100
         $impStrengthHint=New-Object System.Windows.Forms.Label; $impStrengthHint.Text='How strongly an image is re-rendered when improving it. 0.45 keeps the look; 0.6 refreshes detail; 0.8 re-renders strongly.'; $impStrengthHint.Location=New-Object System.Drawing.Point(120,317); $impStrengthHint.Size=New-Object System.Drawing.Size(412,46); $impStrengthHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($impStrengthHint)
         $dlgTip.SetToolTip($impStrengthBox,'Improvement strength: how freely the image is re-rendered when improving. Low keeps it mostly as it is; high repaints more. Fast previews automatically use at least 0.5-0.74 regardless of this setting.')
-        $note=New-Object System.Windows.Forms.Label; $note.Text="'Default (euler)' and 'Default (flux schedule)' use the engine's own choice - recommended unless you want to experiment. Quick improve reuses the image's own settings; 'Improve using the settings in the main window' applies the values you see now."; $note.Location=New-Object System.Drawing.Point(12,366); $note.Size=New-Object System.Drawing.Size(520,34); $note.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($note)
-        $negOk=Add-Button $g 'Save' 350 404 80 30
-        $negCancel=Add-Button $g 'Cancel' 440 404 90 30
+        $note=New-Object System.Windows.Forms.Label; $note.Text="'Default (euler)' and 'Default (flux schedule)' use the engine's own choice - recommended unless you want to experiment. Quick improve reuses the image's own settings; 'Improve using the settings in the main window' applies the values you see now."; $note.Location=New-Object System.Drawing.Point(12,392); $note.Size=New-Object System.Drawing.Size(520,34); $note.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($note)
+        # MOSS is a GUI front-end for the sd-cli command-line engine: optionally
+        # log the exact command line before every run (full transparency).
+        $cmdCheck=New-Object System.Windows.Forms.CheckBox; $cmdCheck.Text='Show the exact sd-cli command line in the generation log (see what MOSS runs)'; $cmdCheck.Location=New-Object System.Drawing.Point(12,364); $cmdCheck.Size=New-Object System.Drawing.Size(520,24); $cmdCheck.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($cmdCheck)
+        $cmdCheck.Checked= (-not $script:Settings.Contains('ShowEngineCommandLine')) -or ([string]$script:Settings.ShowEngineCommandLine -eq '1')
+        $negOk=Add-Button $g 'Save' 350 434 80 30
+        $negCancel=Add-Button $g 'Cancel' 440 434 90 30
         $negOk.Add_Click({
             $impCheck=0.0
             $script:Settings.NegativePrompt=($box.Text -replace "(\r?\n)+",' ').Trim()
@@ -844,6 +848,7 @@ try {
             $script:Settings.Scheduler=$saveSched
             if(-not (ConvertTo-MossDouble $impStrengthBox.Text ([ref]$impCheck)) -or $impCheck -lt 0.05 -or $impCheck -gt 0.95){[System.Windows.Forms.MessageBox]::Show('Improve strength must be between 0.05 and 0.95 (use a dot or a comma for decimals, e.g. 0.6 or 0,6).','Invalid strength')|Out-Null;return}
             $script:Settings.ImproveStrength=ConvertFrom-MossDouble $impCheck
+            $script:Settings.ShowEngineCommandLine= if($cmdCheck.Checked){'1'}else{'0'}
             $negState.Text=if($script:Settings.NegativePrompt){('negative prompt: set ('+$script:Settings.NegativePrompt.Length+' chars)')}else{'negative prompt: not set'}
             $g.Close()
         })
@@ -1386,6 +1391,12 @@ try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $job.Engine
         $psi.Arguments = ($argsList -join ' ')
+        # MOSS is a GUI front-end for the sd-cli command-line engine. When the
+        # user wants full transparency, log the exact command line it runs
+        # (prompts included - the log never leaves this computer).
+        if (-not $script:Settings.Contains('ShowEngineCommandLine') -or [string]$script:Settings.ShowEngineCommandLine -eq '1') {
+            $log.AppendText(("`r`nEngine command line: {0} {1}" -f $job.Engine, $psi.Arguments))
+        }
         $psi.WorkingDirectory = $job.Root
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true

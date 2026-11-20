@@ -1,5 +1,8 @@
-MOSS Image Studio - portable build (v0.1.36)
+MOSS Image Studio - portable build (v0.1.37)
 ============================================
+MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
+render is a command line run of bin\sd-cli.exe, and MOSS can show you the
+exact command it runs (see Options).
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
 drive or computer at any time.
@@ -116,6 +119,14 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.37
+----------------------
+- NEW: MOSS now presents itself as what it is - a GUI front-end for the
+  sd-cli command-line engine. The window title says so, the README explains
+  it, and Options has a new checkbox: "Show the exact sd-cli command line
+  in the generation log" (on by default), so you can see precisely which
+  flags MOSS passes to the engine for every render.
 
 What is new in v0.1.36
 ----------------------
