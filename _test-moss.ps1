@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.62' ($src.Contains("AppVersion = '0.1.62'"))
+Test 'version is 0.1.63' ($src.Contains("AppVersion = '0.1.63'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -130,7 +130,7 @@ Test 'eight new visual styles wired' (($src.Contains("'Fantasy art'{") -and $src
 Test 'error report is local-only (no upload path)' ((-not ($src.Contains('ErrorReportUrl'))) -and ($src.Contains('Nothing is sent over the internet - the report stays on this computer')) -and ($src.Contains("saved to logs\`$savedName (nothing is sent online)")))
 Test 'out-of-memory hint for silent engine failures' ($src.Contains('without any error message') -and $src.Contains('running out of GPU or system memory'))
 Test 'oversized improve targets auto half-size render' ($src.Contains('too large for a native render on most GPUs') -and $src.Contains("$refineSpeed = '4x'") -and $src.Contains('SpeedMode=$refineSpeed'))
-Test 'improve logs show source -> final size' ($src.Contains('-> final {4} x {5} (strength {6})') -and $src.Contains('composition kept from the image'))
+Test 'improve logs show source -> final size' ($src.Contains('-> final {4} x {5} (strength {6}; {7})') -and $src.Contains('composition kept from the image'))
 Test 'frontend identity: title and command-line transparency' ($src.Contains('(GUI for sd-cli) | Generator') -and $src.Contains('Engine command line: {0} {1}') -and $src.Contains('ShowEngineCommandLine'))
 Test 'fresh re-render menu item wired' ($src.Contains("Re-render with this image''s OWN seed and size") -and $src.Contains('function Start-MossRefineFresh') -and $src.Contains("FreshRender=`$true") -and $src.Contains("InitImage=`$(if(`$isFresh){`$null}"))
 # --- v0.1.40: separate engine (core files) updater from the MOSS app updater ---
@@ -325,6 +325,20 @@ try {
     $md2 = $em2 -match 'memory|allocat|out of mem|OOM' -or $benign -match 'enough memory available|out of memory|failed to allocate|allocation failed|failed during weight preparation'
     Test 'runtime: the ever-present model-manager memory line does NOT mark memory death' (-not $md2)
 } catch { Test 'runtime: OOM live-case block ran without exception' $false }
+# v0.1.63: 'run ALL chosen steps' - img2img scales steps by strength (50
+# chosen x 0,6148 = about 31 run, user read the 31/31 bar as a bug). The
+# improve dialog gets a checkbox; MOSS raises the ENGINE step count to
+# ceil((chosen-1)/strength). VERIFIED with the real engine: 80 engine steps
+# at strength 0,6148 -> 'target t_enc is 49 steps' -> sampled 50/50.
+Test 'improve dialog has the run-all-steps option' ($src.Contains('Run ALL steps anyway (slower - MOSS raises the engine step count to compensate)') -and $src.Contains('FullSteps=$fullCb.Checked'))
+Test 'engine step compensation formula (verified 80 engine steps -> 50 real at strength 0,6148)' ($src.Contains('[Math]::Ceiling(($jobSteps - 1) / $jobStrength)'))
+Test 'compensation capped and logged in plain language' ($src.Contains('[Math]::Min(1000,') -and $src.Contains('the engine step count is raised to'))
+Test 'successful retry resolves the item''s earlier failure (fail count decrements)' ($src.Contains('elseif ($script:RefineFailCount -gt 0) { $script:RefineFailCount-- }'))
+Test 'OOM retry re-queue carries the source dimensions (was 0 x 0)' ($src.Contains('SrcW=[int]$job.SrcW; SrcH=[int]$job.SrcH'))
+Test 'refine job carries SrcW/SrcH through' ($src.Contains("SrcW=`$(if(`$item.PSObject.Properties['SrcW']){[int]`$item.SrcW}else{0})"))
+try {
+    Test 'runtime: compensation math (50 chosen, strength 0,6148 -> 80 engine steps)' ([Math]::Ceiling((50 - 1) / 0.6148) -eq 80)
+} catch { Test 'runtime: full-steps block ran without exception' $false }
 Write-Host ''
 if ($fail -gt 0) { Write-Host ($fail.ToString() + ' test(s) FAILED'); exit 1 }
 Write-Host 'ALL TESTS PASSED'
