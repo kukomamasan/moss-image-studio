@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.69' ($src.Contains("AppVersion = '0.1.69'"))
+Test 'version is 0.1.70' ($src.Contains("AppVersion = '0.1.70'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -374,6 +374,11 @@ Test 'batch-end pass skips live-completed images (no double processing)' ($src.C
 Test 'ETA label states the whole batch' ($src.Contains('"ETA ~$(Format-MossFixedTime $remaining) (all $($job.Count))"'))
 Test 'ETA estimate blends live progress with finished-image average' ($src.Contains('($imageEstimate + $avgDone) / 2.0'))
 Test 'ETA math covers remaining images explicitly' ($src.Contains('$job.Count - $currentImage) * $imageEstimate'))
+# v0.1.70: the ETA value refreshes at most once per second (user: 'try update
+# the eta once every second, maybe it will help with the constant jumping').
+Test 'ETA refreshes at most once per second' ($src.Contains('($nowEta - $st.EtaUpdatedAt).TotalSeconds -ge 1.0') -and $src.Contains('$st.EtaShown = $etaText'))
+Test 'ETA state reset per run' ($src.Contains('$script:GenState.EtaShown = $null') -and $src.Contains('$script:GenState.EtaUpdatedAt = $null'))
+Test 'live completion wrapped so a failure cannot kill the progress tick' ($src.Contains('A failure in the live path must never kill the progress tick'))
 Write-Host ''
 if ($fail -gt 0) { Write-Host ($fail.ToString() + ' test(s) FAILED'); exit 1 }
 Write-Host 'ALL TESTS PASSED'

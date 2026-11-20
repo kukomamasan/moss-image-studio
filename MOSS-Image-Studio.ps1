@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.69'
+$script:AppVersion = '0.1.70'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -2279,6 +2279,7 @@ try {
         $lastGen = 0
         foreach ($bm in $batchMatches) { if ([int]$bm.Groups[1].Value -gt $lastGen) { $lastGen = [int]$bm.Groups[1].Value } }
         $maxDone = if ($progressWindow -match 'save result image') { $lastGen } else { [Math]::Max(0, $lastGen - 1) }
+        try {
         if ($maxDone -gt 0) {
             for ($ci = 1; $ci -le $maxDone; $ci++) {
                 if ($st.LiveCompletedImages -contains $ci) { continue }
@@ -2288,6 +2289,9 @@ try {
                 if (Complete-MossBatchImage -st $st -job $st.Job -i $ci -thisSeed $liveSeed -up $st.UpscaleTarget) { [void]$st.LiveCompletedImages.Add($ci) }
             }
         }
+        } catch {}
+        # A failure in the live path must never kill the progress tick - the
+        # batch-end pass processes whatever is left anyway.
         # PRIMARY: the engine's sampling progress is a console bar, printed
         # carriage-return separated: '  |====>  | 1/4 - 1.37s/it'. It shows NO
         # percent sign and NO word 'steps' - the old regexes could never match
@@ -2345,6 +2349,17 @@ try {
             $remaining = [Math]::Max(0, $imageEstimate - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $imageEstimate)
         }
         if ($null -ne $remaining) { $etaText = "ETA ~$(Format-MossFixedTime $remaining) (all $($job.Count))" }
+        # Refresh the ETA at most once per second (user: the constant jumping
+        # on every 400 ms tick is distracting). The rest of the line keeps
+        # updating on every tick; the held value keeps its fixed width.
+        if ($etaText -ne 'ETA calculating') {
+            $nowEta = Get-Date
+            if ($null -eq $st.EtaShown -or $null -eq $st.EtaUpdatedAt -or (($nowEta - $st.EtaUpdatedAt).TotalSeconds -ge 1.0)) {
+                $st.EtaShown = $etaText
+                $st.EtaUpdatedAt = $nowEta
+            }
+            $etaText = $st.EtaShown
+        }
         # After the last sampling step the engine still has to decode the
         # latent into pixels and save the file (several seconds at bigger
         # sizes, with no progress output of its own). Say so instead of
@@ -2831,6 +2846,8 @@ try {
         # Images already processed live (upscaled + registered) while the
         # engine kept rendering; the batch-end pass skips these.
         $script:GenState.LiveCompletedImages = New-Object System.Collections.ArrayList
+        $script:GenState.EtaShown = $null
+        $script:GenState.EtaUpdatedAt = $null
 
         $timer = New-Object System.Windows.Forms.Timer
         $timer.Interval = 400
