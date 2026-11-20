@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.40' ($src.Contains("AppVersion = '0.1.40'"))
+Test 'version is 0.1.47' ($src.Contains("AppVersion = '0.1.47'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -48,9 +48,9 @@ Test 'sampler dropdown shows actual default (euler)' ($src.Contains("@('Default 
 Test 'scheduler dropdown shows actual default (flux schedule)' ($src.Contains("@('Default (flux schedule)','discrete'") -and $src.Contains("if(`$saveSched -eq 'Default (flux schedule)')"))
 Test 'default labels still stored as Default (model) (compat)' ($src.Contains("if(`$storedSampler -eq 'Default (model)')") -and $src.Contains("if(`$storedSched -eq 'Default (model)')"))
 Test 'preview loads unlocked copies (delete-safe)' ($src.Contains('function Copy-MossImageUnlocked') -and $src.Contains('Copy-MossImageUnlocked $p') -and -not ($src.Contains('preview.Image=[System.Drawing.Image]::FromFile')))
-Test 'delete releases preview before Remove-Item' ($src.Contains('Release the preview first so the file is not held open while deleting'))
+Test 'delete releases preview before Remove-Item' ($src.Contains('Release the preview first so no file is held open while deleting'))
 Test 'improve-with-settings falls back to sidecar prompt' (($src -match 'fall back to the image.s own prompt from') -and ($src -match 'so MOSS can read the prompt stored with this image') -and ($src -match 'Unprotect-MossPayload \(\[string\]\$sc\.PromptProtected\) \$script:HistoryPassphrase'))
-Test 'history code field focused on show + timer reinforcement' (($src -match 'Add_Shown\(\{ \[void\]\$first\.Focus\(\); \$first\.Select\(\)') -and ($src -match 'focusTimer\.Add_Tick\(\{ \[void\]\$first\.Focus'))
+Test 'history code field focused on show + timer reinforcement' (($src -match 'Add_Shown\(\{ try \{ \$dialog\.Activate\(\) \} catch \{\}; \[void\]\$first\.Focus') -and ($src -match 'focusTimer\.Add_Tick') -and ($src -match '\[MossNativeWindow\]::SetForegroundWindow\(\$dialog\.Handle\)'))
 Test 'right-click menu is settings-driven' ($src.Contains('Improve using the settings in the main window...') -and $src.Contains('Re-render from the same seed (fresh full quality)') -and (-not ($src.Contains('Improve this image (full quality)'))) -and (-not ($src.Contains('Start-MossRefineSelected'))))
 Test 'refine queue continues after batch' ($src.Contains('Start-MossNextRefine') -and $src.Contains('RefineQueue'))
 Test 'refine skip clearing with -ForRefine' ($src.Contains('param($Job,[switch]$ForRefine)') -and $src.Contains('if (-not $ForRefine)'))
@@ -185,6 +185,31 @@ Test 'no other drive with room: honest warning instead of dead end' ($src.Contai
 Test 'relocation explained in plain language' ($src.Contains('this copy can be deleted afterwards'))
 Test 'history code prompt never shows a missing purpose word (was: Enter the  code.)' (-not ($src.Contains('Passphrase $false $null')))
 Test 'history code prompt falls back to history if purpose is empty' ($src.Contains('IsNullOrWhiteSpace($Purpose)'))
+Test 'relative path anchoring: Get-RelativeAppPath resolves via Get-AbsoluteAppPath' ($src.Contains('GetFullPath((Get-AbsoluteAppPath $value))'))
+# Runtime regression for the v0.1.46 output-folder bug: with a hostile process
+# working directory, a relative OutputPath must stay app-root-anchored.
+try {
+    $oldCwd=[System.Environment]::CurrentDirectory
+    $hostileRoot=[System.IO.Path]::GetTempPath()
+    [System.Environment]::CurrentDirectory=$hostileRoot
+    $fnStart=$src.IndexOf('function Get-AbsoluteAppPath')
+    $fnEnd=$src.IndexOf('function ConvertTo-MossDouble')
+    if($fnStart -ge 0 -and $fnEnd -gt $fnStart){
+        $fns=$src.Substring($fnStart,$fnEnd-$fnStart)
+        $sandbox=[System.IO.Path]::Combine([System.IO.Path]::GetTempPath(),('moss-pathtest-'+[guid]::NewGuid().ToString('N').Substring(0,8)))
+        New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
+        Invoke-Expression ($fns + "`$script:AppRoot='$sandbox'")
+        $rel=Get-RelativeAppPath 'outputs'
+        $abs=Get-AbsoluteAppPath 'outputs'
+        Test 'runtime: relative OutputPath stays app-anchored with hostile cwd' ($rel -eq 'outputs')
+        Test 'runtime: Get-AbsoluteAppPath anchors to the app root' ($abs.TrimEnd('\') -eq ((Join-Path $sandbox 'outputs').TrimEnd('\')))
+        Test 'runtime: absolute custom folder passes through unchanged' ((Get-RelativeAppPath 'C:\ definitely\not\under\app') -eq 'C:\ definitely\not\under\app')
+        Remove-Item -LiteralPath $sandbox -Force -ErrorAction SilentlyContinue
+    } else {
+        Test 'runtime path functions extractable for regression test' $false
+    }
+    [System.Environment]::CurrentDirectory=$oldCwd
+} catch { Test 'runtime path regression block ran without exception' $false }
 Write-Host ''
 if ($fail -gt 0) { Write-Host ($fail.ToString() + ' test(s) FAILED'); exit 1 }
 Write-Host 'ALL TESTS PASSED'

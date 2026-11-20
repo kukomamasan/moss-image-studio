@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.46'
+$script:AppVersion = '0.1.47'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -561,9 +561,15 @@ function Get-AbsoluteAppPath([string]$value) {
     return [System.IO.Path]::GetFullPath((Join-Path $script:AppRoot $value))
 }
 function Get-RelativeAppPath([string]$value) {
+    # Anchor relative paths to the app root FIRST: [IO.Path]::GetFullPath on a
+    # bare relative path resolves against the PROCESS working directory (which
+    # is NOT necessarily the app folder - a launcher or terminal can start
+    # MOSS from anywhere), so 'outputs' once became '<cwd>\outputs' and got
+    # saved as a wrong absolute path (v0.1.46 bug, live-reproduced). Values
+    # that are already absolute pass through Get-AbsoluteAppPath unchanged.
     try {
         $root = [System.IO.Path]::GetFullPath($script:AppRoot).TrimEnd('\') + '\'
-        $full = [System.IO.Path]::GetFullPath($value)
+        $full = [System.IO.Path]::GetFullPath((Get-AbsoluteAppPath $value))
         if ($full.StartsWith($root,[System.StringComparison]::OrdinalIgnoreCase)) { return $full.Substring($root.Length) }
         return $full
     } catch { return $value }
