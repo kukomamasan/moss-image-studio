@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.42'
+$script:AppVersion = '0.1.43'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -45,7 +45,7 @@ function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history',[Sys
     if([string]::IsNullOrWhiteSpace($Purpose)){ $Purpose='history' }
     $dialog = New-Object System.Windows.Forms.Form
     $dialog.Text = if ($Create) { "Set $Purpose code" } else { "Enter $Purpose code" }
-    $dialog.Size = New-Object System.Drawing.Size(440,220); $dialog.StartPosition='CenterParent'; $dialog.FormBorderStyle='FixedDialog'; $dialog.MaximizeBox=$false; $dialog.MinimizeBox=$false; $dialog.Topmost=$true
+    $dialog.Size = New-Object System.Drawing.Size(440,220); $dialog.StartPosition='CenterParent'; $dialog.FormBorderStyle='FixedDialog'; $dialog.MaximizeBox=$false; $dialog.MinimizeBox=$false
     $label = New-Object System.Windows.Forms.Label; $label.Text = if ($Create) { "Choose a 4 to 16 character $Purpose code. Letters, numbers and symbols are allowed." } else { "Enter the $Purpose code." }; $label.Location=New-Object System.Drawing.Point(16,14); $label.Size=New-Object System.Drawing.Size(395,38); $dialog.Controls.Add($label)
     $first = New-Object System.Windows.Forms.TextBox; $first.Location=New-Object System.Drawing.Point(18,62); $first.Size=New-Object System.Drawing.Size(385,25); $first.UseSystemPasswordChar=$true; $dialog.Controls.Add($first)
     $confirm = $null
@@ -89,7 +89,7 @@ function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history',[Sys
 }
 
 function Show-MossHistoryRecoveryChoice {
-    $f=New-Object System.Windows.Forms.Form; $f.Text='Prompt history options'; $f.Size=New-Object System.Drawing.Size(520,270); $f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'; $f.MaximizeBox=$false; $f.MinimizeBox=$false; $f.Topmost=$true
+    $f=New-Object System.Windows.Forms.Form; $f.Text='Prompt history options'; $f.Size=New-Object System.Drawing.Size(520,270); $f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'; $f.MaximizeBox=$false; $f.MinimizeBox=$false
     $label=New-Object System.Windows.Forms.Label; $label.Text='The code was not accepted. Choose how MOSS should continue.'; $label.Location=New-Object System.Drawing.Point(18,16); $label.Size=New-Object System.Drawing.Size(475,32); $f.Controls.Add($label)
     $items=@(@('Try again','retry'),@('Continue without history','skip'),@('Set a new code','reset'),@('Turn off prompt history','disable'))
     $positions=@(@(18,70),@(258,70),@(18,125),@(258,125))
@@ -98,7 +98,7 @@ function Show-MossHistoryRecoveryChoice {
 }
 
 function Show-MossHistorySetupChoice {
-    $f=New-Object System.Windows.Forms.Form; $f.Text='Prompt history'; $f.Size=New-Object System.Drawing.Size(500,205); $f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'; $f.MaximizeBox=$false; $f.MinimizeBox=$false; $f.Topmost=$true
+    $f=New-Object System.Windows.Forms.Form; $f.Text='Prompt history'; $f.Size=New-Object System.Drawing.Size(500,205); $f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'; $f.MaximizeBox=$false; $f.MinimizeBox=$false
     $label=New-Object System.Windows.Forms.Label; $label.Text='Choose whether MOSS should save prompt history.'; $label.Location=New-Object System.Drawing.Point(18,18); $label.Size=New-Object System.Drawing.Size(455,30); $f.Controls.Add($label)
     $items=@(@('Create a history code','create'),@('Continue without history','skip'),@('Turn off prompt history','disable'))
     $positions=@(@(18,72),@(175,72),@(332,72))
@@ -216,26 +216,19 @@ function Save-Settings {
     if (-not $script:HistoryEnabled) {
         # Disabled means no prompt history or password verifier is persisted.
     } elseif ($script:HistoryLocked) {
+        # A code is set but was not entered: keep the encrypted envelope and
+        # ask for the code at the next startup. Generation is NEVER blocked.
         if ($script:LockedHistoryEnvelope) { $persist.PromptHistoryProtected = $script:LockedHistoryEnvelope }
+    } elseif ($script:HistoryPassphrase -and $script:HistoryPasswordVerifier) {
+        # Code entered and unlocked: history stays encrypted.
+        $historyJson = ConvertTo-Json -InputObject $history -Compress
+        $persist.PromptHistoryProtected = Protect-MossPayload ([string]$historyJson) $script:HistoryPassphrase
+        $persist.HistoryPasswordVerifier=$script:HistoryPasswordVerifier
     } elseif ($history.Count -gt 0) {
-        if (-not $script:HistoryPassphrase) {
-            if ($script:HistoryPasswordVerifier) {
-                $candidate=Get-MossHistoryPassphrase $false
-                if ($candidate -and (Test-MossHistoryPassphrase $candidate $script:HistoryPasswordVerifier)) { $script:HistoryPassphrase=$candidate }
-                else { $script:HistoryLocked=$true; $script:Settings.PromptHistory=@() }
-            } else {
-                $script:HistoryPassphrase = Get-MossHistoryPassphrase $true
-                if (-not $script:HistoryPassphrase) { return $false }
-                $script:HistoryPasswordVerifier=Protect-MossPayload 'MOSS-HISTORY-PASSWORD-CHECK-V1' $script:HistoryPassphrase
-            }
-        }
-        if (-not $script:HistoryLocked) {
-            if (-not $script:HistoryPasswordVerifier) { $script:HistoryPasswordVerifier=Protect-MossPayload 'MOSS-HISTORY-PASSWORD-CHECK-V1' $script:HistoryPassphrase }
-            $historyJson = ConvertTo-Json -InputObject $history -Compress
-            $persist.PromptHistoryProtected = Protect-MossPayload ([string]$historyJson) $script:HistoryPassphrase
-        }
+        # No code in use: history is stored PLAIN TEXT and generation is never
+        # blocked. Setting a code remains possible via 'History code...'.
+        $persist.PromptHistory = $history
     }
-    if ($script:HistoryEnabled -and $script:HistoryPasswordVerifier) { $persist.HistoryPasswordVerifier=$script:HistoryPasswordVerifier }
     $persist | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $script:ConfigFile -Encoding UTF8
     return $true
 }
@@ -2478,9 +2471,17 @@ try {
                         Scheduler = $(if($job.Scheduler){ [string]$job.Scheduler }else{ $null })
                         GeneratedAt = (Get-Date).ToString('o'); Engine = $job.Engine
                     }
-                    if (-not $script:HistoryLocked -and $script:HistoryPassphrase) {
+                    if ($script:HistoryPassphrase) {
+                        # A code is set and entered: prompts stay encrypted in the
+                        # sidecar (the guard refuses improves when not unlocked).
                         $meta.PromptProtected = Protect-MossPayload ([string]$job.Prompt) $script:HistoryPassphrase
                         if ($job.NegativePrompt) { $meta.NegativePromptProtected = Protect-MossPayload ([string]$job.NegativePrompt) $script:HistoryPassphrase }
+                    } elseif (-not $script:HistoryLocked) {
+                        # No code in use: store prompts PLAIN so improving always
+                        # works, even after a restart (user: never nag for a code,
+                        # never improve into a different picture).
+                        $meta.Prompt = [string]$job.Prompt
+                        if ($job.NegativePrompt) { $meta.NegativePrompt = [string]$job.NegativePrompt }
                     }
                     $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath ([System.IO.Path]::ChangeExtension($file, '.json')) -Encoding UTF8
                 } catch {}
@@ -2647,6 +2648,13 @@ try {
         $script:GenState.CancelRequested = $false
         $d = Get-MossImproveDefaults $selFile 1
         if ($d.Error -eq 'size') { [System.Windows.Forms.MessageBox]::Show('Could not determine the image size.','Re-render from seed')|Out-Null;return }
+        # Without the image's original prompt a fresh re-render from its seed
+        # would create a COMPLETELY different picture (user: do not even try).
+        # The prompt is unreadable when the image was saved by an older MOSS
+        # version with a history code and no code has been entered.
+        if (-not ([string]$d.Prompt).Trim()) {
+            [System.Windows.Forms.MessageBox]::Show('The prompt of this image cannot be read (it is stored encrypted and no history code is currently entered, or it was not saved). A re-render from the seed without the prompt would create a completely different picture, so it was not started.`r`n`r`nOpen Image info, enter your history code in MOSS so the prompt can be read, or type a prompt and use Generate with the seed from Image info.','No readable prompt')|Out-Null;return
+        }
         if ($d.Seed -lt 0) { $d.Seed = Get-Random -Minimum 1 -Maximum 2147483000 }
         [void]$script:RefineQueue.Add([pscustomobject]@{ File=$d.File; W=$d.TW; H=$d.TH; Seed=$d.Seed; Prompt=[string]$d.Prompt; NegativePrompt=[string]$d.NegativePrompt; SamplingMethod=$d.SamplingMethod; Scheduler=$d.Scheduler; Strength=0.0; Steps=$null; Cfg=$null; Tag='hq'; FreshRender=$true })
         $script:RefineTotal = $script:RefineQueue.Count
@@ -2751,7 +2759,7 @@ try {
             if(Test-Path -LiteralPath $j){ try { $sc=Get-Content -LiteralPath $j -Raw|ConvertFrom-Json; if($sc.InitImage){ $improvedSources.Add([string]$sc.InitImage) } } catch {} }
         }
         $eligible=New-Object System.Collections.ArrayList
-        $skippedQuality=0; $skippedImproved=0; $skippedBroken=0
+        $skippedQuality=0; $skippedImproved=0; $skippedBroken=0; $skippedLocked=0
         foreach($f in @($script:GeneratedFiles)){
             $name=[System.IO.Path]::GetFileName([string]$f)
             if($improvedSources -contains $name){ $skippedImproved++; continue }
@@ -2772,6 +2780,10 @@ try {
             elseif($oldSteps -gt 0 -and $oldSteps -lt $curSteps){ $canImprove=$true; $reason=("only {0} steps" -f $oldSteps) }
             elseif($realW -gt 0 -and $realW -lt $curW -and $realH -lt $curH){ $canImprove=$true; $reason='smaller than the current size' }
             if(-not $canImprove){ $skippedQuality++; continue }
+            # A file whose prompt cannot be read (encrypted by an older version
+            # and no history code entered) is SKIPPED - improving it would
+            # create a completely different picture (user request).
+            if(-not ([string]$d.Prompt).Trim() -and -not $prompt.Text.Trim()){ $skippedLocked++; continue }
             # Size headroom: scale the image up, aspect preserved, so its larger
             # side matches the current size setting.
             $tw=$d.TW; $th=$d.TH
@@ -2792,6 +2804,7 @@ try {
         if($skippedImproved -gt 0){ $skipNote+=("`r`n{0} already have an improved copy and will be skipped." -f $skippedImproved) }
         if($skippedQuality -gt 0){ $skipNote+=("`r`n{0} are already at full quality and will be skipped." -f $skippedQuality) }
         if($skippedBroken -gt 0){ $skipNote+=("`r`n{0} could not be read and will be skipped." -f $skippedBroken) }
+        if($skippedLocked -gt 0){ $skipNote+=("`r`n{0} have an unreadable (encrypted) prompt and will be skipped - enter your history code in MOSS to include them." -f $skippedLocked) }
         $answer=[System.Windows.Forms.MessageBox]::Show(("{0} of {1} file(s) qualify for improvement ({2} rendered in a fast mode, with fewer steps, or smaller than the current size).{3}`r`n`r`nThey are improved one after another with the current settings (steps {4}), each using its own seed, prompt and strength - fast previews automatically get a higher strength so detail is regenerated instead of the blurry enlargement. Cancel stops the queue. Start?" -f $eligible.Count,$script:GeneratedFiles.Count,(($eligible | ForEach-Object { $_.Reason } | Select-Object -Unique) -join ', '),$skipNote,$curSteps),'Improve all',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
         if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
         foreach($e in $eligible){ [void]$script:RefineQueue.Add($e) }
@@ -3039,6 +3052,8 @@ try {
     try { [System.Windows.Forms.MessageBox]::Show(("MOSS Image Studio could not start.`r`n`r`n"+$_.Exception.Message+"`r`n`r`nA technical report was saved to the logs folder."),'MOSS Image Studio',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null } catch {}
     exit 1
 }
+
+
 
 
 
