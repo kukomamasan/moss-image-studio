@@ -5,7 +5,7 @@ param([switch]$SetupOnly,[switch]$ReturnToGenerator)
 
 $ErrorActionPreference = 'Stop'
 $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$script:AppVersion = '0.1.15'
+$script:AppVersion = '0.1.16'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -551,9 +551,20 @@ function Quote-ProcessArgument([string]$value) {
     return '"' + ($value -replace '(\\*)"','$1$1\"' -replace '(\\+)$','$1$1') + '"'
 }
 function Show-GeneratorWindow {
-    $adminOutput=Join-Path $script:AppRoot 'outputs\admin'
-    if(-not(Test-Path -LiteralPath $adminOutput)){New-Item -ItemType Directory -Path $adminOutput -Force|Out-Null}
-    $script:Settings.OutputPath=Get-RelativeAppPath $adminOutput
+    $defaultOutput=Join-Path $script:AppRoot 'outputs'
+    if(-not(Test-Path -LiteralPath $defaultOutput)){New-Item -ItemType Directory -Path $defaultOutput -Force|Out-Null}
+    # Migrate the pre-0.1.15 default 'outputs\admin' to the standard 'outputs'.
+    # Custom folders chosen by the user are never touched.
+    $savedOutput=[string]$script:Settings.OutputPath
+    if(-not [string]::IsNullOrWhiteSpace($savedOutput)){
+        try {
+            $savedFull=[System.IO.Path]::GetFullPath((Get-AbsoluteAppPath $savedOutput))
+            $legacyAdmin=[System.IO.Path]::GetFullPath((Join-Path $script:AppRoot 'outputs\admin'))
+            if($savedFull.TrimEnd('\','/') -ieq $legacyAdmin.TrimEnd('\','/')){ $script:Settings.OutputPath='outputs' }
+        } catch {}
+    }
+    if([string]::IsNullOrWhiteSpace([string]$script:Settings.OutputPath)){ $script:Settings.OutputPath='outputs' }
+    $script:Settings.OutputPath=Get-RelativeAppPath ([string]$script:Settings.OutputPath)
     $defaults = [ordered]@{
         DiffusionModelPath = (Join-Path $script:AppRoot 'models\moss_image_sft_int8_convrot.safetensors')
         LlmPath = (Join-Path $script:AppRoot 'models\Qwen3.5-9B-Q4_K_M.gguf')
@@ -575,6 +586,9 @@ function Show-GeneratorWindow {
     $history = @()
     if ($script:HistoryEnabled -and -not $script:HistoryLocked -and $script:Settings.PromptHistory) { $history = @($script:Settings.PromptHistory) }
     $script:GeneratedFiles = New-Object System.Collections.ArrayList
+    $script:SelectedFile = $null
+    $script:RefineQueue = New-Object System.Collections.ArrayList
+    $script:RefineTotal = 0
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "MOSS Image Studio v$($script:AppVersion) | Generator"; $f.Size = New-Object System.Drawing.Size(1180,850); $f.MinimumSize = New-Object System.Drawing.Size(1000,740); $f.StartPosition='CenterScreen'
@@ -697,7 +711,7 @@ try {
     Add-Label $left 'CFG scale' 110 354 90 | Out-Null; $cfg=Add-TextBox $left ([string]$script:Settings.CfgScale) 110 377 75
     Add-Label $left 'Images' 202 354 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDown'; $count.Location=New-Object System.Drawing.Point(202,377); $count.Size=New-Object System.Drawing.Size(75,26); foreach($n in @(1,2,4,8,16,32,64,128,256,512,1000)){[void]$count.Items.Add([string]$n)}; $count.Text=[string]$script:Settings.ImageCount; $left.Controls.Add($count)
     Add-Label $left 'Seed (-1 = random)' 300 354 150 | Out-Null; $seed=Add-TextBox $left ([string]$script:Settings.Seed) 300 377 90
-    $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(410,377); $speedCombo.Size=New-Object System.Drawing.Size(270,24); $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (native render)','~2x faster (soft)','~3x faster (softer)','~5x faster (soft draft)','~7x faster (maximum, draft)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo)
+    $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(410,377); $speedCombo.Size=New-Object System.Drawing.Size(270,24); $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (native render)','~2x faster (upscale from 70%)','~4x faster (upscale from 50%)','~8x faster (upscale from 35%)','Fastest (upscale from smallest)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo)
     $speedHint=New-Object System.Windows.Forms.Label; $speedHint.Text='Faster settings render small, then upscale and refine at the chosen size. Exact renders natively at full size and steps. ~7x is the maximum that keeps the picture recognizable; multipliers are approximate.'; $speedHint.Location=New-Object System.Drawing.Point(410,402); $speedHint.Size=New-Object System.Drawing.Size(270,30); $speedHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $left.Controls.Add($speedHint)
     Add-Label $left 'OUTPUT FOLDER' 18 414 190 | Out-Null
     $out=Add-TextBox $left ([string]$script:Settings.OutputPath) 18 439 540; $out.Anchor='Top,Left,Right'; $out.ReadOnly=$true; $outBrowse=Add-Button $left 'Browse...' 570 438 110; $outBrowse.Anchor='Top,Right'; $outBrowse.Enabled=$true
@@ -733,18 +747,51 @@ try {
         $modelControls[$key]=$tb; $yy+=29
     }
 
-    $generate=Add-Button $left 'GENERATE IMAGES' 18 615 205 42; $generate.BackColor=$cAccent; $generate.ForeColor=[System.Drawing.Color]::White; $generate.Font=New-Object System.Drawing.Font('Segoe UI Semibold',10,[System.Drawing.FontStyle]::Bold)
-    $cancel=Add-Button $left 'Cancel' 235 615 95 42; $cancel.Enabled=$false
-    $openOut=Add-Button $left 'Open output folder' 342 615 140 42
-    $btnReport=Add-Button $left 'Copy Error Report' 490 615 150 42
+    $generate=Add-Button $left 'GENERATE' 18 615 145 42; $generate.BackColor=$cAccent; $generate.ForeColor=[System.Drawing.Color]::White; $generate.Font=New-Object System.Drawing.Font('Segoe UI Semibold',10,[System.Drawing.FontStyle]::Bold)
+    $cancel=Add-Button $left 'Cancel' 167 615 70 42; $cancel.Enabled=$false
+    $openOut=Add-Button $left 'Open output' 241 615 105 42
+    $btnReport=Add-Button $left 'Error report' 350 615 105 42
+    $renderNative=Add-Button $left 'Render natively' 459 615 112 42; $renderNative.ForeColor=$cMuted
+    $renderNative.Add_Click({
+        # One-click way to re-render the current prompt at full size and full
+        # steps, whatever speed mode the selector currently shows.
+        if ($script:GenState.IsRunning) { return }
+        $script:PendingInitImage = $null
+        $speedCombo.SelectedItem='Exact (native render)'
+        $generate.PerformClick()
+    })
+    $refineNative=Add-Button $left 'Refine natively' 575 615 112 42; $refineNative.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164)
+    $refineNative.Add_Click({
+        # Take the most recent generated image (e.g. a fast upscaled preview) and
+        # re-synthesize it at full size with full detail: image-to-image keeps the
+        # composition (same apple, same table) while replacing the low-res detail.
+        if ($script:GenState.IsRunning) { return }
+        $srcImg = $null
+        if ($script:GeneratedFiles -and $script:GeneratedFiles.Count -gt 0) { $srcImg = [string]$script:GeneratedFiles[$script:GeneratedFiles.Count - 1] }
+        if (-not $srcImg -or -not (Test-Path -LiteralPath $srcImg -PathType Leaf)) {
+            [System.Windows.Forms.MessageBox]::Show('Generate an image first - the most recent one is used as the starting picture for native refinement.','Nothing to refine')|Out-Null;return
+        }
+        $script:PendingInitImage = $srcImg
+        $speedCombo.SelectedItem='Exact (native render)'
+        $generate.PerformClick()
+    })
     $btnReport.Add_Click({ Copy-MossErrorReport })
     $status=New-Object System.Windows.Forms.Label; $status.Text='Ready'; $status.Location=New-Object System.Drawing.Point(18,670); $status.Size=New-Object System.Drawing.Size(660,24); $status.ForeColor=$cMuted; $left.Controls.Add($status)
 
     Add-Label $right 'OUTPUT PREVIEW' 16 14 200 | Out-Null
     $preview=New-Object System.Windows.Forms.PictureBox; $preview.Location=New-Object System.Drawing.Point(16,42); $preview.Size=New-Object System.Drawing.Size(383,285); $preview.Anchor='Top,Left,Right'; $preview.SizeMode='Zoom'; $preview.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $right.Controls.Add($preview)
-    $filesTitle=Add-Label $right 'GENERATED FILES' 16 342 200
+    $filesTitle=Add-Label $right 'GENERATED FILES  (right-click = native quality)' 16 342 340
     $fileList=New-Object System.Windows.Forms.ListBox; $fileList.Location=New-Object System.Drawing.Point(16,368); $fileList.Size=New-Object System.Drawing.Size(383,150); $fileList.Anchor='Top,Left,Right'; $fileList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $fileList.ForeColor=$cText; $right.Controls.Add($fileList)
-    $fileList.Add_SelectedIndexChanged({if($fileList.SelectedItem){$p=[string]$fileList.SelectedItem;if(Test-Path -LiteralPath $p){try{$old=$preview.Image;$preview.Image=[System.Drawing.Image]::FromFile($p);if($old){$old.Dispose()}}catch{}}}})
+    $fileList.Add_SelectedIndexChanged({if($fileList.SelectedItem){$p=[string]$fileList.SelectedItem;$script:SelectedFile=$p;if(Test-Path -LiteralPath $p){try{$old=$preview.Image;$preview.Image=[System.Drawing.Image]::FromFile($p);if($old){$old.Dispose()}}catch{}}}})
+    # Right-click a generated file to re-render exactly that picture natively:
+    # same seed and prompt (read from its sidecar), full steps, image-to-image
+    # at the chosen size. Grain stays, distortion does not come back.
+    $refineMenu=New-Object System.Windows.Forms.ContextMenuStrip
+    $miSame=$refineMenu.Items.Add('Refine natively (same size)')
+    $miBig=$refineMenu.Items.Add('Refine natively (2x bigger)')
+    $fileList.ContextMenuStrip=$refineMenu
+    $miSame.Add_Click({ Start-MossRefineSelected 1 })
+    $miBig.Add_Click({ Start-MossRefineSelected 2 })
     $logTitle=Add-Label $right 'GENERATION LOG' 16 535 200
     $log=New-Object System.Windows.Forms.TextBox; $log.Multiline=$true; $log.ReadOnly=$true; $log.ScrollBars='Vertical'; $log.Location=New-Object System.Drawing.Point(16,560); $log.Size=New-Object System.Drawing.Size(383,130); $log.Anchor='Top,Bottom,Left,Right'; $log.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $log.ForeColor=$cMuted; $right.Controls.Add($log)
     $right.Add_Resize({
@@ -1025,7 +1072,12 @@ try {
         $job = $st.Job
 
         $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
-        $pattern = Join-Path $job.OutputPath ("MOSS_{0}_%02d.png" -f $stamp)
+        # Refined (image-to-image) outputs carry an easy-to-spot tag in the name:
+        # ..._hq_01.png (same size, native quality) or ..._hq2x_01.png (2x size).
+        $refineSuffix = if ($job.RefineTag) { '_' + [string]$job.RefineTag } else { '' }
+        # Braces are required: "$refineSuffix_" would be parsed as a variable
+        # named 'refineSuffix_' and the tag would silently disappear.
+        $pattern = Join-Path $job.OutputPath ("MOSS_{0}${refineSuffix}_%02d.png" -f $stamp)
         $st.CurrentFile = $pattern
 
         $argsList = New-Object System.Collections.Generic.List[string]
@@ -1045,32 +1097,35 @@ try {
         # short refine pass at the chosen size. Same engine feature for every
         # backend (Latent upscaler needs no extra model file). 'Exact' renders
         # natively at full size and steps.
-        $speedScale = 0.0; $speedRefineFraction = 0.0; $speedRefineMin = 3
+        # Speed modes render at a reduced size with the FULL step count and then
+        # MOSS upscales the finished image in pixel space. No second sampling
+        # pass runs at all, so nothing can introduce distorted detail - the
+        # result is a faithful, possibly grainy enlargement of a small render.
+        $speedScale = 0.0
         switch ([string]$job.SpeedMode) {
-            '2x'  { $speedScale = 0.75; $speedRefineFraction = 0.15; $speedRefineMin = 4 }
-            '3x'  { $speedScale = 0.5;  $speedRefineFraction = 0.2;  $speedRefineMin = 5 }
-            '5x'  { $speedScale = 0.35; $speedRefineFraction = 0.12; $speedRefineMin = 4 }
-            '7x'  { $speedScale = 0.25; $speedRefineFraction = 0.0;  $speedRefineMin = 3 }
+            '2x' { $speedScale = 0.7 }
+            '4x' { $speedScale = 0.5 }
+            '8x' { $speedScale = 0.35 }
+            'Fast' { $speedScale = [Math]::Min(0.35, 256.0 / [Math]::Min($job.Width, $job.Height)) }
         }
+        $st.UpscaleTarget = $null
         if ($speedScale -gt 0) {
             $smallW = [int][Math]::Max(256, [Math]::Floor($job.Width * $speedScale))
             $smallH = [int][Math]::Max(256, [Math]::Floor($job.Height * $speedScale))
             if ($smallW -lt $job.Width -and $smallH -lt $job.Height) {
-                $refineSteps = [int][Math]::Max($speedRefineMin, [Math]::Ceiling($job.Steps * $speedRefineFraction))
                 $argsList.Add('-W'); $argsList.Add([string]$smallW)
                 $argsList.Add('-H'); $argsList.Add([string]$smallH)
-                $argsList.Add('--hires')
-                $argsList.Add('--hires-width'); $argsList.Add([string]$job.Width)
-                $argsList.Add('--hires-height'); $argsList.Add([string]$job.Height)
-                # Use the engine's default Latent upscaler: it upscales in latent
-                # space, avoiding a pixel-space VAE round-trip that can exceed the
-                # VRAM budget at 2K and larger targets.
-                $argsList.Add('--hires-steps'); $argsList.Add([string]$refineSteps)
-                $argsList.Add('--hires-denoising-strength'); $argsList.Add('0.7')
+                $st.UpscaleTarget = @{ W = [int]$job.Width; H = [int]$job.Height; FromW = $smallW; FromH = $smallH }
             }
         }
         $argsList.Add('-p'); $argsList.Add((Quote-ProcessArgument $job.Prompt))
         $argsList.Add('-o'); $argsList.Add((Quote-ProcessArgument $pattern))
+        # Native refinement: start from an existing picture (e.g. an upscaled fast
+        # preview) and re-synthesize it at full size. Same composition, new detail.
+        if ($job.InitImage -and (Test-Path -LiteralPath ([string]$job.InitImage) -PathType Leaf)) {
+            $argsList.Add('-i'); $argsList.Add((Quote-ProcessArgument ([string]$job.InitImage)))
+            $argsList.Add('--strength'); $argsList.Add([string]$job.InitStrength)
+        }
 
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $job.Engine
@@ -1117,14 +1172,35 @@ try {
             $st.ImageProgress = 0
             $st.CurrentImageIndex = 0
             $status.Text = ("Rendering {0} image(s) in one run (base seed {1})..." -f $job.Count, $job.Seed)
-            if ($job.SpeedMode -ne 'Exact') { $status.Text = ("{0} mode: rendering {1} image(s) small, then refining at full size..." -f $job.SpeedMode, $job.Count) }
+            if ($up) { $status.Text = ("Fast mode: rendering {0} image(s) small (will upscale after render)..." -f $job.Count) }
         } catch {
             $msg = "Failed to start engine: $($_.Exception.Message)"
             $log.AppendText("`r`n$msg")
             [void](Write-MossErrorLog 'MOSS engine start failure' $msg)
             [void]$st.Results.Add([pscustomobject]@{ Path = ([string]$st.CurrentFile); ExitCode = -1; Seed = $job.Seed; Output = $msg })
             Complete-MossGen 'Generation failed - the engine could not be started'
+            Start-MossNextRefine
         }
+    }
+
+    function Resize-MossImageTo([string]$Path,[int]$TargetW,[int]$TargetH) {
+        # Faithful pixel-space enlargement (high-quality bicubic): geometry is
+        # preserved exactly; grain may show but features never warp.
+        $img=[System.Drawing.Image]::FromFile($Path)
+        try {
+            $bmp=New-Object System.Drawing.Bitmap($TargetW,$TargetH)
+            try {
+                $g=[System.Drawing.Graphics]::FromImage($bmp)
+                try {
+                    $g.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                    $g.SmoothingMode=[System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+                    $g.PixelOffsetMode=[System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+                    $g.CompositingQuality=[System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+                    $g.DrawImage($img,0,0,$TargetW,$TargetH)
+                } finally { $g.Dispose() }
+                $bmp.Save($Path,[System.Drawing.Imaging.ImageFormat]::Png)
+            } finally { $bmp.Dispose() }
+        } finally { $img.Dispose() }
     }
 
     function On-MossGenTimerTick {
@@ -1175,6 +1251,13 @@ try {
             $seedMap[[int]$m.Groups[1].Value] = [long]$m.Groups[3].Value
         }
 
+        # Speed modes: enlarge the small renders to the chosen target size now.
+        $up = $st.UpscaleTarget
+        if ($up) {
+            $status.Text = 'Upscaling results to full size...'
+            $f.Refresh()
+        }
+
         $patternBase = ([string]$st.CurrentFile) -replace '%02d','{0:D2}'
         $ok = 0
         $missing = New-Object System.Collections.Generic.List[string]
@@ -1183,12 +1266,24 @@ try {
             $thisSeed = if ($seedMap.ContainsKey($i)) { $seedMap[$i] } else { $job.Seed + ($i - 1) }
             if ($exitCode -eq 0 -and (Test-Path -LiteralPath $file)) {
                 $ok++
+                $upscaledNote = $null
+                if ($up) {
+                    try {
+                        Resize-MossImageTo $file ([int]$up.W) ([int]$up.H)
+                        $upscaledNote = ('upscaled from {0} x {1}' -f $up.FromW, $up.FromH)
+                    } catch {
+                        $upscaledNote = ('kept at engine size {0} x {1} (resize failed: {2})' -f $up.FromW, $up.FromH, $_.Exception.Message)
+                    }
+                }
                 try {
                     $meta = [ordered]@{
                         Width = $job.Width; Height = $job.Height
                         Steps = $job.Steps; CfgScale = $job.Cfg; Seed = $thisSeed
                         Backend = $job.Backend
                         SpeedMode = [string]$job.SpeedMode
+                        UpscaledFrom = $upscaledNote
+                        InitImage = $(if($job.InitImage){ [System.IO.Path]::GetFileName([string]$job.InitImage) }else{ $null })
+                        InitStrength = $(if($job.InitImage){ [double]$job.InitStrength }else{ $null })
                         GeneratedAt = (Get-Date).ToString('o'); Engine = $job.Engine
                     }
                     if (-not $script:HistoryLocked -and $script:HistoryPassphrase) { $meta.PromptProtected = Protect-MossPayload ([string]$job.Prompt) $script:HistoryPassphrase }
@@ -1221,10 +1316,12 @@ try {
         if ($ok -gt 0) { $log.AppendText("`r`nCompleted. Output folder: $($job.OutputPath)") }
         if ($exitCode -ne 0 -or $missing.Count -gt 0) { $log.AppendText("`r`nOne or more images failed. Engine output above; a technical report was saved to the logs folder.") }
         $log.AppendText("`r`n--- Batch finished | exit $exitCode | $ok of $($job.Count) image(s) ---`r`n$outputText`r`n")
+        # Continue any pending native refinement queue unless the user cancelled.
+        if (-not $st.CancelRequested) { Start-MossNextRefine } else { $script:RefineQueue.Clear(); $script:RefineTotal = 0 }
     }
 
     function Start-MossGeneration {
-        param($Job)
+        param($Job,[switch]$ForRefine)
         if ($script:GenState.IsRunning) { return }
         $script:GenState.IsRunning = $true
         $script:GenState.CancelRequested = $false
@@ -1245,12 +1342,85 @@ try {
 
         $generate.Enabled = $false
         $cancel.Enabled = $true
-        $log.Clear()
-        $fileList.Items.Clear()
+        if (-not $ForRefine) { $log.Clear(); $fileList.Items.Clear() }
         $status.Text = 'Starting engine...'
 
         Start-MossBatchEngine
     }
+
+    function Start-MossRefineSelected([double]$sizeFactor) {
+        # Re-render the file selected in Generated Files natively: image-to-image
+        # at the chosen size, full steps, starting from that exact picture. Seed
+        # and prompt come from the file's sidecar so the composition is kept.
+        if ($script:GenState.IsRunning) { return }
+        $selFile = [string]$script:SelectedFile
+        if (-not $selFile -or -not (Test-Path -LiteralPath $selFile -PathType Leaf)) {
+            [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (left-click it), then right-click for native quality.','No file selected')|Out-Null;return
+        }
+        # Target size: the file's own dimensions (sidecar first, image file as fallback), times the factor.
+        $tw=0; $th=0
+        $sidecar = [System.IO.Path]::ChangeExtension($selFile, '.json')
+        if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
+            try { $sc = Get-Content -LiteralPath $sidecar -Raw | ConvertFrom-Json; if($sc.Width){$tw=[int]$sc.Width}; if($sc.Height){$th=[int]$sc.Height} } catch {}
+        }
+        if ($tw -le 0 -or $th -le 0) {
+            try { $img=[System.Drawing.Image]::FromFile($selFile); $tw=$img.Width; $th=$img.Height; $img.Dispose() } catch { $tw=0; $th=0 }
+        }
+        if ($tw -le 0 -or $th -le 0) { [System.Windows.Forms.MessageBox]::Show('Could not determine the image size.','Refine natively')|Out-Null;return }
+        $tw=[int][Math]::Min(8192,[Math]::Ceiling($tw*$sizeFactor)); $th=[int][Math]::Min(8192,[Math]::Ceiling($th*$sizeFactor))
+        if (($tw -ge 2560 -or $th -ge 2560) -and [System.Windows.Forms.MessageBox]::Show(("Native refinement will render at {0} x {1}. Large renders use substantial VRAM/RAM and take a long time. Continue?" -f $tw,$th),'Large refinement',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne [System.Windows.Forms.DialogResult]::Yes){return}
+        # Seed and prompt from the sidecar (prompt is decrypted only if the
+        # history code was already entered this session).
+        $refineSeed = [long]-1; $refinePrompt = $prompt.Text
+        if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
+            try {
+                $sc = Get-Content -LiteralPath $sidecar -Raw | ConvertFrom-Json
+                if ($sc.Seed) { $refineSeed = [long]$sc.Seed }
+                if (-not $script:HistoryLocked -and $script:HistoryPassphrase -and $sc.PromptProtected) {
+                    try { $p = Unprotect-MossPayload ([string]$sc.PromptProtected) $script:HistoryPassphrase; if ($p) { $refinePrompt = [string]$p } } catch {}
+                }
+            } catch {}
+        }
+        if ($refineSeed -lt 0) { $refineSeed = Get-Random -Minimum 1 -Maximum 2147483000 }
+        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$tw; H=$th; Seed=$refineSeed; Prompt=[string]$refinePrompt; Tag=$(if($sizeFactor -gt 1){'hq2x'}else{'hq'}) })
+        $script:RefineTotal = $script:RefineQueue.Count
+        Start-MossNextRefine
+    }
+
+    function Start-MossNextRefine {
+        # Sequentially processes the refinement queue (one engine run per image).
+        if ($script:GenState.IsRunning) { return }
+        if ($script:GenState.CancelRequested) { $script:RefineQueue.Clear(); $script:RefineTotal = 0; return }
+        if ($script:RefineQueue.Count -eq 0) {
+            if ($script:RefineTotal -gt 0) {
+                $status.Text = "Native refinement finished - $script:RefineTotal image(s) processed"
+                $log.AppendText("`r`nNative refinement finished - $script:RefineTotal image(s) processed.")
+                $script:RefineTotal = 0
+            }
+            return
+        }
+        $item = $script:RefineQueue[0]
+        $script:RefineQueue.RemoveAt(0)
+        $refineEngine = Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)
+        $refinePaths = @($refineEngine,
+            (Get-AbsoluteAppPath ([string]$script:Settings.DiffusionModelPath)),
+            (Get-AbsoluteAppPath ([string]$script:Settings.LlmPath)),
+            (Get-AbsoluteAppPath ([string]$script:Settings.VaePath)),
+            (Get-AbsoluteAppPath ([string]$script:Settings.TokenizerPath)))
+        $missingRefine = @($refinePaths | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
+        if ($missingRefine.Count -gt 0) {
+            $log.AppendText("`r`nNative refinement stopped - required file(s) not found: $($missingRefine -join ', ')")
+            $script:RefineQueue.Clear(); $script:RefineTotal = 0
+            $status.Text = 'Refinement stopped - missing model files (check Hardware / Setup)'
+            return
+        }
+        $gpuIdx=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIdx=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIdx=-1 } }
+        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=[int]$script:Settings.Steps;Cfg=[double]$script:Settings.CfgScale;Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode='Exact';InitImage=[string]$item.File;InitStrength=0.45;RefineTag=[string]$item.Tag}
+        $status.Text = ("Refining natively {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
+        $log.AppendText(("`r`nNative refinement: same seed {0}, same prompt, image-to-image from {1}" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File)))
+        Start-MossGeneration -Job $job -ForRefine
+    }
+
     # --- end Timer + Process worker ---
 
     $generate.Add_Click({
@@ -1281,8 +1451,9 @@ try {
         $stylePrefix=switch([string]$style.SelectedItem){'Photorealistic'{'photorealistic, lifelike, realistic textures, natural lighting'}'Anime'{'anime style, expressive line art, cel shading'}'Digital illustration'{'polished digital illustration'}'Oil painting'{'oil painting, rich brush strokes'}'Watercolor'{'watercolor painting, soft pigment texture'}'3D render'{'high quality 3D render, detailed materials'}'Comic book'{'comic book art, inked outlines, bold colors'}'Cinematic'{'cinematic composition, dramatic lighting'}default{''}}
         $generationPrompt=if($stylePrefix){"$stylePrefix, $p"}else{$p}
         $gpuIndex=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIndex=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIndex=-1 } }
-        $speedMode=switch([string]$speedCombo.SelectedItem){'~2x faster (soft)'{'2x'}'~3x faster (softer)'{'3x'}'~5x faster (soft draft)'{'5x'}'~7x faster (maximum, draft)'{'7x'}default{'Exact'}}
-        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Prompt=$generationPrompt;GpuIndex=$gpuIndex;SpeedMode=$speedMode}
+        $speedMode=switch([string]$speedCombo.SelectedItem){'~2x faster (upscale from 70%)'{'2x'}'~4x faster (upscale from 50%)'{'4x'}'~8x faster (upscale from 35%)'{'8x'}'Fastest (upscale from smallest)'{'Fast'}default{'Exact'}}
+        $initImg=$null; if($script:PendingInitImage){ $initImg=[string]$script:PendingInitImage; $script:PendingInitImage=$null }
+        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Prompt=$generationPrompt;GpuIndex=$gpuIndex;SpeedMode=$speedMode;InitImage=$initImg;InitStrength=0.45}
         $generate.Enabled=$false;$cancel.Enabled=$true;$log.Clear();$fileList.Items.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
     })
     $cancel.Add_Click({
