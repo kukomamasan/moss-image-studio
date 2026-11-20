@@ -122,6 +122,9 @@ What is new in v0.1.32
 - NEW: "None (no style)" is now the first entry in the Visual style list.
   It sends your prompt exactly as typed, with no style words added. If a
   saved config has an unknown style, MOSS now defaults to "None (no style)".
+- NEW: eight more visual styles: Fantasy art, Dark fantasy / gothic,
+  Cyberpunk / sci-fi, Studio portrait, Sketch / pencil drawing, Pixel art,
+  Synthwave / retro 80s and Low poly 3D.
 
 What is new in v0.1.31
 ----------------------
