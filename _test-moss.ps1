@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.58' ($src.Contains("AppVersion = '0.1.58'"))
+Test 'version is 0.1.59' ($src.Contains("AppVersion = '0.1.59'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -225,6 +225,39 @@ try {
     }
     [System.Environment]::CurrentDirectory=$oldCwd
 } catch { Test 'runtime path regression block ran without exception' $false }
+# v0.1.59 progress parsing: the engine prints sampling progress as a console
+# bar '| 1/4 - 1.37s/it' (carriage-return separated, ESC[K-terminated) - no
+# percent sign, no word 'steps'. The old regexes never matched, so the bar
+# walked as marquee, % stayed 0 and ETA never computed. Tests use the REAL
+# bar format captured from sd-cli master-1106-532d2c1.
+Test 'sampling progress bar regex present (it/s or s/it units)' ($src.Contains('(it/s|s/it)'))
+Test 'percent fallback kept for engines that print %' ($src.Contains('\b(\d{1,3})\s*%'))
+Test 'progress window anchored to the last generating-image line' ($src.Contains("LastIndexOf('generating image:')"))
+Test 'step counters reset before each parse tick' ($src.Contains('$st.StepNum = 0; $st.StepDen = 0'))
+Test 'load-bar exclusion is documented in the code' ($src.Contains('VAE-decode bars use the same N/M shape but GB/s / MB/s units'))
+try {
+    $ix = $src.IndexOf('(it/s|s/it)')
+    $q1 = $src.LastIndexOf([char]39, $ix)
+    $q2 = $src.IndexOf([char]39, $ix)
+    $pat = $src.Substring($q1 + 1, $q2 - $q1 - 1)
+    Test 'runtime: sampling-bar pattern extractable from source' ($pat.Contains('(it/s|s/it)'))
+    $esc = [string][char]27
+    $stream = "  |============>                                     | 1/4 -   1.37s/it$esc" + "K\r  |=========================>                        | 2/4 -  30.29it/s$esc" + "K\r  |=====================================>            | 3/4 -  33.51it/s$esc" + "K"
+    $m = [regex]::Matches($stream, $pat)
+    Test 'runtime: all 3 sampling steps parse from the real bar format' ($m.Count -eq 3)
+    Test 'runtime: last step is 3/4' ($m[$m.Count - 1].Groups[1].Value -eq '3' -and $m[$m.Count - 1].Groups[2].Value -eq '4')
+    Test 'runtime: first slow step read from the s/it unit' ($m[0].Groups[3].Value -eq 's/it')
+    $loadBar = '  |##################################################| 426/426 -   5.34GB/s' + $esc + 'K'
+    $vaeBar = '  |##################################################| 140/140 - 884.52MB/s' + $esc + 'K'
+    Test 'runtime: model-load bar (GB/s) never counts as sampling progress' ([regex]::Matches($loadBar, $pat).Count -eq 0)
+    Test 'runtime: vae-decode bar (MB/s) never counts as sampling progress' ([regex]::Matches($vaeBar, $pat).Count -eq 0)
+    $img2 = '[I] generating image: 2/2 - seed 7' + "\n" + '  |=========================>                        | 1/4 -   2.10s/it' + $esc + 'K'
+    $twoImg = $stream + "\n" + $img2
+    $widx = $twoImg.LastIndexOf('generating image:')
+    $mw = [regex]::Matches($twoImg.Substring($widx), $pat)
+    Test 'runtime: batch window keeps progress on the CURRENT image (1/4, not the old 3/4)' ($mw.Count -eq 1 -and $mw[0].Groups[1].Value -eq '1' -and $mw[0].Groups[2].Value -eq '4')
+    Test 'runtime: textual step counter still works as fallback' ([regex]::Matches('step 17/50', '(?im)(?:\bstep\s*[:#]?\s*(\d+)\s*/\s*(\d+)\b|\b(\d+)\s*/\s*(\d+)\s*steps?\b)').Count -eq 1)
+} catch { Test 'runtime: progress parsing block ran without exception' $false }
 Write-Host ''
 if ($fail -gt 0) { Write-Host ($fail.ToString() + ' test(s) FAILED'); exit 1 }
 Write-Host 'ALL TESTS PASSED'
