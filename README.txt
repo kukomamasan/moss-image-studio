@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.55)
+MOSS Image Studio - portable build (v0.1.56)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -120,6 +120,7 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
+What is new in v0.1.56----------------------- Automatic half-size retry for improvements: if a native image-to-image  render dies instantly with no output (almost always out of GPU or  system memory, e.g. 2720 x 1536 on a 12 GB card), MOSS now retries  the same improvement at HALF SIZE with all steps and enlarges the  result to the full target - composition still kept from the image.  The log explains the retry. Previously this just failed.
 What is new in v0.1.55----------------------- The progress bar is now pinned to the very bottom edge of the left  panel (it used to float mid-panel when the window was taller or  maximized), with a numeric readout to its right showing the overall  percentage and the engine's step counter (e.g. '38%  step 17/50',  or 'starting...' while the engine warms up). The status line sits  directly above and stays with it.
 What is new in v0.1.54----------------------- Layout fix: the progress bar sits in its own thin strip at the very  bottom of the left panel (below the status line), so it no longer  overlaps the GENERATE / Cancel / Open output button row.
 What is new in v0.1.53----------------------- The 'History code...' button is now a small menu: 'Enter code to  unlock the prompt history...' (shown when the code has not been  entered), 'Set a NEW code (clears the saved history)...' and 'Turn  off prompt history...'. Previously the button only RESET the code -  there was no way to enter the existing code after skipping it at  startup. Skipping the startup prompt now also says where to enter  the code later.

@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.55'
+$script:AppVersion = '0.1.56'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -2601,7 +2601,17 @@ try {
             # very large render sizes (out of GPU/RAM). Give plain guidance.
             if ($exitCode -ne 0 -and -not $stdout.Trim() -and -not $stderr.Trim()) {
                 $mp = [Math]::Round(([double]$job.Width * [double]$job.Height / 1000000.0), 1)
-                $log.AppendText(("`r`nHint: the engine stopped without any message. At {0} x {1} ({2} MP, {3} steps) the most common cause is running out of GPU or system memory. Try a smaller size, fewer steps, or a fast speed mode (which renders small and enlarges)." -f $job.Width, $job.Height, $mp, $job.Steps))
+                $oomHint = ("`r`nHint: the engine stopped without any message. At {0} x {1} ({2} MP, {3} steps) the most common cause is running out of GPU or system memory. Try a smaller size, fewer steps, or a fast speed mode (which renders small and enlarges)." -f $job.Width, $job.Height, $mp, $job.Steps)
+                # AUTO-RETRY for improves: an img2img job that dies instantly
+                # with EMPTY output is almost always out of GPU/system memory
+                # at the native render size. Re-queue the SAME improvement
+                # ONCE at half size (fast-mode pipeline, all steps, enlarged
+                # afterwards) so the user gets a result instead of an error.
+                if ($job.InitImage -and [string]$job.SpeedMode -eq 'Exact' -and $mp -gt 2.0 -and -not $st.CancelRequested) {
+                    [void]$script:RefineQueue.Insert(0,[pscustomobject]@{ File=[string]$job.InitImage; W=[int]$job.Width; H=[int]$job.Height; Seed=[long]$job.Seed; Prompt=[string]$job.Prompt; NegativePrompt=[string]$job.NegativePrompt; SamplingMethod=$job.SamplingMethod; Scheduler=$job.Scheduler; Strength=[double]$job.InitStrength; Steps=[int]$job.Steps; Cfg=[double]$job.Cfg; Tag='hq'; ForceHalf=$true })
+                    $oomHint += "`r`n`r`nMOSS will now AUTOMATICALLY RETRY this improvement at HALF SIZE (all steps, then enlarged to full size) - the composition still comes from your image."
+                }
+                $log.AppendText($oomHint)
             }
         }
         $batchTimeText = ''
@@ -2875,7 +2885,7 @@ try {
             if(-not [int]::TryParse($sdIn.Text,[ref]$csd) -or $csd -lt -1){[System.Windows.Forms.MessageBox]::Show($g,'Seed must be -1 (random) or a non-negative integer.','Invalid seed')|Out-Null;return}
             $finalMP=[Math]::Round((([double]$cw*[double]$chh)/1000000.0),1)
             $bigNote=''; $aspectNote=''
-            if($finalMP -gt 4.5){ $bigNote=("`r`n`r`nNote: {0} MP is above what most GPUs render natively - it will be rendered at HALF SIZE with all {1} steps and enlarged automatically." -f $finalMP,$cst) }
+            if($finalMP -gt 4.5){ $bigNote=("`r`n`r`nNote: {0} MP is above what most GPUs render natively - it will be rendered at HALF SIZE with all {1} steps and enlarged automatically. If the native render runs out of memory, MOSS automatically retries at half size." -f $finalMP,$cst) }
             if($csW -gt 0 -and $csH -gt 0){ $srcA=[double]$csW/[double]$csH; $tgtA=[double]$cw/[double]$chh; if($tgtA -gt 0 -and [Math]::Abs($srcA/$tgtA-1) -gt 0.02){ $aspectNote=("`r`n`r`nNote: the target size has a different aspect ratio than the image ({0} x {1} -> {2} x {3}) - the composition will be squashed or stretched and the result can look worse. Use matching proportions for the best quality." -f $csW,$csH,$cw,$chh) } }
             if($bigNote -or $aspectNote){ $ans=[System.Windows.Forms.MessageBox]::Show($g,("Start the improve with {0} x {1} ({2} MP)?{3}{4}" -f $cw,$chh,$finalMP,$bigNote,$aspectNote),'Improve this image',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question); if($ans -ne [System.Windows.Forms.DialogResult]::Yes){return} }
             $useSampler=$null; if([string]$script:Settings.SamplingMethod -ne 'Default (model)'){ $useSampler=[string]$script:Settings.SamplingMethod }
@@ -3112,13 +3122,20 @@ try {
         # megapixels the improve is rendered at HALF SIZE with the full step
         # count and enlarged to the full target afterwards - the same faithful
         # pipeline as the fast generation speed modes (no second sampling pass).
+        $isFresh = $false; if ($item.PSObject.Properties['FreshRender']) { $isFresh = [bool]$item.FreshRender }
+        # An automatic retry after an out-of-memory failure: force the
+        # half-size pipeline regardless of the MP threshold.
+        $forceHalf = $false; if ($item.PSObject.Properties['ForceHalf']) { $forceHalf = [bool]$item.ForceHalf }
         $refineSpeed = 'Exact'
         $targetMP = ([double]$item.W * [double]$item.H) / 1000000.0
-        if ($targetMP -gt 4.5) {
+        if ($targetMP -gt 4.5 -and -not $forceHalf) {
             $refineSpeed = '4x'
             $log.AppendText(("`r`nNote: {0} x {1} is too large for a native render on most GPUs - rendering at half size with all {2} steps and enlarging to full size (fast-mode pipeline, never distorted)." -f $item.W, $item.H, $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})))
         }
-        $isFresh = $false; if ($item.PSObject.Properties['FreshRender']) { $isFresh = [bool]$item.FreshRender }
+        if ($forceHalf) {
+            $refineSpeed = '4x'
+            $log.AppendText(("`r`nRetrying the improvement at HALF SIZE after the native render ran out of memory: target {0} x {1}, rendering at half with all {2} steps and enlarging to full size (composition kept from the image)." -f $item.W, $item.H, $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})))
+        }
         $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps});Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode=$refineSpeed;InitImage=$(if($isFresh){$null}else{[string]$item.File});InitStrength=$(if($isFresh){0.0}else{[double]$item.Strength});RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler}
         $status.Text = ("Improving image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
         if ($isFresh) {
