@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.28)
+MOSS Image Studio - portable build (v0.1.30)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,21 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.30
+----------------------
+- Fixed: the history code prompt did not reliably have the code field
+  selected for typing (another window could take the focus right after the
+  prompt opened). The field is now focused on show AND re-focused by a
+  short one-shot timer, so you can type the code straight away.
+
+What is new in v0.1.29
+----------------------
+- Fixed: "Improve using the settings in the main window" asked for a prompt
+  even when the image had one stored. If the prompt box is empty, MOSS now
+  reads the image's own prompt from its info file (decrypted with your
+  history code), fills it into the prompt box and uses it. If neither is
+  available, the message now explains what to do.
 
 What is new in v0.1.28
 ----------------------

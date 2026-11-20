@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.28'
+$script:AppVersion = '0.1.30'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -49,7 +49,14 @@ function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history') {
     $ok=New-Object System.Windows.Forms.Button; $ok.Text='Continue'; $ok.Location=New-Object System.Drawing.Point(218,145); $ok.DialogResult=[System.Windows.Forms.DialogResult]::OK; $dialog.Controls.Add($ok)
     $cancel=New-Object System.Windows.Forms.Button; $cancel.Text='Cancel'; $cancel.Location=New-Object System.Drawing.Point(308,145); $cancel.DialogResult=[System.Windows.Forms.DialogResult]::Cancel; $dialog.Controls.Add($cancel); $dialog.AcceptButton=$ok; $dialog.CancelButton=$cancel
     # The code field must be ready for typing the moment the dialog appears.
-    $dialog.Add_Shown({ $first.Focus() }.GetNewClosure())
+    # When this prompt is raised from the main window's Shown event, Windows
+    # can activate another window right after the dialog's own Shown event
+    # and steal the focus, so a short one-shot timer re-applies it.
+    $dialog.Add_Shown({ [void]$first.Focus(); $first.Select() }.GetNewClosure())
+    $focusTimer = New-Object System.Windows.Forms.Timer
+    $focusTimer.Interval = 50
+    $focusTimer.Add_Tick({ [void]$first.Focus(); $first.Select(); $focusTimer.Stop() }.GetNewClosure())
+    $focusTimer.Start()
     try {
         while ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             $maxLength = if ($Create) { 16 } else { 64 }
@@ -1744,7 +1751,21 @@ try {
         if(-not (ConvertTo-MossDouble $cfg.Text ([ref]$ccf)) -or $ccf -le 0 -or $ccf -gt 30){[System.Windows.Forms.MessageBox]::Show('CFG scale (main window) must be greater than 0 and no more than 30.','Invalid CFG')|Out-Null;return}
         if(-not [int]::TryParse($seed.Text,[ref]$csd) -or $csd -lt -1){[System.Windows.Forms.MessageBox]::Show('Seed (main window) must be -1 (random) or a non-negative integer.','Invalid seed')|Out-Null;return}
         $cPrompt=($prompt.Text -replace "(\r?\n)+",' ').Trim()
-        if(-not $cPrompt){[System.Windows.Forms.MessageBox]::Show('Enter a prompt in the main window first - it is used for the improvement.','Prompt required')|Out-Null;return}
+        if(-not $cPrompt){
+            # The prompt box is empty: fall back to the image's own prompt from
+            # its sidecar (decrypted only when the history code was entered),
+            # and prefill the box so the user can see what will be used.
+            $side=[System.IO.Path]::ChangeExtension($selFile,'.json')
+            if (Test-Path -LiteralPath $side -PathType Leaf) {
+                try {
+                    $sc = Get-Content -LiteralPath $side -Raw | ConvertFrom-Json
+                    if (-not $script:HistoryLocked -and $script:HistoryPassphrase -and $sc.PromptProtected) {
+                        try { $dp = Unprotect-MossPayload ([string]$sc.PromptProtected) $script:HistoryPassphrase; if ($dp) { $cPrompt = ([string]$dp -replace "(\r?\n)+",' ').Trim(); $prompt.Text=[string]$dp } } catch {}
+                    }
+                } catch {}
+            }
+        }
+        if(-not $cPrompt){[System.Windows.Forms.MessageBox]::Show('No prompt found. Enter one in the main window, or enter your history code so MOSS can read the prompt stored with this image.','Prompt required')|Out-Null;return}
         $cStrength=0.6; $t=0.0; if (ConvertTo-MossDouble ([string]$script:Settings.ImproveStrength) ([ref]$t)) { if($t -ge 0.05 -and $t -le 0.95){ $cStrength=$t } }
         $cStrength=Get-MossImproveStrength $selFile $cStrength
         $useSeed=$csd; if($useSeed -lt 0){ $useSeed=Get-Random -Minimum 1 -Maximum 2147483000 }
