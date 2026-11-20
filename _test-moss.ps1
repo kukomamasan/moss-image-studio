@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.52' ($src.Contains("AppVersion = '0.1.52'"))
+Test 'version is 0.1.53' ($src.Contains("AppVersion = '0.1.53'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -55,6 +55,7 @@ Test 'right-click menu is settings-driven' ($src.Contains('Improve this image (s
 Test 'improve is the FIRST right-click item (before the re-render item)' ($src.IndexOf("miCustom=`$refineMenu.Items.Add('Improve this image (same seed and composition)...')") -lt $src.IndexOf('miFresh='))
 Test 'plain sidecar prompt saved even when history is locked (continue without password)' ($src.Contains('chose to continue WITHOUT the password at startup') -and $src.Contains('The encrypted history envelope in settings.json is') -and (-not ($src.Contains('} elseif (-not $script:HistoryLocked) {'))))
 Test 'readers accept plain sidecar prompts (improve works without the code)' ($src.Contains('if (-not ([string]$d.Prompt).Trim() -and $sc.Prompt)') -and $src.Contains('if(-not $cPrompt -and $sc.Prompt)') -and $src.Contains("Plain sidecar prompt (no code entered when the image was made)"))
+Test 'History code button opens a menu with an UNLOCK option' ($src.Contains('Enter code to unlock the prompt history...') -and $src.Contains('Set a NEW code (clears the saved history!)...') -and $src.Contains('Turn off prompt history (deletes the saved history)...') -and $src.Contains('Show-MossHistoryCodeMenu') -and $src.Contains('You can enter the code later via the History code... button'))
 Test 'progress bar driven by the engine step counter' ($src.Contains('Slim progress bar directly above the status line') -and $src.Contains('StepNum = [int]$numerator; $st.StepDen = [int]$denominator') -and $src.Contains('" | step $([int]$st.StepNum)/$([int]$st.StepDen)"') -and $src.Contains('$prog.Value = [Math]::Max($prog.Minimum,[Math]::Min($prog.Maximum,$overall))') -and $src.Contains("$prog.Style = 'Marquee'"))
 Test 'time taken survives completion (status + log)' ($src.Contains('the total elapsed survives completion') -and $src.Contains('Improvement finished - $script:RefineTotal image(s) processed$queueElapsed') -and $src.Contains('$batchTimeText = '' | total time ''') -and $src.Contains('$script:RefineStartedAt'))
 Test 'encrypted-prompt improve error is specific and actionable' ($src.Contains('it is stored ENCRYPTED (a history code was active when the image was generated), and no code is currently entered') -and $src.Contains("1. Click 'History code...' in the header, enter your code, then right-click the image again") -and $src.Contains('2. Or type a NEW prompt in the main window and try again') -and $src.Contains('Nothing was generated and the image was not changed'))
