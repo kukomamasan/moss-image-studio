@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.13)
+MOSS Image Studio - portable build (v0.1.14)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -11,13 +11,11 @@ application stays visible and shows its current version in the title and header.
 Closing MOSS ends its launcher and PowerShell host, and stops active image-engine
 processes. Temporary update files are removed after installation or download failure.
 
-Administrator code
-------------------
-This build uses one administrator account. On first use, you can create an
-administrator code or continue without one. If a code has already been set,
-MOSS asks you to enter it. If it is forgotten, choose Continue without code to
-remove the administrator code and proceed. MOSS has no additional user profiles
-or child settings.
+Prompt history code
+-------------------
+Access to saved prompts is protected by the prompt-history code you choose; the
+code itself is never stored. If you forget it, MOSS can continue without history
+while preserving the encrypted history until you reset it.
 
 Image generation
 ----------------
@@ -30,8 +28,13 @@ Image generation
   entire image batch, with an ETA when the engine reports step progress or
   enough images have completed. CPU offload is selected automatically only when
   detected GPU memory is too limited for the model.
-- Multiple images are generated one after another; every requested image is
-  tracked, shown in the preview list and saved.
+- Multiple images are rendered in a single engine run: the model is loaded once
+  and the prompt conditioning is reused for every image in the batch, which is
+  noticeably faster than restarting the engine for each image. Seeds increment
+  automatically (base seed, base+1, ...) exactly as before.
+- Weight placement (GPU, then RAM, then disk as needed) is decided by the
+  engine's built-in auto-fit system, which works the same way for NVIDIA, AMD,
+  Intel and CPU builds. MOSS no longer forces a CPU-offload mode itself.
 - Cancel stops the active engine process and its child processes, then reports
   that generation was cancelled.
 - Images are saved under outputs\admin\ by default (configurable in the app).
@@ -78,7 +81,7 @@ Errors and diagnostics
 
 Privacy and portability
 -----------------------
-- The administrator code is optional and is separate from the prompt-history code.
+- The prompt-history code is the only password MOSS uses; it protects saved prompts and is never stored.
 - Prompt history is encrypted with a code you choose; the code is not stored.
 - New history codes must be 4-16 characters; letters, numbers, and symbols are allowed.
 - If an existing history code is wrong or cancelled, MOSS can continue without history
