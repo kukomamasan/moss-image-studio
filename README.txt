@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.39)
+MOSS Image Studio - portable build (v0.1.40)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -119,6 +119,55 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.40
+----------------------
+- NEW: "Update engine..." in the header - updates the sd-cli core files
+  (the rendering engine in the bin folder) separately from MOSS itself.
+  The dialog shows the installed engine version, the latest official
+  stable-diffusion.cpp release, recent release changelogs, and can
+  download and install the matching build automatically: the engine
+  variant (CUDA 12 / Vulkan / ROCm / SYCL / CPU) is preselected from
+  your backend, the optional CUDA runtime (cudart) can be included,
+  the current engine files are backed up to engine-backup-<time> and
+  restored automatically if the install fails. Models, prompts, outputs
+  and settings are never touched.
+- NEW: "Restore a backup..." in the engine dialog - lists the automatic
+  engine-backup-<time> folders and copies a chosen one back over the
+  current engine files (a manual rollback, verified by running the
+  engine afterwards). Also reachable when the release feed cannot be
+  read (works offline), and the dialog now always opens even when the
+  engine is already up to date (marked UP TO DATE), so changelogs and
+  the rollback stay available at any time. Engine backups contain only
+  the small engine files - the large model files are never modified by
+  an engine update, so they are never backed up or rolled back.
+- The old "Check updates" button is now called "Update MOSS..." so it is
+  obvious that it updates the MOSS application itself, not the engine.
+  Both header buttons have tooltips explaining exactly what each one
+  updates.
+- Engine updates are logged to logs\engine-update-<time>.txt.
+- NEW: the engine dialog now also checks the model files at the same time
+  (the 11 GB of downloads on Hugging Face are matched by size only - no
+  multi-GB download just for a check). Models that are out of date or not
+  installed appear in a checklist with their sizes; old model files are
+  renamed to <name>.old-<time> before a new one is downloaded (instant,
+  needs no extra disk space), and the newest 3 backups per model are kept.
+  The confirm dialog shows each model's size, the disk space needed and
+  the expected download time measured from your connection, and the
+  download is verified by size before anything replaces an existing file.
+- NEW: at startup MOSS checks whether the engine or the model files are
+  missing (for example right after a fresh download) and offers to
+  download them immediately, with a time estimate from your measured
+  connection speed - so a fresh MOSS can get to work in one click.
+- NEW: if MOSS was unpacked on a drive that is too small for the model
+  downloads, it suggests a better place (the fixed drive with the most
+  free space), moves itself there with one click and creates a "MOSS
+  Image Studio" desktop shortcut pointing at the new copy; downloads
+  then run from the new location and the old copy can be deleted.
+- Backups are kept lean: engine backups are single compressed zips
+  (files that cannot shrink are stored raw - this made backups 15%
+  faster in testing), and only the newest 3 engine backups are kept;
+  older ones are deleted automatically with a note in the log.
 
 What is new in v0.1.39
 ----------------------
