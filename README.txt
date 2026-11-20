@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.42)
+MOSS Image Studio - portable build (v0.1.43)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -120,8 +120,23 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
-What is new in v0.1.42
+What is new in v0.1.43
 ----------------------
+- Fixed: the history code dialog no longer pins itself above ALL windows
+  (Topmost removed) - it stays above MOSS where it belongs, but other
+  programs can take focus normally while it waits. It still grabs the
+  foreground at startup so you can type the code immediately.
+- Safe improves: 'Re-render from the same seed' and 'Improve ALL files'
+  now refuse/skip images whose prompt cannot be read (stored encrypted
+  by an older MOSS version and no history code entered) - without the
+  prompt they would create a completely different picture. The confirm
+  explains it and how to unlock the prompt instead.
+- Generation NEVER asks you to create a history code any more: with no
+  code in use, prompt history and the per-image prompts are stored as
+  plain text, so improving works at any time (no nag, no blocked
+  generation). Setting a code stays optional via 'History code...' -
+  with a code entered, history is encrypted as before.
+
 - Fixed: improving an image could produce a WORSE result than the
   original. Two causes, both fixed:
   1) "Improve using the settings in the main window" used the main
@@ -443,6 +458,9 @@ Interface
 - MOSS is resizable; resizing gives extra vertical space to the image preview;
   maximizing hides the file list and log until the window is restored.
 - Designed for Windows PowerShell 5.1. No installation is required.
+
+
+
 
 
 
