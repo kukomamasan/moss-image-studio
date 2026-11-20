@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.33)
+MOSS Image Studio - portable build (v0.1.34)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,13 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.34
+----------------------
+- Improved: when the engine stops with an error and no message at all (the
+  most common cause is running out of GPU or system memory at very large
+  render sizes), the generation log now explains this and suggests a
+  smaller size, fewer steps, or a fast speed mode.
 
 What is new in v0.1.33
 ----------------------

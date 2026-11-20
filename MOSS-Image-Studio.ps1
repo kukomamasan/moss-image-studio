@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.33'
+$script:AppVersion = '0.1.34'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = '' }
@@ -1580,7 +1580,15 @@ try {
         if ($null -eq $finalMsg) { $finalMsg = "Completed - $ok of $($job.Count) image(s) generated" }
         Complete-MossGen $finalMsg
         if ($ok -gt 0) { $log.AppendText("`r`nCompleted. Output folder: $($job.OutputPath)") }
-        if ($exitCode -ne 0 -or $missing.Count -gt 0) { $log.AppendText("`r`nOne or more images failed. Engine output above; a technical report was saved to the logs folder.") }
+        if ($exitCode -ne 0 -or $missing.Count -gt 0) {
+            $log.AppendText("`r`nOne or more images failed. Engine output above; a technical report was saved to the logs folder.")
+            # Most common silent failure: the engine dies without any output at
+            # very large render sizes (out of GPU/RAM). Give plain guidance.
+            if ($exitCode -ne 0 -and -not $stdout.Trim() -and -not $stderr.Trim()) {
+                $mp = [Math]::Round(([double]$job.Width * [double]$job.Height / 1000000.0), 1)
+                $log.AppendText(("`r`nHint: the engine stopped without any message. At {0} x {1} ({2} MP, {3} steps) the most common cause is running out of GPU or system memory. Try a smaller size, fewer steps, or a fast speed mode (which renders small and enlarges)." -f $job.Width, $job.Height, $mp, $job.Steps))
+            }
+        }
         $log.AppendText("`r`n--- Batch finished | exit $exitCode | $ok of $($job.Count) image(s) ---`r`n$outputText`r`n")
         # Continue any pending native refinement queue unless the user cancelled.
         if (-not $st.CancelRequested) { Start-MossNextRefine } else { $script:RefineQueue.Clear(); $script:RefineTotal = 0 }
