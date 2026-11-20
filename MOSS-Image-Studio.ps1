@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.67'
+$script:AppVersion = '0.1.69'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -1943,7 +1943,7 @@ try {
     $tip.SetToolTip($seed,'Same seed + same prompt = the same image. -1 picks a random seed each run.')
     $tip.SetToolTip($out,'Where finished images are saved.')
     $tip.SetToolTip($outBrowse,'Choose the output folder.')
-    $status=New-Object System.Windows.Forms.Label; $status.Text='Ready'; $status.Location=New-Object System.Drawing.Point(18,668); $status.Size=New-Object System.Drawing.Size(664,24); $status.Anchor='Bottom,Left,Right'; $status.ForeColor=$cMuted; $left.Controls.Add($status)
+    $status=New-Object System.Windows.Forms.Label; $status.Text='Ready'; $status.Location=New-Object System.Drawing.Point(18,668); $status.Size=New-Object System.Drawing.Size(664,24); $status.Anchor='Bottom,Left,Right'; $status.ForeColor=$cMuted; $status.Font=New-Object System.Drawing.Font('Consolas',9); $left.Controls.Add($status)
     # Progress bar pinned to the VERY BOTTOM of the left panel (anchored
     # Bottom) so it stays at the bottom edge when the window grows or is
     # maximized - previously it kept its top-anchored position and floated
@@ -2230,6 +2230,14 @@ try {
         return $span.ToString('m\:ss')
     }
 
+    # Fixed-width time for the status line (h:mm:ss ALWAYS): the numbers stay
+    # in place while they grow (user: the line changing length is hard to read).
+    function Format-MossFixedTime([double]$Seconds) {
+        if ($Seconds -lt 0) { $Seconds = 0 }
+        $span = [TimeSpan]::FromSeconds([Math]::Min([int]::MaxValue, [Math]::Ceiling($Seconds)))
+        return $span.ToString('h\:mm\:ss')
+    }
+
     function Update-MossLiveProgress {
         $st = $script:GenState
         if (-not $st.IsRunning -or $null -eq $st.Process -or $st.Process.HasExited) { return }
@@ -2262,6 +2270,24 @@ try {
         $progressWindow = $combined
         $lastImgIdx = $combined.LastIndexOf('generating image:')
         if ($lastImgIdx -ge 0) { $progressWindow = $combined.Substring($lastImgIdx) }
+        # LIVE COMPLETION OVERLAP (user: the resizer waited for the whole
+        # batch - resizing is CPU work, generation is GPU work, so they can
+        # run at the same time): an image counts as fully written when the
+        # engine logs 'generating image: k/N' for a LATER image, or when
+        # 'save result image' follows the current image's own line. Each such
+        # image is upscaled + registered NOW while the engine keeps rendering.
+        $lastGen = 0
+        foreach ($bm in $batchMatches) { if ([int]$bm.Groups[1].Value -gt $lastGen) { $lastGen = [int]$bm.Groups[1].Value } }
+        $maxDone = if ($progressWindow -match 'save result image') { $lastGen } else { [Math]::Max(0, $lastGen - 1) }
+        if ($maxDone -gt 0) {
+            for ($ci = 1; $ci -le $maxDone; $ci++) {
+                if ($st.LiveCompletedImages -contains $ci) { continue }
+                $liveSeed = $null
+                foreach ($bm in $batchMatches) { if ([int]$bm.Groups[1].Value -eq $ci) { $liveSeed = [long]$bm.Groups[3].Value; break } }
+                if ($null -eq $liveSeed) { $liveSeed = $st.CurrentImageSeed }
+                if (Complete-MossBatchImage -st $st -job $st.Job -i $ci -thisSeed $liveSeed -up $st.UpscaleTarget) { [void]$st.LiveCompletedImages.Add($ci) }
+            }
+        }
         # PRIMARY: the engine's sampling progress is a console bar, printed
         # carriage-return separated: '  |====>  | 1/4 - 1.37s/it'. It shows NO
         # percent sign and NO word 'steps' - the old regexes could never match
@@ -2318,7 +2344,7 @@ try {
         if ($null -ne $imageEstimate) {
             $remaining = [Math]::Max(0, $imageEstimate - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $imageEstimate)
         }
-        if ($null -ne $remaining) { $etaText = "ETA ~$(Format-MossDuration $remaining) (all $($job.Count) images)" }
+        if ($null -ne $remaining) { $etaText = "ETA ~$(Format-MossFixedTime $remaining) (all $($job.Count))" }
         # After the last sampling step the engine still has to decode the
         # latent into pixels and save the file (several seconds at bigger
         # sizes, with no progress output of its own). Say so instead of
@@ -2334,10 +2360,16 @@ try {
         if ($saveIdx -ge 0) { $savingNow = $true }
         elseif ($decIdx -ge 0 -and ($decDoneIdx -lt 0 -or $decIdx -gt $decDoneIdx)) { $decodingNow = $true }
         elseif ($decDoneIdx -ge 0) { $savingNow = $true }
-        $progressNote = if ($st.StepDen -gt 0) { " | step $([int]$st.StepNum)/$([int]$st.StepDen)" } elseif ($null -ne $engineProgress) { " | image $([int]$st.ImageProgress)%" } else { ' | warming up the model...' }
-        if ($decodingNow) { $progressNote = ' | decoding and saving the image...' }
-        elseif ($savingNow) { $progressNote = ' | saving...' }
-        $status.Text = "Image $currentImage of $($job.Count) | $overall% overall$progressNote | total elapsed $(Format-MossDuration $elapsed) | $etaText"
+        # Fixed-width status line (user: keep the line length constant so
+        # the numbers stay in place and it is easier to read): every number
+        # is padded to a fixed width, the time is always h:mm:ss, the phase
+        # text is padded to a fixed width and the font is monospace.
+        $phase = if ($decodingNow) { 'decoding/saving...' }
+                 elseif ($savingNow) { 'saving...' }
+                 elseif ($st.StepDen -gt 0) { ('step {0,3}/{1,3}' -f [int]$st.StepNum, [int]$st.StepDen) }
+                 elseif ($null -ne $engineProgress) { ('image {0,3}%' -f [int]$st.ImageProgress) }
+                 else { 'warming up...' }
+        $status.Text = ('Image {0,3}/{1,3} | {2,3}% | {3} | elapsed {4} | {5}' -f $currentImage, [int]$job.Count, $overall, $phase.PadRight(17), (Format-MossFixedTime $elapsed), $etaText)
         # Drive the progress bar from the step counter (same numbers as the
         # status text above; the old right-side numeric readout duplicated it
         # and is gone).
@@ -2541,6 +2573,54 @@ try {
         } finally { $img.Dispose(); $ms.Dispose() }
     }
 
+    function Complete-MossBatchImage {
+        # Processes ONE finished batch image: upscale (speed modes), sidecar,
+        # results and the generated-files list. Used BOTH live (while the
+        # engine renders the next images - the resize is CPU work and
+        # generation is GPU work, so they overlap; user request) and at batch
+        # end for whatever is left. Returns $true when the file was there.
+        param($st,$job,$i,$thisSeed,$up)
+        $patternBase = ([string]$st.CurrentFile) -replace '%02d','{0:D2}'
+        $file = $patternBase -f $i
+        if (-not (Test-Path -LiteralPath $file)) { return $false }
+        $upscaledNote = $null
+        if ($up) {
+            try {
+                Resize-MossImageTo $file ([int]$up.W) ([int]$up.H)
+                $upscaledNote = ('upscaled from {0} x {1}' -f $up.FromW, $up.FromH)
+            } catch {
+                $upscaledNote = ('kept at engine size {0} x {1} (resize failed: {2})' -f $up.FromW, $up.FromH, $_.Exception.Message)
+            }
+        }
+        try {
+            $meta = [ordered]@{
+                Width = $job.Width; Height = $job.Height
+                Steps = $job.Steps; CfgScale = $job.Cfg; Seed = $thisSeed
+                Backend = $job.Backend
+                SpeedMode = [string]$job.SpeedMode
+                UpscaledFrom = $upscaledNote
+                InitImage = $(if($job.InitImage){ [System.IO.Path]::GetFileName([string]$job.InitImage) }else{ $null })
+                InitStrength = $(if($job.InitImage){ [double]$job.InitStrength }else{ $null })
+                Sampler = $(if($job.SamplingMethod){ [string]$job.SamplingMethod }else{ $null })
+                Scheduler = $(if($job.Scheduler){ [string]$job.Scheduler }else{ $null })
+                GeneratedAt = (Get-Date).ToString('o'); Engine = $job.Engine
+            }
+            if ($script:HistoryPassphrase) {
+                $meta.PromptProtected = Protect-MossPayload ([string]$job.Prompt) $script:HistoryPassphrase
+                if ($job.NegativePrompt) { $meta.NegativePromptProtected = Protect-MossPayload ([string]$job.NegativePrompt) $script:HistoryPassphrase }
+            } else {
+                $meta.Prompt = [string]$job.Prompt
+                if ($job.NegativePrompt) { $meta.NegativePrompt = [string]$job.NegativePrompt }
+            }
+            $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath ([System.IO.Path]::ChangeExtension($file, '.json')) -Encoding UTF8
+        } catch {}
+        [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = 0; Seed = $thisSeed; Output = 'OK' })
+        [void]$fileList.Items.Add($file)
+        [void]$script:GeneratedFiles.Add($file)
+        $fileList.SelectedIndex = $fileList.Items.Count - 1
+        return $true
+    }
+
     function On-MossGenTimerTick {
         $st = $script:GenState
         if ($null -eq $st.Process) { return }
@@ -2598,6 +2678,9 @@ try {
         $ok = 0
         $missing = New-Object System.Collections.Generic.List[string]
         for ($i = 1; $i -le $job.Count; $i++) {
+            # Already upscaled + registered live while the engine was still
+            # rendering the rest (CPU/GPU overlap) - just count it.
+            if ($st.LiveCompletedImages -contains $i) { $ok++; continue }
             $file = $patternBase -f $i
             $thisSeed = if ($seedMap.ContainsKey($i)) { $seedMap[$i] } else { $job.Seed + ($i - 1) }
             if ($exitCode -eq 0 -and (Test-Path -LiteralPath $file)) {
@@ -2745,6 +2828,9 @@ try {
         $script:GenState.CurrentImageSeed = 0
         $script:GenState.ImageStartedAt = $null
         $script:GenState.JobStartedAt = Get-Date
+        # Images already processed live (upscaled + registered) while the
+        # engine kept rendering; the batch-end pass skips these.
+        $script:GenState.LiveCompletedImages = New-Object System.Collections.ArrayList
 
         $timer = New-Object System.Windows.Forms.Timer
         $timer.Interval = 400
