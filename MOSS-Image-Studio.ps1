@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.66'
+$script:AppVersion = '0.1.67'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -2298,16 +2298,27 @@ try {
         $currentImage = [Math]::Max(1, [int]$st.CurrentImageIndex)
         $overall = [int][Math]::Floor(((($currentImage - 1) * 100) + [int]$st.ImageProgress) / [Math]::Max(1, [int]$job.Count))
         $overall = [Math]::Max(0, [Math]::Min(99, $overall))
+        # ETA is ALWAYS for the WHOLE batch (user: 'if i select to make 64
+        # images, the eta should be when all pictures is done'): the rest of
+        # the current image + every remaining image. The per-image total is
+        # estimated from the live step progress, and blended with the average
+        # time of the images already finished once they exist - history is
+        # the steadier signal, the live estimate catches drift.
         $etaText = 'ETA calculating'
         $remaining = $null
+        $imageEstimate = $null
+        $avgDone = $null
+        if ($st.ImageDurations.Count -gt 0) { $avgDone = (($st.ImageDurations | Measure-Object -Average).Average) }
         if ($null -ne $engineProgress -and $engineProgress -gt 0) {
-            $imageTotalEstimate = $imageElapsed * 100.0 / $engineProgress
-            $remaining = ($imageTotalEstimate - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $imageTotalEstimate)
-        } elseif ($st.ImageDurations.Count -gt 0) {
-            $average = (($st.ImageDurations | Measure-Object -Average).Average)
-            $remaining = [Math]::Max(0, $average - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $average)
+            $imageEstimate = $imageElapsed * 100.0 / $engineProgress
+            if ($null -ne $avgDone) { $imageEstimate = ($imageEstimate + $avgDone) / 2.0 }
+        } elseif ($null -ne $avgDone) {
+            $imageEstimate = $avgDone
         }
-        if ($null -ne $remaining) { $etaText = "ETA ~$(Format-MossDuration $remaining)" }
+        if ($null -ne $imageEstimate) {
+            $remaining = [Math]::Max(0, $imageEstimate - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $imageEstimate)
+        }
+        if ($null -ne $remaining) { $etaText = "ETA ~$(Format-MossDuration $remaining) (all $($job.Count) images)" }
         # After the last sampling step the engine still has to decode the
         # latent into pixels and save the file (several seconds at bigger
         # sizes, with no progress output of its own). Say so instead of
