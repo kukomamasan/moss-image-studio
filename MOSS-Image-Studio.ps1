@@ -31,6 +31,7 @@ using System.Runtime.InteropServices;
 public static class MossNativeWindow {
     [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool SetForegroundWindow(IntPtr hWnd);
 }
 "@
     }
@@ -39,6 +40,9 @@ public static class MossNativeWindow {
 }
 
 function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history',[System.Windows.Forms.Form]$Owner=$null) {
+    # A call site that passes $null (older code did) would render the sentence
+    # with a missing word ('Enter the  code.') - fall back to 'history'.
+    if([string]::IsNullOrWhiteSpace($Purpose)){ $Purpose='history' }
     $dialog = New-Object System.Windows.Forms.Form
     $dialog.Text = if ($Create) { "Set $Purpose code" } else { "Enter $Purpose code" }
     $dialog.Size = New-Object System.Drawing.Size(440,220); $dialog.StartPosition='CenterParent'; $dialog.FormBorderStyle='FixedDialog'; $dialog.MaximizeBox=$false; $dialog.MinimizeBox=$false; $dialog.Topmost=$true
@@ -49,13 +53,25 @@ function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history',[Sys
     $ok=New-Object System.Windows.Forms.Button; $ok.Text='Continue'; $ok.Location=New-Object System.Drawing.Point(218,145); $ok.DialogResult=[System.Windows.Forms.DialogResult]::OK; $dialog.Controls.Add($ok)
     $cancel=New-Object System.Windows.Forms.Button; $cancel.Text='Cancel'; $cancel.Location=New-Object System.Drawing.Point(308,145); $cancel.DialogResult=[System.Windows.Forms.DialogResult]::Cancel; $dialog.Controls.Add($cancel); $dialog.AcceptButton=$ok; $dialog.CancelButton=$cancel
     # The code field must be ready for typing the moment the dialog appears.
-    # When this prompt is raised from the main window's Shown event, Windows
-    # can activate another window right after the dialog's own Shown event
-    # and steal the focus, so a short one-shot timer re-applies it.
-    $dialog.Add_Shown({ [void]$first.Focus(); $first.Select() }.GetNewClosure())
+    # Windows can take the foreground back right after the dialog's own Shown
+    # event (startup without an owner window, or the parent activating), so a
+    # retry timer keeps pulling the dialog to the foreground and focusing the
+    # code field until it REALLY has focus (max ~2 s). The counter lives in
+    # $dialog.Tag because scriptblock writes do not persist in function scope.
+    $dialog.Add_Shown({ try { $dialog.Activate() } catch {}; [void]$first.Focus(); $first.Select() }.GetNewClosure())
     $focusTimer = New-Object System.Windows.Forms.Timer
-    $focusTimer.Interval = 50
-    $focusTimer.Add_Tick({ [void]$first.Focus(); $first.Select(); $focusTimer.Stop() }.GetNewClosure())
+    $focusTimer.Interval = 60
+    $dialog.Tag=0
+    $focusTimer.Add_Tick({
+        $n=0
+        if($dialog.Tag){ $n=[int]$dialog.Tag }
+        $n++
+        $dialog.Tag=$n
+        if($first.Focused -or $n -gt 30){ $focusTimer.Stop(); return }
+        try { [void][MossNativeWindow]::SetForegroundWindow($dialog.Handle) } catch {}
+        try { $dialog.Activate() } catch {}
+        [void]$first.Focus(); $first.Select()
+    }.GetNewClosure())
     $focusTimer.Start()
     try {
         while ($dialog.ShowDialog($Owner) -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -1550,6 +1566,7 @@ $updateBtn.Add_Click({
             $answer=[System.Windows.Forms.MessageBox]::Show("A new MOSS version is available: v$tagText (you have v$($script:AppVersion)). Download and install it now? MOSS will close, replace the app files, keep config/models/outputs, and restart.",'MOSS update available',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Information)
             if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
             $asset=@($release.assets | Where-Object { $_.name -eq 'MOSS-Image-Studio.zip' } | Select-Object -First 1)
+            if(-not $asset){ $asset=@($release.assets | Where-Object { [string]$_.name -like 'MOSS-Image-Studio*.zip' } | Select-Object -First 1) }
             if(-not $asset -or -not $asset[0].browser_download_url){[System.Windows.Forms.MessageBox]::Show('This release does not include MOSS-Image-Studio.zip, so MOSS cannot install it automatically.','MOSS updater',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null;return}
             try {
                 $tempRoot=Join-Path ([System.IO.Path]::GetTempPath()) ('MOSS-Update-'+[guid]::NewGuid().ToString('N'))
@@ -1630,7 +1647,7 @@ try {
         # it opens in context over MOSS instead of floating alone at startup.
         if (-not $script:LockedHistoryEnvelope) { return }
         while ($true) {
-            $candidate = Get-MossHistoryPassphrase $false $null $f
+            $candidate = Get-MossHistoryPassphrase $false 'history' $f
             if ($candidate) {
                 try {
                     $plain = Unprotect-MossPayload ([string]$script:LockedHistoryEnvelope) $candidate
