@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.60' ($src.Contains("AppVersion = '0.1.60'"))
+Test 'version is 0.1.61' ($src.Contains("AppVersion = '0.1.61'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -58,7 +58,9 @@ Test 'readers accept plain sidecar prompts (improve works without the code)' ($s
 Test 'History code button opens a menu with an UNLOCK option' ($src.Contains('Enter code to unlock the prompt history...') -and $src.Contains('Set a NEW code (clears the saved history!)...') -and $src.Contains('Turn off prompt history (deletes the saved history)...') -and $src.Contains('Show-MossHistoryCodeMenu') -and $src.Contains('You can enter the code later via the History code... button'))
 Test 'time taken survives completion (status + log)' ($src.Contains('the total elapsed survives completion') -and $src.Contains('Improvement finished - $script:RefineTotal image(s) processed$queueElapsed') -and $src.Contains('$batchTimeText = '' | total time ''') -and $src.Contains('$script:RefineStartedAt'))
 Test 'improve dialog: size picker with Same/2x/4x and image seed prefill' ($src.Contains('PICK-YOUR-QUALITY DIALOG') -and $src.Contains('Target size') -and $src.Contains('$sameBtn') -and $src.Contains('$twoBtn') -and $src.Contains('$fourBtn') -and $src.Contains("the image's own seed - keeps the result aligned") -and $src.Contains('the original is never modified'))
-Test 'progress bar pinned to the bottom, driven by the engine step counter, with numeric readout' ($src.Contains('Progress bar pinned to the VERY BOTTOM') -and $src.Contains('StepNum = [int]$numerator; $st.StepDen = [int]$denominator') -and $src.Contains('" | step $([int]$st.StepNum)/$([int]$st.StepDen)"') -and $src.Contains('$prog.Value = [Math]::Max($prog.Minimum,[Math]::Min($prog.Maximum,$overall))') -and $src.Contains("$prog.Style = 'Marquee'") -and $src.Contains('$progPct') -and $src.Contains("Anchor='Bottom,Left,Right'"))
+Test 'progress bar pinned to the bottom, driven by the engine step counter (numeric readout removed - status line shows all numbers)' ($src.Contains('Progress bar pinned to the VERY BOTTOM') -and $src.Contains('StepNum = [int]$numerator; $st.StepDen = [int]$denominator') -and $src.Contains('" | step $([int]$st.StepNum)/$([int]$st.StepDen)"') -and $src.Contains('$prog.Value = [Math]::Max($prog.Minimum,[Math]::Min($prog.Maximum,$overall))') -and $src.Contains("$prog.Style = 'Marquee'") -and $src.Contains("Anchor='Bottom,Left,Right'"))
+Test 'no duplicate numeric readout next to the bar (numbers live in the status line only)' (-not $src.Contains('progPct'))
+Test 'loading phase says warming up in the status line (readout text moved there)' ($src.Contains("' | warming up the model...'"))
 Test 'memory retry chain Exact->4x->8x->Fast with ForcedSpeed' ($src.Contains('''Exact'' { $retryMode = ''4x'' }') -and $src.Contains('''4x''    { $retryMode = ''8x'' }') -and $src.Contains('''8x''    { $retryMode = ''Fast'' }') -and $src.Contains('ForcedSpeed=$retryMode') -and $src.Contains('Retrying the improvement with a SMALLER render size'))
 Test 'style prefix not doubled when the prompt already has it' ($src.Contains('-not $p.ToLowerInvariant().StartsWith($stylePrefix.ToLowerInvariant())'))
 Test 'style prefix not doubled when the prompt already has it' ($src.Contains('-not $p.ToLowerInvariant().StartsWith($stylePrefix.ToLowerInvariant())'))
@@ -257,6 +259,7 @@ try {
     $mw = [regex]::Matches($twoImg.Substring($widx), $pat)
     Test 'runtime: batch window keeps progress on the CURRENT image (1/4, not the old 3/4)' ($mw.Count -eq 1 -and $mw[0].Groups[1].Value -eq '1' -and $mw[0].Groups[2].Value -eq '4')
     Test 'runtime: textual step counter still works as fallback' ([regex]::Matches('step 17/50', '(?im)(?:\bstep\s*[:#]?\s*(\d+)\s*/\s*(\d+)\b|\b(\d+)\s*/\s*(\d+)\s*steps?\b)').Count -eq 1)
+} catch { Test 'runtime: progress parsing block ran without exception' $false }
 # v0.1.60: the event-based capture NEVER fired in the STA + WinForms app
 # (PowerShell's event queue is not pumped by the message loop), so the engine
 # output was empty for the whole run - live progress, %, ETA and the exit log
@@ -280,7 +283,23 @@ try {
     $e3 = [regex]::Matches($memOut, "(?m)^\[E\][^\r\n]*")[0].Value
     Test 'runtime: memory-ish [E] line marks the death as memory' ($e3 -match 'memory|allocat|out of mem|OOM')
 } catch { Test 'runtime: OOM heuristic block ran without exception' $false }
-} catch { Test 'runtime: progress parsing block ran without exception' $false }
+# v0.1.61: the frozen 99% at the end - after the last sampling step the
+# engine decodes the latent and saves (seconds at bigger sizes, no progress
+# output) - now shows 'decoding and saving the image...' instead.
+Test 'decode phase detected from the engine log' ($src.Contains('$decIdx = $progressWindow.LastIndexOf(''decoding'')'))
+Test 'save phase detected from the engine log' ($src.Contains('$saveIdx = $progressWindow.LastIndexOf(''save result image'')'))
+Test 'decode/save phases named in the status line' ($src.Contains('decoding and saving the image...'))
+try {
+    function Test-Phase([string]$w) {
+        $d = $w.LastIndexOf('decoding'); $dd = $w.LastIndexOf('decoded'); $s = $w.LastIndexOf('save result image')
+        if ($s -ge 0) { return 'saving' } elseif ($d -ge 0 -and ($dd -lt 0 -or $d -gt $dd)) { return 'decoding' } elseif ($dd -ge 0) { return 'saving' } else { return 'sampling' }
+    }
+    Test 'runtime: mid-sampling stays sampling' ((Test-Phase "[I] generating image: 1/1`n  |====>  | 5/40 - 4.7it/s") -eq 'sampling')
+    Test 'runtime: decoding 1 latents -> decoding' ((Test-Phase "[I] sampling completed`n[I] decoding 1 latents") -eq 'decoding')
+    Test 'runtime: latent decoded, not yet saved -> saving' ((Test-Phase "[I] decoding 1 latents`n[I] latent 1 decoded") -eq 'saving')
+    Test 'runtime: save result image -> saving' ((Test-Phase "[I] latent 1 decoded`n[I] save result image 0 to 'out.png'") -eq 'saving')
+    Test 'runtime: phase window is cut at the current image, so a finished image''s save line cannot leak' ((Test-Phase ("[I] save result image 0`n[I] generating image: 2/2".Substring("[I] save result image 0`n[I] generating image: 2/2".LastIndexOf('generating image:')))) -eq 'sampling')
+} catch { Test 'runtime: phase detection block ran without exception' $false }
 Write-Host ''
 if ($fail -gt 0) { Write-Host ($fail.ToString() + ' test(s) FAILED'); exit 1 }
 Write-Host 'ALL TESTS PASSED'
