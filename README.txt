@@ -121,6 +121,14 @@ What is new in v0.1.22
   the history of every image you created (it is filled from the output
   folder when MOSS starts), so it is no longer cleared when you generate -
   new images are simply added to it and selected.
+- Fixed: improving an upscaled fast preview produced soft, "upscaled-looking"
+  results. A fast preview is stored at its full target size after an internal
+  enlarge, so using it as the starting image for improvement passed that
+  blur on. Fast previews are now re-rendered from scratch at full quality
+  with the same seed and prompt (image-to-image is skipped for them).
+  Native images are still improved with image-to-image as before, and the
+  "Improve using the settings in the main window" confirmation tells you
+  when a fresh render is used.
 
 What is new in v0.1.21
 ----------------------
