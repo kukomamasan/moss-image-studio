@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.19'
+$script:AppVersion = '0.1.20'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -1039,7 +1039,10 @@ try {
     }
     $script:LogVisible = $false
     Update-MossRightLayout
-    $right.Add_Resize({ Update-MossRightLayout }.GetNewClosure())
+    # No GetNewClosure here: closures run in a module scope that cannot see
+    # functions defined inside Show-GeneratorWindow (caused a
+    # CommandNotFoundException crash on show/resize in v0.1.19).
+    $right.Add_Resize({ Update-MossRightLayout })
     $tip.SetToolTip($logToggle,'Show or hide the generation log.')
     $tip.SetToolTip($preview,'Preview of the selected generated image.')
     $tip.SetToolTip($fileList,'Images you generated. Left-click to preview; right-click for improve and delete options.')
@@ -1847,7 +1850,7 @@ try {
     $f.Add_Shown({
         Hide-MossConsoleWindow
         Unlock-MossHistoryAfterShow
-    }.GetNewClosure())
+    })
     [void]$f.ShowDialog()
     if($preview.Image){$preview.Image.Dispose()}
     if($f.Tag -eq 'SETUP'){

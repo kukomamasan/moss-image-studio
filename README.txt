@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.19)
+MOSS Image Studio - portable build (v0.1.20)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -114,6 +114,13 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.20
+----------------------
+- Fixed: a PowerShell scoping error crashed MOSS on startup and window resize
+  (the history code prompt could not be shown; reported as a .NET exception
+  dialog). Closure-bound event handlers cannot call functions defined inside
+  the window builder - the two affected handlers now use normal dynamic scope.
 
 What is new in v0.1.19
 ----------------------
