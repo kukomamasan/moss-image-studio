@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.43'
+$script:AppVersion = '0.1.44'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -1227,6 +1227,16 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null) {
         }
         $busy=@(Get-Process -Name 'sd-cli','sd-server' -ErrorAction SilentlyContinue)
         if($busy.Count -gt 0){ [System.Windows.Forms.MessageBox]::Show($g,'sd-cli or sd-server is currently running. Wait for it to finish and try again.','Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null; return }
+        # Accidental-reinstall guard: when the engine is ALREADY up to date and
+        # no model update is selected, installing would just re-download the
+        # same files (user: do not waste time and bandwidth by accident). Ask
+        # for a deliberate confirmation instead, with the download size shown.
+        if($upToDate -and $modelPlan.Count -eq 0){
+            $extrasNote=''
+            if(@($plan | Where-Object { -not $_.IsPrimary }).Count -gt 0){ $extrasNote=' Only the extra engine variants would be newly installed; the main engine files would be downloaded again.' }
+            $dupAnswer=[System.Windows.Forms.MessageBox]::Show($g,("Everything is already up to date (engine commit "+$installedCommit+" is in release "+$relTag+")."+$extrasNote+"`r`n`r`nDownload about "+[math]::Round($totalDl/1MB)+" MB again anyway?"),'Already up to date',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
+            if($dupAnswer -ne [System.Windows.Forms.DialogResult]::Yes){ [void]$log.Add('Reinstall cancelled at the up-to-date guard'); return }
+        }
         $planText=''
         foreach($p in $plan){ $planText+=((('  '+(& $variantLabelOf $p.Key))+$(if($p.IsPrimary){''}else{' (extra)'})+'  ->  '+$p.Target)+"`r`n") }
         $modelText=if($modelPlan.Count -gt 0){ ((($modelPlan | ForEach-Object { '  '+$_.Name+'  ('+[math]::Round($_.RemoteSize/1GB,2)+' GB download, current file: '+$(if($_.LocalSize -gt 0){[math]::Round($_.LocalSize/1GB,2)+' GB'}else{'not installed'})+')' }) -join "`r`n")+"`r`n  Old model files: "+$(if($modelBackupCheck.Checked){'kept as <name>.old-<time> (renamed, instant - older backups beyond the newest 3 are deleted automatically)'}else{'overwritten WITHOUT a backup'})) } else { '  (no model updates selected)' }
@@ -1907,11 +1917,13 @@ try {
         } catch { return $null }
     }
 
-    $fileList=New-Object System.Windows.Forms.ListBox; $fileList.Location=New-Object System.Drawing.Point(16,368); $fileList.Size=New-Object System.Drawing.Size(383,150); $fileList.Anchor='Top,Left,Right'; $fileList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $fileList.ForeColor=$cText; $right.Controls.Add($fileList)
+    $fileList=New-Object System.Windows.Forms.ListBox; $fileList.Location=New-Object System.Drawing.Point(16,368); $fileList.Size=New-Object System.Drawing.Size(383,150); $fileList.Anchor='Top,Left,Right'; $fileList.SelectionMode='MultiExtended'; $fileList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $fileList.ForeColor=$cText; $right.Controls.Add($fileList)
     $fileList.Add_SelectedIndexChanged({if($fileList.SelectedItem){$p=[string]$fileList.SelectedItem;$script:SelectedFile=$p;if(Test-Path -LiteralPath $p){try{$newImg=Copy-MossImageUnlocked $p;if($newImg){$old=$preview.Image;$preview.Image=$newImg;if($old){$old.Dispose()}}}catch{}}}})
     # A plain right-click does not change the ListBox selection - select the
-    # file under the cursor first, so Improve always acts on that file.
-    $fileList.Add_MouseClick({ param($sender,$e) if($e.Button -eq [System.Windows.Forms.MouseButtons]::Right){ $idx=$fileList.IndexFromPoint($e.Location); if($idx -ge 0 -and $fileList.SelectedIndex -ne $idx){ $fileList.SelectedIndex=$idx } } })
+    # file under the cursor first, so Improve always acts on that file. With
+    # multi-select, right-clicking a file that is ALREADY part of the current
+    # selection keeps the whole selection (so Delete can act on it).
+    $fileList.Add_MouseClick({ param($sender,$e) if($e.Button -eq [System.Windows.Forms.MouseButtons]::Right){ $idx=$fileList.IndexFromPoint($e.Location); if($idx -ge 0 -and -not $fileList.SelectedIndices.Contains($idx)){ $fileList.SelectedIndex=$idx } } })
     # Right-click a generated file to re-render exactly that picture at full
     # quality: same seed and prompt (read from its sidecar), full steps,
     # image-to-image at the chosen size. Grain stays, distortion does not come back.
@@ -1920,18 +1932,21 @@ try {
     $miCustom=$refineMenu.Items.Add('Improve using the settings in the main window...')
     $miAll=$refineMenu.Items.Add('Improve ALL files that can be improved...')
     $miInfo=$refineMenu.Items.Add('Show image info (prompt, seed, settings)...')
-    $miDelete=$refineMenu.Items.Add('Delete this file')
+    $miDelete=$refineMenu.Items.Add('Delete selected file(s)...')
+    $miDeleteAll=$refineMenu.Items.Add('Delete ALL files...')
     $fileList.ContextMenuStrip=$refineMenu
     $miFresh.Add_Click({ Start-MossRefineFresh })
     $miCustom.Add_Click({ Start-MossRefineWithCurrentSettings })
     $miAll.Add_Click({ Start-MossRefineAll })
     $miInfo.Add_Click({ Show-MossImageInfo })
-    $miDelete.Add_Click({ Remove-MossSelectedFile })
+    $miDelete.Add_Click({ Remove-MossSelectedFiles $false })
+    $miDeleteAll.Add_Click({ Remove-MossSelectedFiles $true })
     $refineMenu.ShowItemToolTips=$true
     $miFresh.ToolTipText='Brand-new full-quality render using this image''s seed, prompt and settings - like a new generation with the same seed. Related look, but the composition can differ from the draft. Use Improve instead to keep the exact composition.'
     $miCustom.ToolTipText='Improve this image using the size, steps, CFG, seed and prompt currently shown in the main window. Fast previews get a higher strength automatically.'
     $miAll.ToolTipText='Queue every generated image that still has quality headroom (soft previews, fewer steps, smaller than the current size).'
-    $miDelete.ToolTipText='Delete this image and its sidecar from disk (asks first).'
+    $miDelete.ToolTipText='Delete the selected image(s) and their sidecars from disk (asks first). Ctrl+click or Shift+click to select several.'
+    $miDeleteAll.ToolTipText='Delete every image in the list and its sidecar from disk (asks first, shows the total size freed).'
     $miInfo.ToolTipText='Shows what is stored for this image: prompt, negative prompt, seed, size, steps, CFG, speed mode, sampler and scheduler. The prompt is decrypted only if the history code was entered. Copy the prompt with one click.'
     # Show ALL previously generated images at startup, not just this session's:
     # scan the output folder and list everything (oldest first, newest selected).
@@ -1973,24 +1988,23 @@ try {
             $filesTop = 42 + $previewHeight + 15
             $listTop = $filesTop + 26
             $logTitleTop = $listTop + $fileHeight + 17
-            $logTop = $logTitleTop + 25
+            $logTop = $logTitleTop + 27
             $preview.Location = New-Object System.Drawing.Point(16,42)
             $preview.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),$previewHeight)
             $filesTitle.Location = New-Object System.Drawing.Point(16,$filesTop)
             $fileList.Location = New-Object System.Drawing.Point(16,$listTop)
             $fileList.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),$fileHeight)
-            $logTitle.Location = New-Object System.Drawing.Point(16,$logTitleTop)
-            $log.Location = New-Object System.Drawing.Point(16,$logTop)
-            $log.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),[Math]::Max(70,$panelHeight - $logTop - 20))
+            # The toggle button IS the header in both states - clicking it
+            # again collapses the log. (The old layout hid the toggle while
+            # expanded and showed only the static title label, which had no
+            # click handler - the log could not be minimized again.)
+            $logTitle.Visible = $false
+            $logToggle.Location = New-Object System.Drawing.Point(16,$logTitleTop)
+            $logToggle.Visible = $true
+            $log.Visible = $script:LogVisible
             if ($script:LogVisible) {
-                $logTitle.Visible = $true
-                $log.Visible = $true
-                $logToggle.Visible = $false
-            } else {
-                $logTitle.Visible = $false
-                $log.Visible = $false
-                $logToggle.Location = New-Object System.Drawing.Point(16,$logTitleTop)
-                $logToggle.Visible = $true
+                $log.Location = New-Object System.Drawing.Point(16,$logTop)
+                $log.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),[Math]::Max(70,$panelHeight - $logTop - 20))
             }
         }
     }
@@ -2813,25 +2827,40 @@ try {
         Start-MossNextRefine
     }
 
-    function Remove-MossSelectedFile {
-        # Deletes the selected image (and its sidecar) from disk and the list.
-        $selFile = [string]$script:SelectedFile
-        if(-not $selFile -or -not (Test-Path -LiteralPath $selFile -PathType Leaf)){
-            [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first.','Delete file')|Out-Null;return
+    function Remove-MossSelectedFiles([bool]$All) {
+        # Deletes images (and their sidecars) from disk and the list: either
+        # the multi-selection (Ctrl+click / Shift+click) or ALL files at once.
+        # One confirmation for the whole batch - no per-file prompts.
+        $files=@()
+        if($All){ foreach($it in @($fileList.Items)){ $files+=[string]$it } }
+        else {
+            foreach($idx in @($fileList.SelectedIndices)){ $files+=[string]$fileList.Items[$idx] }
+            if($files.Count -eq 0 -and [string]$script:SelectedFile){ $files=@([string]$script:SelectedFile) }
         }
-        $answer=[System.Windows.Forms.MessageBox]::Show(("Delete this image permanently?`r`n$selFile"),'Delete file',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+        $files=@($files | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) })
+        if($files.Count -eq 0){ [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (Ctrl+click or Shift+click for several).','Delete files')|Out-Null;return }
+        $totalBytes=0
+        foreach($f in $files){ try { $totalBytes+=(Get-Item -LiteralPath $f).Length; $side=[System.IO.Path]::ChangeExtension($f,'.json'); if(Test-Path -LiteralPath $side){ $totalBytes+=(Get-Item -LiteralPath $side).Length } } catch {} }
+        $nameLine=if($files.Count -eq 1){$files[0]}else{($files[0]+'  ... and '+($files.Count-1)+' more')}
+        $answer=[System.Windows.Forms.MessageBox]::Show(("Delete {0} image(s) permanently?`r`n{1}`r`n`r`nAbout {2} MB will be freed (images + sidecars).`r`nThis cannot be undone." -f $files.Count,$nameLine,[Math]::Round($totalBytes/1MB,1)),'Delete files',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
         if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
-        # Release the preview first so the file is not held open while deleting.
+        # Release the preview first so no file is held open while deleting.
         try { $old=$preview.Image; $preview.Image=$null; if($old){ $old.Dispose() } } catch {}
-        try { Remove-Item -LiteralPath $selFile -Force } catch { [System.Windows.Forms.MessageBox]::Show(('Could not delete the image: '+$_.Exception.Message),'Delete file')|Out-Null;return }
-        $side=[System.IO.Path]::ChangeExtension($selFile,'.json')
-        if(Test-Path -LiteralPath $side){ try { Remove-Item -LiteralPath $side -Force } catch {} }
-        $idx=-1; for($i=0;$i -lt $fileList.Items.Count;$i++){ if([string]$fileList.Items[$i] -eq $selFile){ $idx=$i; break } }
-        if($idx -ge 0){ $fileList.Items.RemoveAt($idx) }
-        [void]$script:GeneratedFiles.Remove($selFile)
+        $deleted=0; $failed=0
+        foreach($f in $files){
+            try {
+                Remove-Item -LiteralPath $f -Force
+                $side=[System.IO.Path]::ChangeExtension($f,'.json')
+                if(Test-Path -LiteralPath $side){ try { Remove-Item -LiteralPath $side -Force } catch {} }
+                $idx=-1; for($i=0;$i -lt $fileList.Items.Count;$i++){ if([string]$fileList.Items[$i] -eq $f){ $idx=$i; break } }
+                if($idx -ge 0){ $fileList.Items.RemoveAt($idx) }
+                [void]$script:GeneratedFiles.Remove($f)
+                $deleted++
+            } catch { $failed++ }
+        }
         $script:SelectedFile=$null
         if($fileList.Items.Count -gt 0){ $fileList.SelectedIndex=$fileList.Items.Count-1 }
-        $status.Text='File deleted.'
+        $status.Text=('Deleted {0} file(s).{1}' -f $deleted,$(if($failed){' '+$failed+' could not be deleted.'}else{''}))
     }
 
     function Show-MossImageInfo {
@@ -3052,6 +3081,7 @@ try {
     try { [System.Windows.Forms.MessageBox]::Show(("MOSS Image Studio could not start.`r`n`r`n"+$_.Exception.Message+"`r`n`r`nA technical report was saved to the logs folder."),'MOSS Image Studio',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null } catch {}
     exit 1
 }
+
 
 
 
