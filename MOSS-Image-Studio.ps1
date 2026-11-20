@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.60'
+$script:AppVersion = '0.1.61'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -1934,10 +1934,10 @@ try {
     # Progress bar pinned to the VERY BOTTOM of the left panel (anchored
     # Bottom) so it stays at the bottom edge when the window grows or is
     # maximized - previously it kept its top-anchored position and floated
-    # mid-panel (user: move it all the way to the bottom, with the numbers).
-    # The numeric readout sits right of the bar: overall % and step N/M.
+    # mid-panel (user: move it all the way to the bottom). All the numbers
+    # (% overall, step N/M, ETA) live in the status line directly above;
+    # the old right-side numeric readout was removed (it duplicated them).
     $prog=New-Object System.Windows.Forms.ProgressBar; $prog.Location=New-Object System.Drawing.Point(18,694); $prog.Size=New-Object System.Drawing.Size(556,14); $prog.Anchor='Bottom,Left,Right'; $prog.Style='Blocks'; $prog.Visible=$false; $left.Controls.Add($prog)
-    $progPct=New-Object System.Windows.Forms.Label; $progPct.Text=''; $progPct.Location=New-Object System.Drawing.Point(582,691); $progPct.Size=New-Object System.Drawing.Size(112,18); $progPct.Anchor='Bottom,Right'; $progPct.ForeColor=$cMuted; $progPct.TextAlign='MiddleRight'; $progPct.Visible=$false; $left.Controls.Add($progPct)
 
     Add-Label $right 'OUTPUT PREVIEW' 16 14 200 | Out-Null
     $preview=New-Object System.Windows.Forms.PictureBox; $preview.Location=New-Object System.Drawing.Point(16,42); $preview.Size=New-Object System.Drawing.Size(383,285); $preview.Anchor='Top,Left,Right'; $preview.SizeMode='Zoom'; $preview.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $right.Controls.Add($preview)
@@ -2295,17 +2295,32 @@ try {
             $remaining = [Math]::Max(0, $average - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $average)
         }
         if ($null -ne $remaining) { $etaText = "ETA ~$(Format-MossDuration $remaining)" }
-        $progressNote = if ($st.StepDen -gt 0) { " | step $([int]$st.StepNum)/$([int]$st.StepDen)" } elseif ($null -ne $engineProgress) { " | image $([int]$st.ImageProgress)%" } else { '' }
+        # After the last sampling step the engine still has to decode the
+        # latent into pixels and save the file (several seconds at bigger
+        # sizes, with no progress output of its own). Say so instead of
+        # showing a frozen 99% - the user read that as a hang.
+        $decIdx = $progressWindow.LastIndexOf('decoding')
+        $decDoneIdx = $progressWindow.LastIndexOf('decoded')
+        $saveIdx = $progressWindow.LastIndexOf('save result image')
+        $decIdx = $progressWindow.LastIndexOf('decoding')
+        $decDoneIdx = $progressWindow.LastIndexOf('decoded')
+        $saveIdx = $progressWindow.LastIndexOf('save result image')
+        $decodingNow = $false
+        $savingNow = $false
+        if ($saveIdx -ge 0) { $savingNow = $true }
+        elseif ($decIdx -ge 0 -and ($decDoneIdx -lt 0 -or $decIdx -gt $decDoneIdx)) { $decodingNow = $true }
+        elseif ($decDoneIdx -ge 0) { $savingNow = $true }
+        $progressNote = if ($st.StepDen -gt 0) { " | step $([int]$st.StepNum)/$([int]$st.StepDen)" } elseif ($null -ne $engineProgress) { " | image $([int]$st.ImageProgress)%" } else { ' | warming up the model...' }
+        if ($decodingNow) { $progressNote = ' | decoding and saving the image...' }
+        elseif ($savingNow) { $progressNote = ' | saving...' }
         $status.Text = "Image $currentImage of $($job.Count) | $overall% overall$progressNote | total elapsed $(Format-MossDuration $elapsed) | $etaText"
-        # Drive the progress bar from the step counter (same numbers as the text).
+        # Drive the progress bar from the step counter (same numbers as the
+        # status text above; the old right-side numeric readout duplicated it
+        # and is gone).
         $prog.Visible = $true
-        $progPct.Visible = $true
         if ($null -ne $engineProgress) {
             if ($prog.Style -ne 'Blocks') { $prog.Style = 'Blocks' }
             $prog.Value = [Math]::Max($prog.Minimum,[Math]::Min($prog.Maximum,$overall))
-            $progPct.Text = if ($st.StepDen -gt 0) { "$overall%  step $([int]$st.StepNum)/$([int]$st.StepDen)" } else { "$overall%" }
-        } else {
-            $progPct.Text = 'starting...'
         }
     }
 
@@ -2323,11 +2338,8 @@ try {
             $prog.Style = 'Blocks'
             $prog.Value = $prog.Maximum
             $prog.Visible = $true
-            $progPct.Visible = $true
-            $progPct.Text = '100%'
         } else {
             $prog.Visible = $false
-            $progPct.Visible = $false
         }
     }
 
@@ -2711,8 +2723,6 @@ try {
         $prog.Value = 0
         $prog.Style = 'Marquee'
         $prog.Visible = $true
-        $progPct.Visible = $true
-        $progPct.Text = 'starting...'
 
         Start-MossBatchEngine
     }
@@ -3264,7 +3274,6 @@ try {
             $elapsedText = if ($script:GenState.JobStartedAt) { Format-MossDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds } else { '0:00' }
             $status.Text = "Generation cancelled | total elapsed $elapsedText"
             $prog.Visible = $false
-            $progPct.Visible = $false
             $log.AppendText("`r`nGeneration cancelled. No further images will be started.")
         }
     })
