@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.26)
+MOSS Image Studio - portable build (v0.1.27)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,13 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.27
+----------------------
+- Changed: in Options, the first entry of the Sampler and Scheduler lists
+  now shows what is actually used: "Default (euler)" and "Default (flux
+  schedule)" instead of the vague "Default (model)". Saving keeps the
+  internal setting unchanged, so existing configs still work.
 
 What is new in v0.1.26
 ----------------------
