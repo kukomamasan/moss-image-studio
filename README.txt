@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.41)
+MOSS Image Studio - portable build (v0.1.42)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -120,6 +120,20 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
+What is new in v0.1.42
+----------------------
+- Fixed: improving an image could produce a WORSE result than the
+  original. Two causes, both fixed:
+  1) "Improve using the settings in the main window" used the main
+     window's seed - with random seed the image-to-image noise pattern
+     does not align with the picture and the result comes out muddy
+     (verified with real renders: same-seed improves are sharp, random
+     -seed improves soft). Improve now reuses the image's own recorded
+     seed automatically (shown in the confirm dialog as "from the
+     image"); a seed you type yourself is still honored.
+  2) When the target size has a different aspect ratio than the source,
+     the composition is squashed - the confirm dialog now warns about
+     it clearly.
 What is new in v0.1.41
 ----------------------
 - Fixed: the history code prompt could show the wrong text ('Enter the
@@ -429,6 +443,7 @@ Interface
 - MOSS is resizable; resizing gives extra vertical space to the image preview;
   maximizing hides the file list and log until the window is restored.
 - Designed for Windows PowerShell 5.1. No installation is required.
+
 
 
 
