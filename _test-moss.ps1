@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.53' ($src.Contains("AppVersion = '0.1.53'"))
+Test 'version is 0.1.54' ($src.Contains("AppVersion = '0.1.54'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
