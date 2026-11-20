@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.52)
+MOSS Image Studio - portable build (v0.1.53)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -120,6 +120,7 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
+What is new in v0.1.53----------------------- The 'History code...' button is now a small menu: 'Enter code to  unlock the prompt history...' (shown when the code has not been  entered), 'Set a NEW code (clears the saved history)...' and 'Turn  off prompt history...'. Previously the button only RESET the code -  there was no way to enter the existing code after skipping it at  startup. Skipping the startup prompt now also says where to enter  the code later.
 What is new in v0.1.52----------------------- Better progress display: a slim progress bar above the status line -  marquee while the engine starts, then driven by the engine's STEP  COUNTER, full when the batch completes. The status line now shows  'step 17/50' from the engine's step counter together with the overall  percentage and the ETA.- Time taken is no longer lost when a job completes: 'Improvement  finished' keeps the total elapsed time in the status line, and the  generation log now records the total time of every batch and of the  whole improvement queue (persistent record).
 What is new in v0.1.51----------------------- Trying to improve (or re-render) an image whose prompt is stored  ENCRYPTED while no history code is entered now shows a specific,  actionable error: what happened, and the two ways forward - enter  the code via 'History code...' so MOSS reads the stored prompt, or  type a new prompt in the main window and use that instead. Nothing  is generated and the image is never changed in this case.
 What is new in v0.1.50

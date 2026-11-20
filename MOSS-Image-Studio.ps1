@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.52'
+$script:AppVersion = '0.1.53'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -1643,7 +1643,29 @@ try {
     Add-Label $left 'PROMPT' 18 14 180 | Out-Null
     $historyPick=New-Object System.Windows.Forms.ComboBox; $historyPick.DropDownStyle='DropDownList'; $historyPick.Location=New-Object System.Drawing.Point(315,9); $historyPick.Size=New-Object System.Drawing.Size(150,27); $historyPick.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $historyPick.ForeColor=$cText; $left.Controls.Add($historyPick)
     $resetHistoryCode=Add-Button $left 'History code...' 471 8 90 28
-    $resetHistoryCode.Add_Click({ if(Reset-MossHistoryPassword $f){$history=@();$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('New history code saved. The old history was cleared.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
+    # The button used to RESET the code directly - which DELETES the saved
+    # history and gives no way to enter the existing code after skipping the
+    # startup prompt (user: 'i dont get an option to enter the prompt
+    # history code'). It is now a small menu: unlock, set new, turn off.
+    function Show-MossHistoryCodeMenu([System.Windows.Forms.Form]$Owner) {
+        $menu=New-Object System.Windows.Forms.ContextMenuStrip
+        if ($script:LockedHistoryEnvelope) {
+            $enterItem=$menu.Items.Add('Enter code to unlock the prompt history...')
+            $enterItem.Add_Click({ Unlock-MossHistoryAfterShow })
+        }
+        if ($script:HistoryPassphrase) {
+            $infoItem=$menu.Items.Add('Code entered - the prompt history is unlocked')
+            $infoItem.Enabled=$false
+        }
+        $newItem=$menu.Items.Add('Set a NEW code (clears the saved history!)...')
+        $newItem.Add_Click({ if(Reset-MossHistoryPassword $Owner){$history=@();$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('New history code saved. The old history was cleared.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
+        if ($script:HistoryEnabled) {
+            $offItem=$menu.Items.Add('Turn off prompt history (deletes the saved history)...')
+            $offItem.Add_Click({ if(Disable-MossHistory){$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('Prompt history is off. Nothing is stored anymore.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
+        }
+        $menu.Show($resetHistoryCode, 0, $resetHistoryCode.Height)
+    }
+    $resetHistoryCode.Add_Click({ Show-MossHistoryCodeMenu $f })
     $resetHistoryCode.Enabled=$true
     foreach($oldPrompt in @($history | Select-Object -First 10)){[void]$historyPick.Items.Add([string]$oldPrompt)}
     $paste=Add-Button $left 'Paste' 567 8 95 28
@@ -1675,7 +1697,7 @@ try {
             }
             $choice = Show-MossHistoryRecoveryChoice
             if($choice -eq 'retry'){continue}
-            if($choice -eq 'skip'){$script:HistoryLocked=$true;$script:Settings.PromptHistory=@();[System.Windows.Forms.MessageBox]::Show('MOSS will continue without prompt history. The encrypted history is preserved.','History locked')|Out-Null;return}
+            if($choice -eq 'skip'){$script:HistoryLocked=$true;$script:Settings.PromptHistory=@();[System.Windows.Forms.MessageBox]::Show('MOSS will continue without prompt history. The encrypted history is preserved. You can enter the code later via the History code... button (top left, next to Paste).','History locked')|Out-Null;return}
             if($choice -eq 'reset'){if(Reset-MossHistoryPassword $f){$historyPick.Items.Clear();return};continue}
             if($choice -eq 'disable'){if(Disable-MossHistory){$historyPick.Items.Clear();return};continue}
         }
@@ -1895,7 +1917,7 @@ try {
     $tip.SetToolTip($modelToggle,'Show or hide the engine and model file paths.')
     $tip.SetToolTip($prompt,'Describe the image you want. Pasted multi-line text is flattened to one line automatically.')
     $tip.SetToolTip($historyPick,'Recent prompts (needs the history code to have been entered).')
-    $tip.SetToolTip($resetHistoryCode,'Set a new history code (clears the current history) or manage the locked history.')
+    $tip.SetToolTip($resetHistoryCode,'Enter the history code to unlock the saved prompt history, set a new code (clears the history), or turn history off.')
     $tip.SetToolTip($paste,'Fills the prompt box from the clipboard.')
     $tip.SetToolTip($style,'Visual style added to your prompt: photorealistic, anime, fantasy art, cyberpunk, ... None (no style) sends your prompt exactly as typed.')
     $tip.SetToolTip($res,'Common aspect ratios and sizes - picking one fills the Width and Height boxes.')
