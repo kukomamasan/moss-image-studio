@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.45'
+$script:AppVersion = '0.1.46'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -3056,14 +3056,25 @@ try {
         # staying on top after opening MOSS). 200 ms later the window is
         # fully activated, so the owned modal sits on a stable foreground
         # owner - on top of MOSS and focused, without pinning above other apps.
-        $startupDialogTimer=New-Object System.Windows.Forms.Timer
-        $startupDialogTimer.Interval=200
-        $startupDialogTimer.Add_Tick({
-            $startupDialogTimer.Stop()
-            Unlock-MossHistoryAfterShow
-            Test-MossOfferStartupDownload $f
+        # The timer lives on $script: because plain scriptblocks do NOT capture
+        # enclosing locals: the Shown handler's scope is gone by tick time and
+        # a function-local timer was $null inside the tick (live-reproduced:
+        # Stop() threw 'method on a null-valued expression' every 200 ms and
+        # nothing after it ran).
+        $script:StartupDialogTimer=New-Object System.Windows.Forms.Timer
+        $script:StartupDialogTimer.Interval=200
+        $script:StartupDialogTimer.Add_Tick({
+            try {
+                $script:StartupDialogTimer.Stop()
+                Unlock-MossHistoryAfterShow
+                Test-MossOfferStartupDownload $f
+            } catch {
+                # A failure here must never crash MOSS with the WinForms error
+                # dialog - it is logged instead and startup continues.
+                try { [void](Write-MossErrorLog 'Startup dialog error' ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+"`r`n"+$_.Exception.GetType().FullName+': '+$_.Exception.Message+"`r`n"+$_.ScriptStackTrace)) } catch {}
+            }
         })
-        $startupDialogTimer.Start()
+        $script:StartupDialogTimer.Start()
     })
     [void]$f.ShowDialog()
     if($preview.Image){$preview.Image.Dispose()}
@@ -3094,6 +3105,7 @@ try {
     try { [System.Windows.Forms.MessageBox]::Show(("MOSS Image Studio could not start.`r`n`r`n"+$_.Exception.Message+"`r`n`r`nA technical report was saved to the logs folder."),'MOSS Image Studio',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null } catch {}
     exit 1
 }
+
 
 
 

@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.45)
+MOSS Image Studio - portable build (v0.1.46)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -120,8 +120,15 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
-What is new in v0.1.45
+What is new in v0.1.46
 ----------------------
+- Fixed: a crash right at startup (error dialog 'You cannot call a
+  method on a null-valued expression' repeated in the background).
+  The startup prompt timer lived in a scope that no longer existed
+  when it fired; it now lives in script scope and any unexpected
+  startup-dialog error is logged to the logs folder instead of
+  crashing.
+
 - Fixed: the history code prompt was no longer staying on top of the
   main window at startup (a side effect of the Topmost removal). The
   prompt is now opened right after the main window has finished its
@@ -476,6 +483,7 @@ Interface
 - MOSS is resizable; resizing gives extra vertical space to the image preview;
   maximizing hides the file list and log until the window is restored.
 - Designed for Windows PowerShell 5.1. No installation is required.
+
 
 
 
