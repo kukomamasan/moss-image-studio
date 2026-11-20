@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.61' ($src.Contains("AppVersion = '0.1.61'"))
+Test 'version is 0.1.62' ($src.Contains("AppVersion = '0.1.62'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -300,6 +300,31 @@ try {
     Test 'runtime: save result image -> saving' ((Test-Phase "[I] latent 1 decoded`n[I] save result image 0 to 'out.png'") -eq 'saving')
     Test 'runtime: phase window is cut at the current image, so a finished image''s save line cannot leak' ((Test-Phase ("[I] save result image 0`n[I] generating image: 2/2".Substring("[I] save result image 0`n[I] generating image: 2/2".LastIndexOf('generating image:')))) -eq 'sampling')
 } catch { Test 'runtime: phase detection block ran without exception' $false }
+# v0.1.62: (1) the improve queue said 'Improvement finished' even when the
+# job FAILED (user saw 'Improvement finished' under an error report) - the
+# queue now counts failures and says 'Improvement FAILED'. (2) The OOM
+# auto-retry missed the real live case: the memory evidence sat in a [W]
+# line ('execution engine cannot make enough memory available on CUDA0')
+# while the last [E] line was just 'generate failed'.
+Test 'failed improve queue says Improvement FAILED' ($src.Contains('Improvement FAILED - ') -and $src.Contains('$script:RefineFailCount'))
+Test 'refine failures counted from the batch result' ($src.Contains('if ($exitCode -ne 0 -or $ok -lt $job.Count) { $script:RefineFailCount'))
+Test 'OOM evidence matched in the WHOLE output (memory warnings are [W] lines, not [E])' ($src.Contains("$allOutputText -match 'enough memory available|out of memory|failed to allocate|allocation failed|failed during weight preparation'"))
+try {
+    # The EXACT lines from the user's failed 2720x1536 improve (exit 1).
+    $liveOut = '[W] model manager memory on CUDA0: reported free 11096.00 MB / total 12287.50 MB, tracked weights 0.00 MB / other runtime 0.00 MB / current runtime 0.00 MB --- model_manager.cpp:1817' + "`n" + '[W] execution engine cannot make enough memory available on CUDA0: need 17983.47 MB device / 16959.47 MB budget, available 11096.00 MB device / 10586.00 MB budget --- execution_engine.cpp:947'
+    $liveErr = '[E] vae segment 1/1 (graph) failed during weight preparation --- execution_engine.cpp:596' + "`n" + '[E] vae encode compute failed --- vae.hpp:308' + "`n" + '[E] failed to encode init image --- image.cpp:302' + "`n" + '[E] generate failed --- main.cpp:1001'
+    $allT = $liveOut + "`n" + $liveErr
+    $em = [regex]::Matches($allT, "(?m)^\[E\][^\r\n]*")
+    $lastE = $em[$em.Count - 1].Value.Trim()
+    $md = $false
+    if ($lastE -match 'memory|allocat|out of mem|OOM' -or $allT -match 'enough memory available|out of memory|failed to allocate|allocation failed|failed during weight preparation') { $md = $true }
+    Test 'runtime: the real 2720x1536 OOM improve is detected as memory death (auto-retry fires)' ($md)
+    # The benign model-manager line alone must NOT mark memory death.
+    $benign = '[W] model manager memory on CUDA0: reported free 11096.00 MB / total 12287.50 MB --- model_manager.cpp:1817' + "`n" + '[E] generate failed --- main.cpp:1001'
+    $em2 = [regex]::Matches($benign, "(?m)^\[E\][^\r\n]*")[0].Value.Trim()
+    $md2 = $em2 -match 'memory|allocat|out of mem|OOM' -or $benign -match 'enough memory available|out of memory|failed to allocate|allocation failed|failed during weight preparation'
+    Test 'runtime: the ever-present model-manager memory line does NOT mark memory death' (-not $md2)
+} catch { Test 'runtime: OOM live-case block ran without exception' $false }
 Write-Host ''
 if ($fail -gt 0) { Write-Host ($fail.ToString() + ' test(s) FAILED'); exit 1 }
 Write-Host 'ALL TESTS PASSED'

@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.61'
+$script:AppVersion = '0.1.62'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -1540,6 +1540,7 @@ function Show-GeneratorWindow {
     $script:SelectedFile = $null
     $script:RefineQueue = New-Object System.Collections.ArrayList
     $script:RefineTotal = 0
+    $script:RefineFailCount = 0
     $script:RefineStartedAt = $null
 
     $f = New-Object System.Windows.Forms.Form
@@ -2656,8 +2657,14 @@ try {
             $errMatches = [regex]::Matches(($stdout + "`n" + $stderr), '(?m)^\[E\][^\r\n]*')
             $hasExplicitError = $errMatches.Count -gt 0
             if ($hasExplicitError) { $engineErrorText = $errMatches[$errMatches.Count - 1].Value.Trim() }
+            # Real OOM evidence can sit in a [W] line, not the last [E] one
+            # (live case: 'execution engine cannot make enough memory available
+            # on CUDA0' followed by [E] 'generate failed'). Match the specific
+            # phrases - the generic word 'memory' appears in EVERY run's
+            # model-manager log line and would mark everything as OOM.
+            $allOutputText = $stdout + "`n" + $stderr
             $memoryDeath = -not $hasExplicitError
-            if ($hasExplicitError -and $engineErrorText -match 'memory|allocat|out of mem|OOM') { $memoryDeath = $true }
+            if ($hasExplicitError -and ($engineErrorText -match 'memory|allocat|out of mem|OOM' -or $allOutputText -match 'enough memory available|out of memory|failed to allocate|allocation failed|failed during weight preparation')) { $memoryDeath = $true }
             if ($exitCode -ne 0 -and $memoryDeath) {
                 $mp = [Math]::Round(([double]$job.Width * [double]$job.Height / 1000000.0), 1)
                 $oomHint = "`r`nHint: the engine stopped without finishing"
@@ -2689,8 +2696,12 @@ try {
         # The log is a persistent record: the total time stays here after the
         # status line moves on (user: the time taken was lost when done).
         $log.AppendText("`r`n--- Batch finished | exit $exitCode | $ok of $($job.Count) image(s)$batchTimeText ---`r`n$outputText`r`n")
+        # Failed refine jobs are counted so the queue summary can say FAILED
+        # instead of claiming success (user saw 'Improvement finished' right
+        # under a failed-run error report).
+        if ($exitCode -ne 0 -or $ok -lt $job.Count) { $script:RefineFailCount += [Math]::Max(1, $job.Count - $ok) }
         # Continue any pending native refinement queue unless the user cancelled.
-        if (-not $st.CancelRequested) { Start-MossNextRefine } else { $script:RefineQueue.Clear(); $script:RefineTotal = 0; $script:RefineStartedAt = $null }
+        if (-not $st.CancelRequested) { Start-MossNextRefine } else { $script:RefineQueue.Clear(); $script:RefineTotal = 0; $script:RefineFailCount = 0; $script:RefineStartedAt = $null }
     }
 
     function Start-MossGeneration {
@@ -3160,10 +3171,16 @@ try {
                 # (it was previously overwritten by this very message).
                 $queueElapsed = ''
                 if ($script:RefineStartedAt) { $queueElapsed = ' | total elapsed ' + (Format-MossDuration ((Get-Date) - $script:RefineStartedAt).TotalSeconds) }
-                $status.Text = "Improvement finished - $script:RefineTotal image(s) processed$queueElapsed"
-                $log.AppendText("`r`nImprovement finished - $script:RefineTotal image(s) processed$(if($queueElapsed){' | total time ' + $queueElapsed.Replace(' | total elapsed ','')}).")
+                if ($script:RefineFailCount -gt 0) {
+                    $status.Text = "Improvement FAILED - $($script:RefineFailCount) of $($script:RefineTotal) image(s) did not process$queueElapsed - see the log above"
+                    $log.AppendText("`r`nImprovement FAILED - $($script:RefineFailCount) of $($script:RefineTotal) image(s) did not process$(if($queueElapsed){' | total time ' + $queueElapsed.Replace(' | total elapsed ','')}).")
+                } else {
+                    $status.Text = "Improvement finished - $script:RefineTotal image(s) processed$queueElapsed"
+                    $log.AppendText("`r`nImprovement finished - $script:RefineTotal image(s) processed$(if($queueElapsed){' | total time ' + $queueElapsed.Replace(' | total elapsed ','')}).")
+                }
                 $script:RefineStartedAt = $null
                 $script:RefineTotal = 0
+                $script:RefineFailCount = 0
             }
             return
         }
@@ -3182,6 +3199,7 @@ try {
             $log.AppendText("`r`nImprovement stopped - required file(s) not found: $($missingRefine -join ', ')")
             $script:RefineQueue.Clear(); $script:RefineTotal = 0
             $status.Text = 'Improvement stopped - missing model files (click Model files to check the paths)'
+            $script:RefineFailCount = 0
             return
         }
         $gpuIdx=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIdx=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIdx=-1 } }
