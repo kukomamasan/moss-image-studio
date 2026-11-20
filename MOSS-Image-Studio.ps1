@@ -1,4 +1,4 @@
-# MOSS Image Studio - portable hardware setup foundation
+﻿# MOSS Image Studio - portable hardware setup foundation
 # Windows PowerShell 5.1 | All paths are resolved relative to this script.
 [CmdletBinding()]
 param([switch]$SetupOnly,[switch]$ReturnToGenerator)
@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.47'
+$script:AppVersion = '0.1.49'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -1761,7 +1761,7 @@ try {
         $impStrengthBox=Add-TextBox $g ([string]$script:Settings.ImproveStrength) 12 314 100
         $impStrengthHint=New-Object System.Windows.Forms.Label; $impStrengthHint.Text='How strongly an image is re-rendered when improving it. 0.45 keeps the look; 0.6 refreshes detail; 0.8 re-renders strongly.'; $impStrengthHint.Location=New-Object System.Drawing.Point(120,317); $impStrengthHint.Size=New-Object System.Drawing.Size(412,46); $impStrengthHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($impStrengthHint)
         $dlgTip.SetToolTip($impStrengthBox,'Improvement strength: how freely the image is re-rendered when improving. Low keeps it mostly as it is; high repaints more. Fast previews automatically use at least 0.5-0.74 regardless of this setting.')
-        $note=New-Object System.Windows.Forms.Label; $note.Text="'Default (euler)' and 'Default (flux schedule)' use the engine's own choice - recommended unless you want to experiment. Quick improve reuses the image's own settings; 'Improve using the settings in the main window' applies the values you see now."; $note.Location=New-Object System.Drawing.Point(12,392); $note.Size=New-Object System.Drawing.Size(520,34); $note.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($note)
+        $note=New-Object System.Windows.Forms.Label; $note.Text="'Default (euler)' and 'Default (flux schedule)' use the engine's own choice - recommended unless you want to experiment. Quick improve reuses the image's own settings; 'Improve this image' opens a dialog where you pick the target size (Same/2x/4x) with steps and CFG prefilled from here."; $note.Location=New-Object System.Drawing.Point(12,392); $note.Size=New-Object System.Drawing.Size(520,34); $note.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($note)
         # MOSS is a GUI front-end for the sd-cli command-line engine: optionally
         # log the exact command line before every run (full transparency).
         $cmdCheck=New-Object System.Windows.Forms.CheckBox; $cmdCheck.Text='Show the exact sd-cli command line in the generation log (see what MOSS runs)'; $cmdCheck.Location=New-Object System.Drawing.Point(12,364); $cmdCheck.Size=New-Object System.Drawing.Size(520,24); $cmdCheck.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($cmdCheck)
@@ -1870,8 +1870,8 @@ try {
     $refineNative=Add-Button $left 'Improve last image' 547 615 140 42; $refineNative.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164)
     $refineNative.Add_Click({
         # Settings-driven improve of the most recent image: the size, steps,
-        # CFG, seed and prompt come from the main window (same as right-click
-        # "Improve using the settings in the main window"), and the prompt
+        # CFG, seed and prompt come from the improve dialog (same as right-click
+        # "Improve this image"), and the prompt
         # falls back to the image's own stored prompt when the box is empty.
         if ($script:GenState.IsRunning) { return }
         if ($script:GeneratedFiles -and $script:GeneratedFiles.Count -gt 0) {
@@ -1888,7 +1888,7 @@ try {
     $tip.SetToolTip($cancel,'Stops the current generation and its engine processes.')
     $tip.SetToolTip($openOut,'Opens the output folder in Explorer.')
     $tip.SetToolTip($btnReport,'Copies an anonymised technical error report to the clipboard and saves it under logs. Nothing is sent over the internet.')
-    $tip.SetToolTip($refineNative,'Improves your most recent image using the settings currently in the main window (size, steps, CFG, seed, prompt) - same as right-click "Improve using the settings in the main window".')
+    $tip.SetToolTip($refineNative,'Improves your most recent image: same seed and composition, with a dialog to pick the target size and quality - same as right-click "Improve this image".')
     $tip.SetToolTip($speedCombo,'How new images are rendered: Exact (full quality), or a faster draft mode that renders small and enlarges. Fastest renders at a 128-pixel side - very rough, but one click of Improve re-renders it sharp.')
     $tip.SetToolTip($negBtn,'Generation options: negative prompt, sampler and scheduler.')
     $tip.SetToolTip($modelToggle,'Show or hide the engine and model file paths.')
@@ -1934,9 +1934,16 @@ try {
     # quality: same seed and prompt (read from its sidecar), full steps,
     # image-to-image at the chosen size. Grain stays, distortion does not come back.
     $refineMenu=New-Object System.Windows.Forms.ContextMenuStrip
-    $miFresh=$refineMenu.Items.Add('Re-render from the same seed (fresh full quality)')
-    $miCustom=$refineMenu.Items.Add('Improve using the settings in the main window...')
+    # IMPROVE FIRST: it is the action users expect when they right-click an
+    # image. The fresh re-render item previously sat first with a description
+    # that sounded like 'make this image in full quality' - users picked it,
+    # their main-window settings were intentionally ignored (it re-renders
+    # with the image's OWN seed/size), and fast drafts came out as completely
+    # different pictures (the user's 2026-11-20 report, byte-identical outputs
+    # across 'different settings'). Now it is renamed, demoted and guarded.
+    $miCustom=$refineMenu.Items.Add('Improve this image (same seed and composition)...')
     $miAll=$refineMenu.Items.Add('Improve ALL files that can be improved...')
+    $miFresh=$refineMenu.Items.Add('Re-render with this image''s OWN seed and size (ignores the main window settings)...')
     $miInfo=$refineMenu.Items.Add('Show image info (prompt, seed, settings)...')
     $miDelete=$refineMenu.Items.Add('Delete selected file(s)...')
     $miDeleteAll=$refineMenu.Items.Add('Delete ALL files...')
@@ -1949,7 +1956,7 @@ try {
     $miDeleteAll.Add_Click({ Remove-MossSelectedFiles $true })
     $refineMenu.ShowItemToolTips=$true
     $miFresh.ToolTipText='Brand-new full-quality render using this image''s seed, prompt and settings - like a new generation with the same seed. Related look, but the composition can differ from the draft. Use Improve instead to keep the exact composition.'
-    $miCustom.ToolTipText='Improve this image using the size, steps, CFG, seed and prompt currently shown in the main window. Fast previews get a higher strength automatically.'
+    $miCustom.ToolTipText='Improve this image: same seed and composition, pick the target size (Same/2x/4x) and quality in the dialog. Fast previews get a higher strength automatically.'
     $miAll.ToolTipText='Queue every generated image that still has quality headroom (soft previews, fewer steps, smaller than the current size).'
     $miDelete.ToolTipText='Delete the selected image(s) and their sidecars from disk (asks first). Ctrl+click or Shift+click to select several.'
     $miDeleteAll.ToolTipText='Delete every image in the list and its sidecar from disk (asks first, shows the total size freed).'
@@ -1975,43 +1982,40 @@ try {
         Update-MossRightLayout
     })
     function Update-MossRightLayout {
-        if ($f.WindowState -eq [System.Windows.Forms.FormWindowState]::Maximized) {
-            $filesTitle.Visible = $false
-            $fileList.Visible = $false
-            $logTitle.Visible = $false
-            $log.Visible = $false
-            $logToggle.Visible = $false
-            $preview.Location = New-Object System.Drawing.Point(16,42)
-            $preview.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),[Math]::Max(100,$right.ClientSize.Height - 60))
-        } else {
-            $filesTitle.Visible = $true
-            $fileList.Visible = $true
-            $panelHeight = $right.ClientSize.Height
-            $fileHeight = [Math]::Min(150,[Math]::Max(80,[int][Math]::Round($panelHeight * 150.0 / 710.0)))
-            $logTargetHeight = [Math]::Min(130,[Math]::Max(70,[int][Math]::Round($panelHeight * 130.0 / 710.0)))
-            $logSpace = if ($script:LogVisible) { $logTargetHeight + 42 } else { 0 }
-            $previewHeight = [Math]::Max(180,$panelHeight - 145 - $fileHeight - $logSpace)
-            $filesTop = 42 + $previewHeight + 15
-            $listTop = $filesTop + 26
-            $logTitleTop = $listTop + $fileHeight + 17
-            $logTop = $logTitleTop + 27
-            $preview.Location = New-Object System.Drawing.Point(16,42)
-            $preview.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),$previewHeight)
-            $filesTitle.Location = New-Object System.Drawing.Point(16,$filesTop)
-            $fileList.Location = New-Object System.Drawing.Point(16,$listTop)
-            $fileList.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),$fileHeight)
-            # The toggle button IS the header in both states - clicking it
-            # again collapses the log. (The old layout hid the toggle while
-            # expanded and showed only the static title label, which had no
-            # click handler - the log could not be minimized again.)
-            $logTitle.Visible = $false
-            $logToggle.Location = New-Object System.Drawing.Point(16,$logTitleTop)
-            $logToggle.Visible = $true
-            $log.Visible = $script:LogVisible
-            if ($script:LogVisible) {
-                $log.Location = New-Object System.Drawing.Point(16,$logTop)
-                $log.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),[Math]::Max(70,$panelHeight - $logTop - 20))
-            }
+        # One layout for all window states. The old maximized special case
+        # HID the Generated Files box, its title and the log when the window
+        # was maximized - the user lost the file list exactly when more space
+        # made it most useful (user report: 'when i maximize moss, the
+        # generated files box disappears'). The normal formula scales with
+        # the panel size, so it works for maximized too: the preview grows,
+        # the file list and the log stay usable.
+        $filesTitle.Visible = $true
+        $fileList.Visible = $true
+        $panelHeight = $right.ClientSize.Height
+        $fileHeight = [Math]::Min(150,[Math]::Max(80,[int][Math]::Round($panelHeight * 150.0 / 710.0)))
+        $logTargetHeight = [Math]::Min(130,[Math]::Max(70,[int][Math]::Round($panelHeight * 130.0 / 710.0)))
+        $logSpace = if ($script:LogVisible) { $logTargetHeight + 42 } else { 0 }
+        $previewHeight = [Math]::Max(180,$panelHeight - 145 - $fileHeight - $logSpace)
+        $filesTop = 42 + $previewHeight + 15
+        $listTop = $filesTop + 26
+        $logTitleTop = $listTop + $fileHeight + 17
+        $logTop = $logTitleTop + 27
+        $preview.Location = New-Object System.Drawing.Point(16,42)
+        $preview.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),$previewHeight)
+        $filesTitle.Location = New-Object System.Drawing.Point(16,$filesTop)
+        $fileList.Location = New-Object System.Drawing.Point(16,$listTop)
+        $fileList.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),$fileHeight)
+        # The toggle button IS the header in both states - clicking it
+        # again collapses the log. (The old layout hid the toggle while
+        # expanded and showed only the static title label, which had no
+        # click handler - the log could not be minimized again.)
+        $logTitle.Visible = $false
+        $logToggle.Location = New-Object System.Drawing.Point(16,$logTitleTop)
+        $logToggle.Visible = $true
+        $log.Visible = $script:LogVisible
+        if ($script:LogVisible) {
+            $log.Location = New-Object System.Drawing.Point(16,$logTop)
+            $log.Size = New-Object System.Drawing.Size([Math]::Max(100,$right.ClientSize.Width - 32),[Math]::Max(70,$panelHeight - $logTop - 20))
         }
     }
     $script:LogVisible = $false
@@ -2676,6 +2680,18 @@ try {
             [System.Windows.Forms.MessageBox]::Show('The prompt of this image cannot be read (it is stored encrypted and no history code is currently entered, or it was not saved). A re-render from the seed without the prompt would create a completely different picture, so it was not started.`r`n`r`nOpen Image info, enter your history code in MOSS so the prompt can be read, or type a prompt and use Generate with the seed from Image info.','No readable prompt')|Out-Null;return
         }
         if ($d.Seed -lt 0) { $d.Seed = Get-Random -Minimum 1 -Maximum 2147483000 }
+        # A fresh re-render gives the image's OWN look only when it was
+        # rendered natively at (or near) its stored size. For an upscaled fast
+        # draft the seed was sampled on a tiny canvas (e.g. 128 x 170), so the
+        # same seed at full size is DIFFERENT NOISE and the picture comes out
+        # completely different (live-confirmed by the user's report). Warn
+        # loudly and point at the improve action instead.
+        if (Test-MossFastPreview $selFile) {
+            $upNote=''
+            try { $scP = Get-Content -LiteralPath ([System.IO.Path]::ChangeExtension($selFile,'.json')) -Raw | ConvertFrom-Json; if ($scP.UpscaledFrom) { $upNote=('It was upscaled from a small render ({0}). ' -f ([string]$scP.UpscaledFrom -replace '^upscaled from ','')) } } catch {}
+            $warnAnswer=[System.Windows.Forms.MessageBox]::Show(("This image is an upscaled fast DRAFT. {0}A fresh re-render at {1} x {2} with the same seed will NOT look like this picture - the seed does not preserve the composition across render sizes (the small draft and the full-size canvas are different noise patterns).`r`n`r`nIf you want a FULL-QUALITY VERSION OF THIS PICTURE, choose 'No' and use 'Improve this image' instead - it keeps the composition.`r`n`r`nContinue with the fresh re-render anyway?" -f $upNote,$d.TW,$d.TH),'Fresh re-render of a fast draft',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+            if($warnAnswer -ne [System.Windows.Forms.DialogResult]::Yes){return}
+        }
         [void]$script:RefineQueue.Add([pscustomobject]@{ File=$d.File; W=$d.TW; H=$d.TH; Seed=$d.Seed; Prompt=[string]$d.Prompt; NegativePrompt=[string]$d.NegativePrompt; SamplingMethod=$d.SamplingMethod; Scheduler=$d.Scheduler; Strength=0.0; Steps=$null; Cfg=$null; Tag='hq'; FreshRender=$true })
         $script:RefineTotal = $script:RefineQueue.Count
         Start-MossNextRefine
@@ -2683,22 +2699,18 @@ try {
 
 
     function Start-MossRefineWithCurrentSettings {
-        # Improves the selected file using the values currently visible in the
-        # main window (size, steps, CFG, seed, prompt box, Options values).
-        # The confirmation states clearly that these settings apply to that file.
+        # Improves the selected image: THE COMPOSITION AND SEED COME FROM THE
+        # IMAGE ITSELF (img2img + the image's own seed by default), while the
+        # user picks the quality in a dialog: target size (default = the
+        # image's own size, with Same/2x/4x shortcuts), steps and CFG
+        # (prefilled from the main window). The result is a separate NEW file
+        # - the original is never modified.
         if ($script:GenState.IsRunning) { $status.Text='Busy - wait for the current run to finish, then right-click again.'; return }
         $selFile = [string]$script:SelectedFile
         if (-not $selFile -or -not (Test-Path -LiteralPath $selFile -PathType Leaf)) {
             [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (left-click it), then right-click to improve it.','Improve image')|Out-Null;return
         }
         $script:GenState.CancelRequested = $false
-        # The visible controls are validated exactly like GENERATE does.
-        $cw=0; $chh=0
-        if(-not [int]::TryParse($wBox.Text,[ref]$cw) -or -not [int]::TryParse($hBox.Text,[ref]$chh) -or $cw -lt 64 -or $chh -lt 64 -or $cw -gt 8192 -or $chh -gt 8192){[System.Windows.Forms.MessageBox]::Show('Width and height (main window) must be between 64 and 8192 pixels.','Invalid dimensions')|Out-Null;return}
-        $cst=0; $ccf=0.0; $csd=0
-        if(-not [int]::TryParse($steps.Text,[ref]$cst) -or $cst -lt 1 -or $cst -gt 200){[System.Windows.Forms.MessageBox]::Show('Steps (main window) must be between 1 and 200.','Invalid steps')|Out-Null;return}
-        if(-not (ConvertTo-MossDouble $cfg.Text ([ref]$ccf)) -or $ccf -le 0 -or $ccf -gt 30){[System.Windows.Forms.MessageBox]::Show('CFG scale (main window) must be greater than 0 and no more than 30.','Invalid CFG')|Out-Null;return}
-        if(-not [int]::TryParse($seed.Text,[ref]$csd) -or $csd -lt -1){[System.Windows.Forms.MessageBox]::Show('Seed (main window) must be -1 (random) or a non-negative integer.','Invalid seed')|Out-Null;return}
         $cPrompt=($prompt.Text -replace "(\r?\n)+",' ').Trim()
         if(-not $cPrompt){
             # The prompt box is empty: fall back to the image's own prompt from
@@ -2717,49 +2729,74 @@ try {
         if(-not $cPrompt){[System.Windows.Forms.MessageBox]::Show('No prompt found. Enter one in the main window, or enter your history code so MOSS can read the prompt stored with this image.','Prompt required')|Out-Null;return}
         $cStrength=0.6; $t=0.0; if (ConvertTo-MossDouble ([string]$script:Settings.ImproveStrength) ([ref]$t)) { if($t -ge 0.05 -and $t -le 0.95){ $cStrength=$t } }
         $cStrength=Get-MossImproveStrength $selFile $cStrength
-        $useSeed=$csd
-        $seedNote=''
-        if($useSeed -lt 0){
-            # Image-to-image with a FRESH random seed produced visibly worse
-            # results in practice: the noise pattern then does not align with
-            # the picture and the model fights the init image (verified with
-            # real runs - same-seed improves are sharp, random-seed improves
-            # muddy). Reuse the image's own recorded seed whenever it has one.
-            $sideSeed=[long]-1
-            $sideForSeed=[System.IO.Path]::ChangeExtension($selFile,'.json')
-            if (Test-Path -LiteralPath $sideForSeed -PathType Leaf) {
-                try { $scS = Get-Content -LiteralPath $sideForSeed -Raw | ConvertFrom-Json; if ($scS.Seed) { $sideSeed=[long]$scS.Seed } } catch {}
-            }
-            if($sideSeed -ge 0){ $useSeed=$sideSeed; $seedNote=' (from the image - keeps the noise pattern aligned with it)' }
-            else { $useSeed=Get-Random -Minimum 1 -Maximum 2147483000; $seedNote=' (random - the image has no stored seed)' }
+        # Seed: the image's OWN seed by default - same-seed improves keep the
+        # noise pattern aligned (same-seed improves are sharp, random-seed
+        # improves are muddy - verified with real runs).
+        $imgSeed=[long]-1
+        $sideForSeed=[System.IO.Path]::ChangeExtension($selFile,'.json')
+        if (Test-Path -LiteralPath $sideForSeed -PathType Leaf) {
+            try { $scS = Get-Content -LiteralPath $sideForSeed -Raw | ConvertFrom-Json; if ($scS.Seed) { $imgSeed=[long]$scS.Seed } } catch {}
         }
-        # Show the source image's real dimensions and the final size up front.
+        # Source size (the dialog defaults to it).
         $csW=0; $csH=0
         try { $img=[System.Drawing.Image]::FromFile($selFile); $csW=$img.Width; $csH=$img.Height; $img.Dispose() } catch {}
-        $finalMP = [Math]::Round((([double]$cw * [double]$chh) / 1000000.0), 1)
-        $sizeLine = ''
-        if ($csW -gt 0) { $sizeLine = ("`r`nSource image: {0} x {1} ({2} MP)  ->  final: {3} x {4} ({5} MP)" -f $csW,$csH,[Math]::Round((([double]$csW * [double]$csH) / 1000000.0),1),$cw,$chh,$finalMP) }
-        $bigNote = if ($finalMP -gt 4.5) { "`r`n`r`nAbove what most GPUs render natively - it will be rendered at HALF SIZE with all steps and enlarged automatically. Tip: for the best big-image quality, work natively up to 2048 x 2048 and improve THAT image 2x." } else { '' }
-        $aspectNote=''
-        if($csW -gt 0 -and $csH -gt 0){
-            $srcA=[double]$csW/[double]$csH; $tgtA=[double]$cw/[double]$chh
-            if($tgtA -gt 0 -and [Math]::Abs($srcA/$tgtA-1) -gt 0.02){ $aspectNote=("`r`n`r`nNote: the target size has a different aspect ratio than the source ({0} x {1} -> {2} x {3}) - the composition will be squashed or stretched and the result can look worse. Use matching proportions for the best quality." -f $csW,$csH,$cw,$chh) }
-        }
+        if($csW -le 0 -or $csH -le 0){[System.Windows.Forms.MessageBox]::Show('Could not read the image size.','Improve image')|Out-Null;return}
         $isPreview=Test-MossFastPreview $selFile
-        $settingsLine=("`r`n{0} x {1}, steps {2}, CFG {3}, seed {4}{5}, strength {6}" -f $cw,$chh,$cst,$ccf,$useSeed,$seedNote,$cStrength)
-        if($isPreview){
-            $settingsLine+=("`r`n`r`nThis is an upscaled fast preview, so a raised strength is used automatically: detail is regenerated instead of inheriting the blurry enlargement, while the composition comes from your image. If the result still looks soft, raise 'Improve strength' in Options; if the scene starts to drift, lower it.")
-        }else{
-            $settingsLine+=("`r`n`r`nImage-to-image: the composition comes from the selected image.")
-        }
-        $settingsLine+=$sizeLine+$bigNote+$aspectNote
-        $answer=[System.Windows.Forms.MessageBox]::Show(("Improving {0} using the settings currently in the main window:{1}`r`n`r`nThe prompt is the text in the prompt box. Start?" -f [System.IO.Path]::GetFileName($selFile),$settingsLine),'Improve with current settings',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
-        if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
-        $useSampler=$null; if([string]$script:Settings.SamplingMethod -ne 'Default (model)'){ $useSampler=[string]$script:Settings.SamplingMethod }
-        $useSched=$null; if([string]$script:Settings.Scheduler -ne 'Default (model)'){ $useSched=[string]$script:Settings.Scheduler }
-        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$cw; H=$chh; Seed=$useSeed; Prompt=$cPrompt; NegativePrompt=[string]$script:Settings.NegativePrompt; SamplingMethod=$useSampler; Scheduler=$useSched; Strength=$cStrength; Steps=$cst; Cfg=$ccf; Tag='hq'; SrcW=$csW; SrcH=$csH })
-        $script:RefineTotal = $script:RefineQueue.Count
-        Start-MossNextRefine
+        # PICK-YOUR-QUALITY DIALOG: the composition and seed come from the
+        # image; the user picks the target size (default = the image's own
+        # size, with Same/2x/4x shortcuts), steps/CFG prefilled from the main
+        # window and editable. The result is a NEW file - the original is
+        # never touched.
+        $g=New-Object System.Windows.Forms.Form
+        $g.Text='Improve this image'; $g.Size=New-Object System.Drawing.Size(600,480); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false; $g.MinimizeBox=$false
+        $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
+        $ttl=New-Object System.Windows.Forms.Label; $ttl.Text=('Improve  ' + [System.IO.Path]::GetFileName($selFile)); $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',11,[System.Drawing.FontStyle]::Bold); $ttl.Location=New-Object System.Drawing.Point(14,10); $ttl.AutoSize=$true; $g.Controls.Add($ttl)
+        $sub=New-Object System.Windows.Forms.Label; $sub.Text=('Same picture, your chosen quality. Composition and seed come from this image (source {0} x {1}). The result is saved as a NEW file - the original is never modified.' -f $csW,$csH); $sub.Location=New-Object System.Drawing.Point(14,42); $sub.Size=New-Object System.Drawing.Size(550,34); $sub.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($sub)
+        $szLab=New-Object System.Windows.Forms.Label; $szLab.Text='Target size'; $szLab.Location=New-Object System.Drawing.Point(14,88); $szLab.AutoSize=$true; $g.Controls.Add($szLab)
+        $wIn=New-Object System.Windows.Forms.TextBox; $wIn.Text=[string]$csW; $wIn.Location=New-Object System.Drawing.Point(110,84); $wIn.Size=New-Object System.Drawing.Size(70,26); $g.Controls.Add($wIn)
+        $xLab=New-Object System.Windows.Forms.Label; $xLab.Text='x'; $xLab.Location=New-Object System.Drawing.Point(188,88); $xLab.AutoSize=$true; $g.Controls.Add($xLab)
+        $hIn=New-Object System.Windows.Forms.TextBox; $hIn.Text=[string]$csH; $hIn.Location=New-Object System.Drawing.Point(205,84); $hIn.Size=New-Object System.Drawing.Size(70,26); $g.Controls.Add($hIn)
+        $sameBtn=New-Object System.Windows.Forms.Button; $sameBtn.Text='Same'; $sameBtn.Location=New-Object System.Drawing.Point(300,80); $sameBtn.Size=New-Object System.Drawing.Size(70,30); $g.Controls.Add($sameBtn)
+        $twoBtn=New-Object System.Windows.Forms.Button; $twoBtn.Text='2x'; $twoBtn.Location=New-Object System.Drawing.Point(378,80); $twoBtn.Size=New-Object System.Drawing.Size(56,30); $g.Controls.Add($twoBtn)
+        $fourBtn=New-Object System.Windows.Forms.Button; $fourBtn.Text='4x'; $fourBtn.Location=New-Object System.Drawing.Point(442,80); $fourBtn.Size=New-Object System.Drawing.Size(56,30); $g.Controls.Add($fourBtn)
+        $szNote=New-Object System.Windows.Forms.Label; $szNote.Text="The image's own size by default. 2x/4x enlarge it (more detail in the regeneration). Above ~4.5 MP the render runs at HALF SIZE with all steps and is enlarged automatically - never distorted."; $szNote.Location=New-Object System.Drawing.Point(14,120); $szNote.Size=New-Object System.Drawing.Size(550,34); $szNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($szNote)
+        $stLab=New-Object System.Windows.Forms.Label; $stLab.Text='Steps'; $stLab.Location=New-Object System.Drawing.Point(14,170); $stLab.AutoSize=$true; $g.Controls.Add($stLab)
+        $stIn=New-Object System.Windows.Forms.TextBox; $stIn.Text=([string]$script:Settings.Steps); $stIn.Location=New-Object System.Drawing.Point(110,166); $stIn.Size=New-Object System.Drawing.Size(70,26); $g.Controls.Add($stIn)
+        $cfLab=New-Object System.Windows.Forms.Label; $cfLab.Text='CFG scale'; $cfLab.Location=New-Object System.Drawing.Point(210,170); $cfLab.AutoSize=$true; $g.Controls.Add($cfLab)
+        $cfIn=New-Object System.Windows.Forms.TextBox; $cfIn.Text=([string]$script:Settings.CfgScale); $cfIn.Location=New-Object System.Drawing.Point(290,166); $cfIn.Size=New-Object System.Drawing.Size(70,26); $g.Controls.Add($cfIn)
+        $cfTip=New-Object System.Windows.Forms.Label; $cfTip.Text='(prefilled from the main window - edit freely)'; $cfTip.Location=New-Object System.Drawing.Point(376,170); $cfTip.AutoSize=$true; $cfTip.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($cfTip)
+        $sdLab=New-Object System.Windows.Forms.Label; $sdLab.Text='Seed'; $sdLab.Location=New-Object System.Drawing.Point(14,208); $sdLab.AutoSize=$true; $g.Controls.Add($sdLab)
+        $sdIn=New-Object System.Windows.Forms.TextBox; $sdIn.Text=([string]$imgSeed); $sdIn.Location=New-Object System.Drawing.Point(110,204); $sdIn.Size=New-Object System.Drawing.Size(130,26); $g.Controls.Add($sdIn)
+        $sdNote=New-Object System.Windows.Forms.Label; if($imgSeed -ge 0){ $sdNote.Text=" (the image's own seed - keeps the result aligned with it; change it to experiment, -1 = random)" } else { $sdNote.Text=' (this image has no stored seed - a random seed will be used)' }; $sdNote.Location=New-Object System.Drawing.Point(256,208); $sdNote.Size=New-Object System.Drawing.Size(308,26); $sdNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($sdNote)
+        $stNote=New-Object System.Windows.Forms.Label; $stNote.Text=('Strength {0} (from Options). Image-to-image: the composition comes from the image - low strength = very faithful, high = more changes.{1}' -f $cStrength,($(if($isPreview){' This is an upscaled fast draft, so a raised strength is used automatically so detail is regenerated instead of the blurry enlargement.'}else{''}))); $stNote.Location=New-Object System.Drawing.Point(14,246); $stNote.Size=New-Object System.Drawing.Size(550,44); $stNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($stNote)
+        $pNote=New-Object System.Windows.Forms.Label; $pNote.Text='Prompt: the text in the main window prompt box (change it there first if needed).'; $pNote.Location=New-Object System.Drawing.Point(14,300); $pNote.Size=New-Object System.Drawing.Size(550,20); $pNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($pNote)
+        $impBtn=New-Object System.Windows.Forms.Button; $impBtn.Text='Improve'; $impBtn.Location=New-Object System.Drawing.Point(320,416); $impBtn.Size=New-Object System.Drawing.Size(120,32); $g.Controls.Add($impBtn)
+        $cnBtn=New-Object System.Windows.Forms.Button; $cnBtn.Text='Cancel'; $cnBtn.Location=New-Object System.Drawing.Point(452,416); $cnBtn.Size=New-Object System.Drawing.Size(100,32); $g.Controls.Add($cnBtn)
+        $g.AcceptButton=$impBtn; $g.CancelButton=$cnBtn
+        $sameBtn.Add_Click({ $wIn.Text=[string]$csW; $hIn.Text=[string]$csH })
+        $twoBtn.Add_Click({ $wIn.Text=[string][Math]::Min(8192,([int]$csW*2)); $hIn.Text=[string][Math]::Min(8192,([int]$csH*2)) })
+        $fourBtn.Add_Click({ $wIn.Text=[string][Math]::Min(8192,([int]$csW*4)); $hIn.Text=[string][Math]::Min(8192,([int]$csH*4)) })
+        $impBtn.Add_Click({
+            $cw=0; $chh=0
+            if(-not [int]::TryParse($wIn.Text,[ref]$cw) -or -not [int]::TryParse($hIn.Text,[ref]$chh) -or $cw -lt 64 -or $chh -lt 64 -or $cw -gt 8192 -or $chh -gt 8192){[System.Windows.Forms.MessageBox]::Show($g,'Width and height must be between 64 and 8192 pixels.','Invalid dimensions')|Out-Null;return}
+            $cst=0; $ccf=0.0; $csd=0
+            if(-not [int]::TryParse($stIn.Text,[ref]$cst) -or $cst -lt 1 -or $cst -gt 200){[System.Windows.Forms.MessageBox]::Show($g,'Steps must be between 1 and 200.','Invalid steps')|Out-Null;return}
+            if(-not (ConvertTo-MossDouble $cfIn.Text ([ref]$ccf)) -or $ccf -le 0 -or $ccf -gt 30){[System.Windows.Forms.MessageBox]::Show($g,'CFG scale must be greater than 0 and no more than 30 (dot or comma both work, e.g. 3.5 or 3,5).','Invalid CFG')|Out-Null;return}
+            if(-not [int]::TryParse($sdIn.Text,[ref]$csd) -or $csd -lt -1){[System.Windows.Forms.MessageBox]::Show($g,'Seed must be -1 (random) or a non-negative integer.','Invalid seed')|Out-Null;return}
+            $finalMP=[Math]::Round((([double]$cw*[double]$chh)/1000000.0),1)
+            $bigNote=''; $aspectNote=''
+            if($finalMP -gt 4.5){ $bigNote=("`r`n`r`nNote: {0} MP is above what most GPUs render natively - it will be rendered at HALF SIZE with all {1} steps and enlarged automatically." -f $finalMP,$cst) }
+            if($csW -gt 0 -and $csH -gt 0){ $srcA=[double]$csW/[double]$csH; $tgtA=[double]$cw/[double]$chh; if($tgtA -gt 0 -and [Math]::Abs($srcA/$tgtA-1) -gt 0.02){ $aspectNote=("`r`n`r`nNote: the target size has a different aspect ratio than the image ({0} x {1} -> {2} x {3}) - the composition will be squashed or stretched and the result can look worse. Use matching proportions for the best quality." -f $csW,$csH,$cw,$chh) } }
+            if($bigNote -or $aspectNote){ $ans=[System.Windows.Forms.MessageBox]::Show($g,("Start the improve with {0} x {1} ({2} MP)?{3}{4}" -f $cw,$chh,$finalMP,$bigNote,$aspectNote),'Improve this image',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question); if($ans -ne [System.Windows.Forms.DialogResult]::Yes){return} }
+            $useSampler=$null; if([string]$script:Settings.SamplingMethod -ne 'Default (model)'){ $useSampler=[string]$script:Settings.SamplingMethod }
+            $useSched=$null; if([string]$script:Settings.Scheduler -ne 'Default (model)'){ $useSched=[string]$script:Settings.Scheduler }
+            [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$cw; H=$chh; Seed=$csd; Prompt=$cPrompt; NegativePrompt=[string]$script:Settings.NegativePrompt; SamplingMethod=$useSampler; Scheduler=$useSched; Strength=$cStrength; Steps=$cst; Cfg=$ccf; Tag='hq'; SrcW=$csW; SrcH=$csH })
+            $script:RefineTotal = $script:RefineQueue.Count
+            $g.Close()
+            Start-MossNextRefine
+        })
+        [void]$g.ShowDialog($f)
+        $g.Dispose()
     }
 
     function Start-MossRefineAll {
