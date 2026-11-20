@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.64'
+$script:AppVersion = '0.1.65'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -1551,7 +1551,19 @@ function Show-GeneratorWindow {
     $head=New-Object System.Windows.Forms.Panel; $head.Dock='Top'; $head.Height=68; $head.BackColor=$cPanel; $f.Controls.Add($head)
     $ttl=New-Object System.Windows.Forms.Label; $ttl.Text="MOSS  /  IMAGE STUDIO  v$($script:AppVersion)"; $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',17,[System.Drawing.FontStyle]::Bold); $ttl.AutoSize=$true; $ttl.Location=New-Object System.Drawing.Point(20,9); $head.Controls.Add($ttl)
     $gpuSubtitle='GPU: automatic'
-    if($script:Settings.Contains('PreferredGpuIndex') -and [int]$script:Settings.PreferredGpuIndex -ge 0){ $gpuSubtitle="GPU: $($script:Settings.PreferredGpuName)" }
+    if($script:Settings.Contains('PreferredGpuIndex') -and [int]$script:Settings.PreferredGpuIndex -ge 0){
+        $gpuSubtitle="GPU: $($script:Settings.PreferredGpuName)"
+        if([string]::IsNullOrWhiteSpace([string]$script:Settings.PreferredGpuName)){ $gpuSubtitle="GPU: device $($script:Settings.PreferredGpuIndex)" }
+    } else {
+        # Automatic still SHOWS which GPU will be used (user: 'it should
+        # instead show what gpu was chosen'). The engine picks the best
+        # available device at start; the detected discrete adapter is what it
+        # will be in practice.
+        try {
+            $gpusAuto = @(Get-GpuInventory | Where-Object { -not $_.IsVirtual -and $_.Vendor -ne 'Unknown' })
+            if ($gpusAuto.Count -gt 0) { $gpuSubtitle = 'GPU: automatic (' + [string]$gpusAuto[0].Name + ')' }
+        } catch {}
+    }
     $subt=New-Object System.Windows.Forms.Label; $subt.Text="LOCAL IMAGE GENERATION  -  $gpuSubtitle"; $subt.ForeColor=$cMuted; $subt.AutoSize=$true; $subt.Location=New-Object System.Drawing.Point(23,42); $head.Controls.Add($subt)
     $backendText=[string]$script:Settings.Backend; if (-not $script:Settings.BackendSelectionSaved) { $backendText='Not configured' }
     $backendBadge=New-Object System.Windows.Forms.Label; $backendBadge.Text="BACKEND  $backendText"; $backendBadge.AutoSize=$true; $backendBadge.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $backendBadge.Location=New-Object System.Drawing.Point(535,25); $backendBadge.Anchor='Top,Right'; $head.Controls.Add($backendBadge)
