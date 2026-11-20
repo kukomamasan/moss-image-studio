@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.50'
+$script:AppVersion = '0.1.51'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -2685,7 +2685,7 @@ try {
         # The prompt is unreadable when the image was saved by an older MOSS
         # version with a history code and no code has been entered.
         if (-not ([string]$d.Prompt).Trim()) {
-            [System.Windows.Forms.MessageBox]::Show('The prompt of this image cannot be read (it is stored encrypted and no history code is currently entered, or it was not saved). A re-render from the seed without the prompt would create a completely different picture, so it was not started.`r`n`r`nOpen Image info, enter your history code in MOSS so the prompt can be read, or type a prompt and use Generate with the seed from Image info.','No readable prompt')|Out-Null;return
+            [System.Windows.Forms.MessageBox]::Show(("The prompt of this image cannot be read: it is stored ENCRYPTED (a history code was active when the image was generated), and no code is currently entered in MOSS. A re-render without the prompt would create a completely different picture, so it was not started.`r`n`r`nYou can re-render it either way:`r`n`r`n1. Click 'History code...' in the header, enter your code, then right-click the image again - MOSS will read the stored prompt.`r`n`r`n2. Or type a NEW prompt in the main window and use Generate with the seed from Image info - that new prompt will be used instead.`r`n`r`nNothing was generated and the image was not changed."),'Prompt is encrypted - code required',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null;return
         }
         if ($d.Seed -lt 0) { $d.Seed = Get-Random -Minimum 1 -Maximum 2147483000 }
         # A fresh re-render gives the image's OWN look only when it was
@@ -2736,7 +2736,20 @@ try {
                 } catch {}
             }
         }
-        if(-not $cPrompt){[System.Windows.Forms.MessageBox]::Show('No prompt found. Enter one in the main window, or enter your history code so MOSS can read the prompt stored with this image.','Prompt required')|Out-Null;return}
+        if(-not $cPrompt){
+            # Distinguish WHY no prompt is available: the most common case is
+            # an ENCRYPTED sidecar prompt with no history code entered. Give
+            # a specific, actionable error instead of a generic one.
+            $sideNow=[System.IO.Path]::ChangeExtension($selFile,'.json')
+            $encryptedNoCode=$false
+            if (Test-Path -LiteralPath $sideNow -PathType Leaf) {
+                try { $scN = Get-Content -LiteralPath $sideNow -Raw | ConvertFrom-Json; if ($scN.PromptProtected) { $encryptedNoCode=$true } } catch {}
+            }
+            if($encryptedNoCode){
+                [System.Windows.Forms.MessageBox]::Show(("The prompt of this image cannot be read: it is stored ENCRYPTED (a history code was active when the image was generated), and no code is currently entered in MOSS.`r`n`r`nYou can improve it either way:`r`n`r`n1. Click 'History code...' in the header, enter your code, then right-click the image again - MOSS will read the stored prompt and prefill it.`r`n`r`n2. Or type a NEW prompt in the main window and try again - that new prompt will be used instead (the picture will follow the new prompt, not the original one).`r`n`r`nNothing was generated and the image was not changed."),'Prompt is encrypted - code required',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null;return
+            }
+            [System.Windows.Forms.MessageBox]::Show('No prompt was found for this image: the prompt box is empty and the image has no stored (or readable) prompt. Type a prompt in the main window and try again.','Prompt required')|Out-Null;return
+        }
         $cStrength=0.6; $t=0.0; if (ConvertTo-MossDouble ([string]$script:Settings.ImproveStrength) ([ref]$t)) { if($t -ge 0.05 -and $t -le 0.95){ $cStrength=$t } }
         $cStrength=Get-MossImproveStrength $selFile $cStrength
         # Seed: the image's OWN seed by default - same-seed improves keep the
