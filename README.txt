@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.37)
+MOSS Image Studio - portable build (v0.1.39)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -119,6 +119,17 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.39
+----------------------
+- Simplified: the right-click improve menu is now fully settings-driven.
+  The entries "Improve this image (full quality)" and "Improve this image
+  (2x bigger)" (which used the image's own size) are gone. Improving now
+  uses the size, steps, CFG, seed and prompt you set in the main window:
+  right-click -> "Improve using the settings in the main window...".
+  The "Improve last image" button does the same for the most recent image.
+  New: "Re-render from the same seed (fresh full quality)" - a brand-new
+  full-quality generation with the image's own seed and prompt.
 
 What is new in v0.1.37
 ----------------------

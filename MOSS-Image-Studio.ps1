@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.38'
+$script:AppVersion = '0.1.39'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -940,13 +940,14 @@ try {
     $btnReport=Add-Button $left 'Error report' 416 615 105 42
     $refineNative=Add-Button $left 'Improve last image' 547 615 140 42; $refineNative.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164)
     $refineNative.Add_Click({
-        # Same sidecar-aware path as the right-click menu: seed, prompt, sampler,
-        # scheduler and negative prompt are reused from the image itself, the
-        # output gets the _hq tag, and the strength adapts to the source.
+        # Settings-driven improve of the most recent image: the size, steps,
+        # CFG, seed and prompt come from the main window (same as right-click
+        # "Improve using the settings in the main window"), and the prompt
+        # falls back to the image's own stored prompt when the box is empty.
         if ($script:GenState.IsRunning) { return }
         if ($script:GeneratedFiles -and $script:GeneratedFiles.Count -gt 0) {
             $script:SelectedFile = [string]$script:GeneratedFiles[$script:GeneratedFiles.Count - 1]
-            Start-MossRefineSelected 1
+            Start-MossRefineWithCurrentSettings
         } else {
             [System.Windows.Forms.MessageBox]::Show('Generate an image first - the most recent one is then used as the starting picture for the improvement.','Nothing to improve')|Out-Null
         }
@@ -958,7 +959,7 @@ try {
     $tip.SetToolTip($cancel,'Stops the current generation and its engine processes.')
     $tip.SetToolTip($openOut,'Opens the output folder in Explorer.')
     $tip.SetToolTip($btnReport,'Copies an anonymised technical error report to the clipboard and saves it under logs. Nothing is sent over the internet.')
-    $tip.SetToolTip($refineNative,'Takes your most recent image and re-renders it at full quality: same composition, same seed and prompt, more detail. Right-click any file in Generated files to improve that one instead.')
+    $tip.SetToolTip($refineNative,'Improves your most recent image using the settings currently in the main window (size, steps, CFG, seed, prompt) - same as right-click "Improve using the settings in the main window".')
     $tip.SetToolTip($speedCombo,'How new images are rendered: Exact (full quality), or a faster draft mode that renders small and enlarges. Fastest renders at a 128-pixel side - very rough, but one click of Improve re-renders it sharp.')
     $tip.SetToolTip($negBtn,'Generation options: negative prompt, sampler and scheduler.')
     $tip.SetToolTip($modelToggle,'Show or hide the engine and model file paths.')
@@ -1002,24 +1003,18 @@ try {
     # quality: same seed and prompt (read from its sidecar), full steps,
     # image-to-image at the chosen size. Grain stays, distortion does not come back.
     $refineMenu=New-Object System.Windows.Forms.ContextMenuStrip
-    $miSame=$refineMenu.Items.Add('Improve this image (full quality)')
-    $miBig=$refineMenu.Items.Add('Improve this image (2x bigger)')
     $miFresh=$refineMenu.Items.Add('Re-render from the same seed (fresh full quality)')
     $miCustom=$refineMenu.Items.Add('Improve using the settings in the main window...')
     $miAll=$refineMenu.Items.Add('Improve ALL files that can be improved...')
     $miInfo=$refineMenu.Items.Add('Show image info (prompt, seed, settings)...')
     $miDelete=$refineMenu.Items.Add('Delete this file')
     $fileList.ContextMenuStrip=$refineMenu
-    $miSame.Add_Click({ Start-MossRefineSelected 1 })
-    $miBig.Add_Click({ Start-MossRefineSelected 2 })
     $miFresh.Add_Click({ Start-MossRefineFresh })
     $miCustom.Add_Click({ Start-MossRefineWithCurrentSettings })
     $miAll.Add_Click({ Start-MossRefineAll })
     $miInfo.Add_Click({ Show-MossImageInfo })
     $miDelete.Add_Click({ Remove-MossSelectedFile })
     $refineMenu.ShowItemToolTips=$true
-    $miSame.ToolTipText='Improve this image at its current size: same seed and prompt, image-to-image keeps the composition. Fast previews get a higher strength automatically so detail is regenerated instead of the blurry enlargement.'
-    $miBig.ToolTipText='Improve this image at double size: more resolution, about four times the rendering time.'
     $miFresh.ToolTipText='Brand-new full-quality render using this image''s seed, prompt and settings - like a new generation with the same seed. Related look, but the composition can differ from the draft. Use Improve instead to keep the exact composition.'
     $miCustom.ToolTipText='Improve this image using the size, steps, CFG, seed and prompt currently shown in the main window. Fast previews get a higher strength automatically.'
     $miAll.ToolTipText='Queue every generated image that still has quality headroom (soft previews, fewer steps, smaller than the current size).'
@@ -1738,32 +1733,6 @@ try {
         Start-MossNextRefine
     }
 
-    function Start-MossRefineSelected([double]$sizeFactor) {
-        # Quick improve: re-render the file selected in Generated Files with the
-        # image's own settings (same seed and prompt), one click.
-        if ($script:GenState.IsRunning) { $status.Text='Busy - wait for the current run to finish, then right-click again.'; return }
-        $selFile = [string]$script:SelectedFile
-        if (-not $selFile -or -not (Test-Path -LiteralPath $selFile -PathType Leaf)) {
-            [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (left-click it), then right-click to improve it.','Improve image')|Out-Null;return
-        }
-        # A fresh right-click is a new user action: forget any earlier cancel.
-        $script:GenState.CancelRequested = $false
-        $d = Get-MossImproveDefaults $selFile $sizeFactor
-        if ($d.Error -eq 'size') { [System.Windows.Forms.MessageBox]::Show('Could not determine the image size.','Improve image')|Out-Null;return }
-        $srcW=0; $srcH=0
-        try { $img=[System.Drawing.Image]::FromFile($selFile); $srcW=$img.Width; $srcH=$img.Height; $img.Dispose() } catch {}
-        $finalMP = [Math]::Round((([double]$d.TW * [double]$d.TH) / 1000000.0), 1)
-        $srcLine = if ($srcW -gt 0) { ('{0} x {1} ({2} MP)' -f $srcW, $srcH, [Math]::Round((([double]$srcW * [double]$srcH) / 1000000.0), 1)) } else { 'unknown size' }
-        if ($finalMP -gt 4.5) {
-            if([System.Windows.Forms.MessageBox]::Show(("Improving {0}:`r`nSource image: {1}`r`nFinal size: {2} x {3} ({4} MP)`r`n`r`nThis is larger than most GPUs can render natively, so it will be rendered at HALF SIZE with all steps and enlarged to the full size automatically (fast-mode pipeline, never distorted).`r`n`r`nTip: for the best big-image quality, generate or improve at up to 2048 x 2048 natively, then improve THAT image 2x. Start?" -f [System.IO.Path]::GetFileName($selFile),$srcLine,$d.TW,$d.TH,$finalMP),'Large image improvement',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Information) -ne [System.Windows.Forms.DialogResult]::Yes){return}
-        }
-        if ($d.Seed -lt 0) { $d.Seed = Get-Random -Minimum 1 -Maximum 2147483000 }
-        $quickStrength=0.6; $t=0.0; if (ConvertTo-MossDouble ([string]$script:Settings.ImproveStrength) ([ref]$t)) { if($t -ge 0.05 -and $t -le 0.95){ $quickStrength=$t } }
-        $quickStrength=Get-MossImproveStrength $d.File $quickStrength
-        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$d.File; W=$d.TW; H=$d.TH; Seed=$d.Seed; Prompt=[string]$d.Prompt; NegativePrompt=[string]$d.NegativePrompt; SamplingMethod=$d.SamplingMethod; Scheduler=$d.Scheduler; Strength=$quickStrength; Steps=$null; Cfg=$null; Tag=$(if($sizeFactor -gt 1){'hq2x'}else{'hq'}); SrcW=$srcW; SrcH=$srcH })
-        $script:RefineTotal = $script:RefineQueue.Count
-        Start-MossNextRefine
-    }
 
     function Start-MossRefineWithCurrentSettings {
         # Improves the selected file using the values currently visible in the
