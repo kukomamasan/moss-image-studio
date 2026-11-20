@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.25)
+MOSS Image Studio - portable build (v0.1.26)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,16 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.26
+----------------------
+- Fixed: the app now works the same on every Windows language and regional
+  format. On systems that use a comma for decimals (Danish, German and many
+  others), entering 0.6 as Improve strength was rejected as invalid, a saved
+  Improve strength was silently ignored, and values sent to the engine (CFG
+  scale, improvement strength) could be misread. Numbers now accept both
+  0.6 and 0,6 everywhere and are always stored and sent to the engine with
+  a dot, regardless of country settings - no language check needed.
 
 What is new in v0.1.25
 ----------------------
