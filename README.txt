@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.27)
+MOSS Image Studio - portable build (v0.1.28)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,12 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.28
+----------------------
+- Fixed: deleting an image failed with "the file is in use" while the image
+  was shown in the preview. The preview no longer keeps a lock on the file
+  (it shows a copy), and the preview is released before the delete runs.
 
 What is new in v0.1.27
 ----------------------

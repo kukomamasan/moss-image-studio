@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.27'
+$script:AppVersion = '0.1.28'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -970,8 +970,19 @@ try {
     Add-Label $right 'OUTPUT PREVIEW' 16 14 200 | Out-Null
     $preview=New-Object System.Windows.Forms.PictureBox; $preview.Location=New-Object System.Drawing.Point(16,42); $preview.Size=New-Object System.Drawing.Size(383,285); $preview.Anchor='Top,Left,Right'; $preview.SizeMode='Zoom'; $preview.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $right.Controls.Add($preview)
     $filesTitle=Add-Label $right 'GENERATED FILES  (right-click: improve or delete)' 16 342 340
+    function Copy-MossImageUnlocked([string]$path) {
+        # Returns a Bitmap copy of an image file without keeping the file
+        # locked. Image.FromFile holds a file lock for the lifetime of the
+        # image, which blocked deleting the file while it was shown in the
+        # preview. The copy decouples the control from the file on disk.
+        try {
+            $src=[System.Drawing.Image]::FromFile($path)
+            try { return New-Object System.Drawing.Bitmap($src) } finally { $src.Dispose() }
+        } catch { return $null }
+    }
+
     $fileList=New-Object System.Windows.Forms.ListBox; $fileList.Location=New-Object System.Drawing.Point(16,368); $fileList.Size=New-Object System.Drawing.Size(383,150); $fileList.Anchor='Top,Left,Right'; $fileList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $fileList.ForeColor=$cText; $right.Controls.Add($fileList)
-    $fileList.Add_SelectedIndexChanged({if($fileList.SelectedItem){$p=[string]$fileList.SelectedItem;$script:SelectedFile=$p;if(Test-Path -LiteralPath $p){try{$old=$preview.Image;$preview.Image=[System.Drawing.Image]::FromFile($p);if($old){$old.Dispose()}}catch{}}}})
+    $fileList.Add_SelectedIndexChanged({if($fileList.SelectedItem){$p=[string]$fileList.SelectedItem;$script:SelectedFile=$p;if(Test-Path -LiteralPath $p){try{$newImg=Copy-MossImageUnlocked $p;if($newImg){$old=$preview.Image;$preview.Image=$newImg;if($old){$old.Dispose()}}}catch{}}}})
     # A plain right-click does not change the ListBox selection - select the
     # file under the cursor first, so Improve always acts on that file.
     $fileList.Add_MouseClick({ param($sender,$e) if($e.Button -eq [System.Windows.Forms.MouseButtons]::Right){ $idx=$fileList.IndexFromPoint($e.Location); if($idx -ge 0 -and $fileList.SelectedIndex -ne $idx){ $fileList.SelectedIndex=$idx } } })
@@ -1827,6 +1838,8 @@ try {
         }
         $answer=[System.Windows.Forms.MessageBox]::Show(("Delete this image permanently?`r`n$selFile"),'Delete file',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
         if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
+        # Release the preview first so the file is not held open while deleting.
+        try { $old=$preview.Image; $preview.Image=$null; if($old){ $old.Dispose() } } catch {}
         try { Remove-Item -LiteralPath $selFile -Force } catch { [System.Windows.Forms.MessageBox]::Show(('Could not delete the image: '+$_.Exception.Message),'Delete file')|Out-Null;return }
         $side=[System.IO.Path]::ChangeExtension($selFile,'.json')
         if(Test-Path -LiteralPath $side){ try { Remove-Item -LiteralPath $side -Force } catch {} }
@@ -1834,7 +1847,6 @@ try {
         if($idx -ge 0){ $fileList.Items.RemoveAt($idx) }
         [void]$script:GeneratedFiles.Remove($selFile)
         $script:SelectedFile=$null
-        try { $old=$preview.Image; $preview.Image=$null; if($old){ $old.Dispose() } } catch {}
         if($fileList.Items.Count -gt 0){ $fileList.SelectedIndex=$fileList.Items.Count-1 }
         $status.Text='File deleted.'
     }
