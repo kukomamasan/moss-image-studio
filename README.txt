@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.21)
+MOSS Image Studio - portable build (v0.1.22)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -114,6 +114,13 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.22
+----------------------
+- Fixed: clicking Generate emptied the "Generated files" box. The list is
+  the history of every image you created (it is filled from the output
+  folder when MOSS starts), so it is no longer cleared when you generate -
+  new images are simply added to it and selected.
 
 What is new in v0.1.21
 ----------------------
