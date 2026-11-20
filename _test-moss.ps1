@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.67' ($src.Contains("AppVersion = '0.1.67'"))
+Test 'version is 0.1.69' ($src.Contains("AppVersion = '0.1.69'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -58,9 +58,10 @@ Test 'readers accept plain sidecar prompts (improve works without the code)' ($s
 Test 'History code button opens a menu with an UNLOCK option' ($src.Contains('Enter code to unlock the prompt history...') -and $src.Contains('Set a NEW code (clears the saved history!)...') -and $src.Contains('Turn off prompt history (deletes the saved history)...') -and $src.Contains('Show-MossHistoryCodeMenu') -and $src.Contains('You can enter the code later via the History code... button'))
 Test 'time taken survives completion (status + log)' ($src.Contains('the total elapsed survives completion') -and $src.Contains('Improvement finished - $script:RefineTotal image(s) processed$queueElapsed') -and $src.Contains('$batchTimeText = '' | total time ''') -and $src.Contains('$script:RefineStartedAt'))
 Test 'improve dialog: size picker with Same/2x/4x and image seed prefill' ($src.Contains('PICK-YOUR-QUALITY DIALOG') -and $src.Contains('Target size') -and $src.Contains('$sameBtn') -and $src.Contains('$twoBtn') -and $src.Contains('$fourBtn') -and $src.Contains("the image's own seed - keeps the result aligned") -and $src.Contains('the original is never modified'))
-Test 'progress bar pinned to the bottom, driven by the engine step counter (numeric readout removed - status line shows all numbers)' ($src.Contains('Progress bar pinned to the VERY BOTTOM') -and $src.Contains('StepNum = [int]$numerator; $st.StepDen = [int]$denominator') -and $src.Contains('" | step $([int]$st.StepNum)/$([int]$st.StepDen)"') -and $src.Contains('$prog.Value = [Math]::Max($prog.Minimum,[Math]::Min($prog.Maximum,$overall))') -and $src.Contains("$prog.Style = 'Marquee'") -and $src.Contains("Anchor='Bottom,Left,Right'"))
+Test 'progress bar pinned to the bottom, driven by the engine step counter (numeric readout removed - status line shows all numbers)' ($src.Contains('Progress bar pinned to the VERY BOTTOM') -and $src.Contains('StepNum = [int]$numerator; $st.StepDen = [int]$denominator') -and $src.Contains('''step {0,3}/{1,3}'' -f [int]$st.StepNum, [int]$st.StepDen') -and $src.Contains('$prog.Value = [Math]::Max($prog.Minimum,[Math]::Min($prog.Maximum,$overall))') -and $src.Contains("$prog.Style = 'Marquee'") -and $src.Contains("Anchor='Bottom,Left,Right'"))
 Test 'no duplicate numeric readout next to the bar (numbers live in the status line only)' (-not $src.Contains('progPct'))
-Test 'loading phase says warming up in the status line (readout text moved there)' ($src.Contains("' | warming up the model...'"))
+Test 'status line is fixed-width (padded numbers, h:mm:ss times, monospace font - user request)' ($src.Contains('function Format-MossFixedTime') -and $src.Contains("$phase.PadRight(17)") -and $src.Contains("Font('Consolas',9)"))
+Test 'loading phase says warming up in the status line (readout text moved there)' ($src.Contains("else { 'warming up...' }"))
 Test 'memory retry chain Exact->4x->8x->Fast with ForcedSpeed' ($src.Contains('''Exact'' { $retryMode = ''4x'' }') -and $src.Contains('''4x''    { $retryMode = ''8x'' }') -and $src.Contains('''8x''    { $retryMode = ''Fast'' }') -and $src.Contains('ForcedSpeed=$retryMode') -and $src.Contains('Retrying the improvement with a SMALLER render size'))
 Test 'style prefix not doubled when the prompt already has it' ($src.Contains('-not $p.ToLowerInvariant().StartsWith($stylePrefix.ToLowerInvariant())'))
 Test 'style prefix not doubled when the prompt already has it' ($src.Contains('-not $p.ToLowerInvariant().StartsWith($stylePrefix.ToLowerInvariant())'))
@@ -288,7 +289,7 @@ try {
 # output) - now shows 'decoding and saving the image...' instead.
 Test 'decode phase detected from the engine log' ($src.Contains('$decIdx = $progressWindow.LastIndexOf(''decoding'')'))
 Test 'save phase detected from the engine log' ($src.Contains('$saveIdx = $progressWindow.LastIndexOf(''save result image'')'))
-Test 'decode/save phases named in the status line' ($src.Contains('decoding and saving the image...'))
+Test 'decode/save phases named in the status line' ($src.Contains('decoding/saving...'))
 try {
     function Test-Phase([string]$w) {
         $d = $w.LastIndexOf('decoding'); $dd = $w.LastIndexOf('decoded'); $s = $w.LastIndexOf('save result image')
@@ -356,11 +357,21 @@ try {
     Test 'runtime: detected GPU on this machine is a known vendor' ($g.Count -ge 1)
     Test 'runtime: subtitle would include the adapter name' (('GPU: automatic (' + $g[0].Name + ')') -like 'GPU: automatic (*)')
 } catch { Test 'runtime: GPU subtitle block ran without exception' $false }
+# v0.1.69: batch overlap (user: 'it will wait for all images to be done, and
+# then run the resizer, maybe run the resizer + generate pictures, since
+# resizer uses cpu, it should not have a big impact'): each image is
+# upscaled + registered LIVE while the engine renders the rest; the
+# batch-end pass only handles leftovers.
+Test 'shared per-image completion used live and at batch end' ($src.Contains('function Complete-MossBatchImage'))
+Test 'live completion runs in the progress tick' ($src.Contains('LIVE COMPLETION OVERLAP'))
+Test 'an image counts as done when the engine moved to a LATER image or saved the current one' ($src.Contains("`$maxDone = if (`$progressWindow -match 'save result image')") -and $src.Contains('[Math]::Max(0, $lastGen - 1)'))
+Test 'live-completed images tracked per run' ($src.Contains('LiveCompletedImages = New-Object System.Collections.ArrayList'))
+Test 'batch-end pass skips live-completed images (no double processing)' ($src.Contains('LiveCompletedImages -contains $i) { $ok++; continue }'))
 # v0.1.67: the ETA is always for the WHOLE batch (user: 'if i select to
 # make 64 images, the eta should be when all pictures is done') and is
 # steadied by blending the live estimate with the average of finished
 # images; the label says so.
-Test 'ETA label states the whole batch' ($src.Contains('"ETA ~$(Format-MossDuration $remaining) (all $($job.Count) images)"'))
+Test 'ETA label states the whole batch' ($src.Contains('"ETA ~$(Format-MossFixedTime $remaining) (all $($job.Count))"'))
 Test 'ETA estimate blends live progress with finished-image average' ($src.Contains('($imageEstimate + $avgDone) / 2.0'))
 Test 'ETA math covers remaining images explicitly' ($src.Contains('$job.Count - $currentImage) * $imageEstimate'))
 Write-Host ''
