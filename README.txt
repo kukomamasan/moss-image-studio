@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.24)
+MOSS Image Studio - portable build (v0.1.25)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,13 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.25
+----------------------
+- Fixed: the explanation text next to "Improve strength" in Options was cut
+  off at the end. It now has room for all three lines, and the Improve
+  strength box itself got a proper tooltip (including how it interacts with
+  fast previews).
 
 What is new in v0.1.24
 ----------------------
