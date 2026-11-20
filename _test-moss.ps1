@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.66' ($src.Contains("AppVersion = '0.1.66'"))
+Test 'version is 0.1.67' ($src.Contains("AppVersion = '0.1.67'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -356,6 +356,13 @@ try {
     Test 'runtime: detected GPU on this machine is a known vendor' ($g.Count -ge 1)
     Test 'runtime: subtitle would include the adapter name' (('GPU: automatic (' + $g[0].Name + ')') -like 'GPU: automatic (*)')
 } catch { Test 'runtime: GPU subtitle block ran without exception' $false }
+# v0.1.67: the ETA is always for the WHOLE batch (user: 'if i select to
+# make 64 images, the eta should be when all pictures is done') and is
+# steadied by blending the live estimate with the average of finished
+# images; the label says so.
+Test 'ETA label states the whole batch' ($src.Contains('"ETA ~$(Format-MossDuration $remaining) (all $($job.Count) images)"'))
+Test 'ETA estimate blends live progress with finished-image average' ($src.Contains('($imageEstimate + $avgDone) / 2.0'))
+Test 'ETA math covers remaining images explicitly' ($src.Contains('$job.Count - $currentImage) * $imageEstimate'))
 Write-Host ''
 if ($fail -gt 0) { Write-Host ($fail.ToString() + ' test(s) FAILED'); exit 1 }
 Write-Host 'ALL TESTS PASSED'
