@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.30)
+MOSS Image Studio - portable build (v0.1.31)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,13 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.31
+----------------------
+- Fixed (properly this time): the history code prompt could still leave
+  typing going to the main window. The prompt is now shown as a real modal
+  dialog owned by the main window (Windows guarantees it takes the keyboard
+  focus), in addition to the focus-on-show and re-focus timer from before.
 
 What is new in v0.1.30
 ----------------------
