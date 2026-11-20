@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.34)
+MOSS Image Studio - portable build (v0.1.35)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,14 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.35
+----------------------
+- Improved: improving an image to a very large size (bigger than about
+  4.5 megapixels, e.g. 4K landscape or a 2x of a 2K image) no longer fails
+  with a silent engine crash. Those targets are rendered at half size with
+  the full step count and enlarged to the full size afterwards - the same
+  reliable fast-mode pipeline used for quick drafts, and the log explains it.
 
 What is new in v0.1.34
 ----------------------

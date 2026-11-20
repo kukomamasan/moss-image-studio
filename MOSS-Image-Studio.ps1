@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.34'
+$script:AppVersion = '0.1.35'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = '' }
@@ -1966,7 +1966,18 @@ try {
             return
         }
         $gpuIdx=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIdx=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIdx=-1 } }
-        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps});Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode='Exact';InitImage=[string]$item.File;InitStrength=[double]$item.Strength;RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler}
+        # Very large improve targets cannot be rendered natively on most GPUs
+        # (the engine then dies silently, usually out of memory). Above ~4.5
+        # megapixels the improve is rendered at HALF SIZE with the full step
+        # count and enlarged to the full target afterwards - the same faithful
+        # pipeline as the fast generation speed modes (no second sampling pass).
+        $refineSpeed = 'Exact'
+        $targetMP = ([double]$item.W * [double]$item.H) / 1000000.0
+        if ($targetMP -gt 4.5) {
+            $refineSpeed = '4x'
+            $log.AppendText(("`r`nNote: {0} x {1} is too large for a native render on most GPUs - rendering at half size with all {2} steps and enlarging to full size (fast-mode pipeline, never distorted)." -f $item.W, $item.H, $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})))
+        }
+        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps});Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode=$refineSpeed;InitImage=[string]$item.File;InitStrength=[double]$item.Strength;RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler}
         $status.Text = ("Improving image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
         if (Test-MossFastPreview ([string]$item.File)) {
             $log.AppendText(("`r`nImproving: seed {0}, image-to-image from {1} (strength {2} - fast preview, detail regenerated over the enlarged draft, composition kept from the image)" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $item.Strength))
