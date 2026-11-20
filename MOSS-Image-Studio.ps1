@@ -9,10 +9,10 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.32'
+$script:AppVersion = '0.1.33'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
-$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
+$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = '' }
 $script:HistoryPassphrase = $null
 $script:HistoryLocked = $false
 $script:LockedHistoryEnvelope = $null
@@ -952,7 +952,7 @@ try {
     $tip.SetToolTip($generate,'Renders your prompt. Quality follows the selector above: Exact (full quality) renders at full size and full steps; faster modes render small and enlarge - quick drafts, never distorted.')
     $tip.SetToolTip($cancel,'Stops the current generation and its engine processes.')
     $tip.SetToolTip($openOut,'Opens the output folder in Explorer.')
-    $tip.SetToolTip($btnReport,'Copies an anonymised technical error report to the clipboard (and saves it under logs).')
+    $tip.SetToolTip($btnReport,'Copies an anonymised technical error report to the clipboard and saves it under logs. Nothing is sent over the internet.')
     $tip.SetToolTip($refineNative,'Takes your most recent image and re-renders it at full quality: same composition, same seed and prompt, more detail. Right-click any file in Generated files to improve that one instead.')
     $tip.SetToolTip($speedCombo,'How new images are rendered: Exact (full quality), or a faster draft mode that renders small and enlarges. Fastest renders at a 128-pixel side - very rough, but one click of Improve re-renders it sharp.')
     $tip.SetToolTip($negBtn,'Generation options: negative prompt, sampler and scheduler.')
@@ -1223,33 +1223,18 @@ try {
             $script:GenState.LastReport = $report
             [System.Windows.Forms.Clipboard]::SetText($report)
             $status.Text = 'Error report copied to clipboard (paths anonymised)'
-            # Also save a copy under logs\
+            # Local only by design: the report is copied and saved, never sent
+            # anywhere (MOSS has no report server, and nothing leaves this PC).
+            $savedName = ''
             try {
                 $logDir = Join-Path $script:AppRoot 'logs'
                 if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
                 $reportFile = Join-Path $logDir ('error-report-' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.txt')
                 $report | Set-Content -LiteralPath $reportFile -Encoding UTF8
-                $status.Text = "Error report copied + saved to logs\\$(Split-Path -Leaf $reportFile)"
-            } catch {}
-            # Optional, consent-gated diagnostic upload. Nothing is sent without an
-            # explicit Yes from the user, and a local copy always exists first.
-            try {
-                $uploadUrl = [string]$script:Settings.ErrorReportUrl
-                $answer = [System.Windows.Forms.MessageBox]::Show('Upload this anonymous error report now for investigation? Technical details only; prompts and personal paths are omitted.','Send error report',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
-                if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
-                    if ([string]::IsNullOrWhiteSpace($uploadUrl)) {
-                        [System.Windows.Forms.MessageBox]::Show('No upload address is configured in moss settings (ErrorReportUrl). The report stays on this computer in the logs folder.','Send error report',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-                    } else {
-                        try {
-                            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-                            Invoke-WebRequest -Uri $uploadUrl -Method Post -Body $report -ContentType 'text/plain' -UseBasicParsing -TimeoutSec 20 | Out-Null
-                            $status.Text = 'Error report uploaded. A local copy also remains in logs.'
-                        } catch {
-                            [System.Windows.Forms.MessageBox]::Show(('Upload failed ('+$_.Exception.Message+'). The local copy in logs is preserved; please try again when online.'),'Send error report',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
-                        }
-                    }
-                }
-            } catch {}
+                $savedName = Split-Path -Leaf $reportFile
+                $status.Text = "Error report copied + saved to logs\$savedName (nothing is sent online)"
+            } catch { $status.Text = 'Error report copied to clipboard (paths anonymised)' }
+            [System.Windows.Forms.MessageBox]::Show(("The anonymised error report is now on the clipboard and saved as logs\$savedName. Nothing is sent over the internet - the report stays on this computer.`r`n`r`nPaste it into an AI assistant (or send it to the developer) if you want help diagnosing the problem."),'Error report',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
         } catch {
             [System.Windows.Forms.MessageBox]::Show(('Could not build/copy report: ' + $_.Exception.Message), 'Error report') | Out-Null
         }

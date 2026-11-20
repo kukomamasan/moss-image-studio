@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.32)
+MOSS Image Studio - portable build (v0.1.33)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,13 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.33
+----------------------
+- Changed: the "Error report" button no longer offers to upload anything.
+  It copies the anonymised report to the clipboard and saves it in the logs
+  folder, and tells you so. Nothing ever leaves your computer. (The old
+  "no upload address configured" step is gone.)
 
 What is new in v0.1.32
 ----------------------
