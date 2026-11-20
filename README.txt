@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.31)
+MOSS Image Studio - portable build (v0.1.32)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,12 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.32
+----------------------
+- NEW: "None (no style)" is now the first entry in the Visual style list.
+  It sends your prompt exactly as typed, with no style words added. If a
+  saved config has an unknown style, MOSS now defaults to "None (no style)".
 
 What is new in v0.1.31
 ----------------------
