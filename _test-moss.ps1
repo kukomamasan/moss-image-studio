@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.59' ($src.Contains("AppVersion = '0.1.59'"))
+Test 'version is 0.1.60' ($src.Contains("AppVersion = '0.1.60'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -126,7 +126,7 @@ Test 'code dialogs shown owned by the main window' (($src -match 'ShowDialog\(\$
 Test 'style list has None (no style) first and sends prompt untouched' ($src.Contains("@('None (no style)','Photorealistic'") -and $src.Contains("# 'None (no style)' falls through to default{''}"))
 Test 'eight new visual styles wired' (($src.Contains("'Fantasy art'{") -and $src.Contains("'Cyberpunk / sci-fi'{") -and $src.Contains("'Pixel art'{")) -and (([regex]::Matches($src,"'Low poly 3D'")).Count -ge 2))
 Test 'error report is local-only (no upload path)' ((-not ($src.Contains('ErrorReportUrl'))) -and ($src.Contains('Nothing is sent over the internet - the report stays on this computer')) -and ($src.Contains("saved to logs\`$savedName (nothing is sent online)")))
-Test 'out-of-memory hint for silent engine failures' ($src.Contains('Hint: the engine stopped without any message') -and $src.Contains('running out of GPU or system memory'))
+Test 'out-of-memory hint for silent engine failures' ($src.Contains('without any error message') -and $src.Contains('running out of GPU or system memory'))
 Test 'oversized improve targets auto half-size render' ($src.Contains('too large for a native render on most GPUs') -and $src.Contains("$refineSpeed = '4x'") -and $src.Contains('SpeedMode=$refineSpeed'))
 Test 'improve logs show source -> final size' ($src.Contains('-> final {4} x {5} (strength {6})') -and $src.Contains('composition kept from the image'))
 Test 'frontend identity: title and command-line transparency' ($src.Contains('(GUI for sd-cli) | Generator') -and $src.Contains('Engine command line: {0} {1}') -and $src.Contains('ShowEngineCommandLine'))
@@ -257,6 +257,29 @@ try {
     $mw = [regex]::Matches($twoImg.Substring($widx), $pat)
     Test 'runtime: batch window keeps progress on the CURRENT image (1/4, not the old 3/4)' ($mw.Count -eq 1 -and $mw[0].Groups[1].Value -eq '1' -and $mw[0].Groups[2].Value -eq '4')
     Test 'runtime: textual step counter still works as fallback' ([regex]::Matches('step 17/50', '(?im)(?:\bstep\s*[:#]?\s*(\d+)\s*/\s*(\d+)\b|\b(\d+)\s*/\s*(\d+)\s*steps?\b)').Count -eq 1)
+# v0.1.60: the event-based capture NEVER fired in the STA + WinForms app
+# (PowerShell's event queue is not pumped by the message loop), so the engine
+# output was empty for the whole run - live progress, %, ETA and the exit log
+# all saw nothing. Capture now runs on a background runspace thread that
+# blocks in ReadLine and fills a synchronized hashtable the tick reads.
+Test 'engine output captured on a background runspace thread (events never fire in WinForms)' ($src.Contains('$st.CaptureRunner = [powershell]::Create()') -and $src.Contains('StandardOutput.ReadLine()'))
+Test 'no Register-ObjectEvent output capture left' (-not $src.Contains('Register-ObjectEvent -InputObject $proc'))
+Test 'capture is a synchronized hashtable the tick reads' ($src.Contains("[hashtable]::Synchronized(@{ Out = ''; Err = '' })") -and $src.Contains('$st.Capture.Out'))
+Test 'capture thread started after the engine process exists' ($src.IndexOf('proc.Start()') -lt $src.IndexOf('CaptureRunner = [powershell]::Create()'))
+Test 'exit path waits for the capture thread before reading final output' ($src.Contains('CaptureRunner.EndInvoke($st.CaptureAsync)'))
+Test 'cancel path stops the capture runspace' ($src.Contains('CaptureRunner.Stop()'))
+Test 'OOM detection keys on missing [E] error line, not empty output (capture now works)' ($src.Contains('(?m)^\[E\][^\r\n]*') -and $src.Contains('$memoryDeath = -not $hasExplicitError'))
+Test 'OOM hint shows the engine''s last [E] error line' ($src.Contains('its last error: {0}'))
+try {
+    $errOut = "[I] loading model`n[E] vae decode compute failed --- vae.hpp:379"
+    $e2 = [regex]::Matches($errOut, "(?m)^\[E\][^\r\n]*")
+    Test 'runtime: [E] heuristic extracts the error line' ($e2.Count -eq 1 -and $e2[0].Value.Contains('vae decode compute failed'))
+    $cleanOut = "[I] generating image: 1/1 - seed 42`n"
+    Test 'runtime: [E] heuristic finds no error in clean output' ([regex]::Matches($cleanOut, "(?m)^\[E\][^\r\n]*").Count -eq 0)
+    $memOut = "[I] loading model`n[E] ggml: failed to allocate memory`n"
+    $e3 = [regex]::Matches($memOut, "(?m)^\[E\][^\r\n]*")[0].Value
+    Test 'runtime: memory-ish [E] line marks the death as memory' ($e3 -match 'memory|allocat|out of mem|OOM')
+} catch { Test 'runtime: OOM heuristic block ran without exception' $false }
 } catch { Test 'runtime: progress parsing block ran without exception' $false }
 Write-Host ''
 if ($fail -gt 0) { Write-Host ($fail.ToString() + ' test(s) FAILED'); exit 1 }
