@@ -5,7 +5,7 @@ param([switch]$SetupOnly,[switch]$ReturnToGenerator)
 
 $ErrorActionPreference = 'Stop'
 $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$script:AppVersion = '0.1.13'
+$script:AppVersion = '0.1.14'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -15,9 +15,6 @@ $script:LockedHistoryEnvelope = $null
 $script:HistoryStoredEnvelope = $null
 $script:HistoryPasswordVerifier = $null
 $script:HistoryEnabled = $true
-$script:AdultAccessVerifier = $null
-$script:AdultPassphrase = $null
-$script:AdultCodeSetup = 'Undecided'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -80,22 +77,6 @@ function Show-MossHistorySetupChoice {
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
 }
 
-function Show-MossAdminCodeSetupChoice {
-    $f=New-Object System.Windows.Forms.Form; $f.Text='Administrator code'; $f.Size=New-Object System.Drawing.Size(540,220); $f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'; $f.MaximizeBox=$false; $f.MinimizeBox=$false; $f.Topmost=$true
-    $label=New-Object System.Windows.Forms.Label; $label.Text='No administrator code is set. You can create one now, or continue without using an administrator code.'; $label.Location=New-Object System.Drawing.Point(18,18); $label.Size=New-Object System.Drawing.Size(490,48); $f.Controls.Add($label)
-    $create=New-Object System.Windows.Forms.Button; $create.Text='Create a code'; $create.Location=New-Object System.Drawing.Point(72,98); $create.Size=New-Object System.Drawing.Size(170,44); $create.Add_Click({$f.Tag='create';$f.Close()}.GetNewClosure()); $f.Controls.Add($create)
-    $skip=New-Object System.Windows.Forms.Button; $skip.Text='Continue without a code'; $skip.Location=New-Object System.Drawing.Point(270,98); $skip.Size=New-Object System.Drawing.Size(190,44); $skip.Add_Click({$f.Tag='skip';$f.Close()}.GetNewClosure()); $f.Controls.Add($skip)
-    try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
-}
-
-function Show-MossAdminCodeRecoveryChoice {
-    $f=New-Object System.Windows.Forms.Form; $f.Text='Administrator code'; $f.Size=New-Object System.Drawing.Size(540,220); $f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'; $f.MaximizeBox=$false; $f.MinimizeBox=$false; $f.Topmost=$true
-    $label=New-Object System.Windows.Forms.Label; $label.Text='The administrator code was not accepted. Try entering it again, or remove the administrator code and continue without code protection.'; $label.Location=New-Object System.Drawing.Point(18,18); $label.Size=New-Object System.Drawing.Size(490,52); $f.Controls.Add($label)
-    $retry=New-Object System.Windows.Forms.Button; $retry.Text='Try again'; $retry.Location=New-Object System.Drawing.Point(82,100); $retry.Size=New-Object System.Drawing.Size(160,44); $retry.Add_Click({$f.Tag='retry';$f.Close()}.GetNewClosure()); $f.Controls.Add($retry)
-    $skip=New-Object System.Windows.Forms.Button; $skip.Text='Continue without code'; $skip.Location=New-Object System.Drawing.Point(270,100); $skip.Size=New-Object System.Drawing.Size(190,44); $skip.Add_Click({$f.Tag='skip';$f.Close()}.GetNewClosure()); $f.Controls.Add($skip)
-    try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'retry' } finally { $f.Dispose() }
-}
-
 function Protect-MossPayload([string]$Text,[string]$Password) {
     $salt=New-Object byte[] 16; $rng=[System.Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($salt)
     $iv=New-Object byte[] 16; $rng.GetBytes($iv); $rng.Dispose(); $iterations=250000
@@ -152,48 +133,14 @@ function Disable-MossHistory {
     return (Save-Settings)
 }
 
-function Confirm-MossAdminAccess {
-    if($script:AdultAccessVerifier){
-        while($true){
-            $code=Get-MossHistoryPassphrase $false 'administrator access'
-            if($code -and (Test-MossHistoryPassphrase $code $script:AdultAccessVerifier)){$script:AdultPassphrase=$code;break}
-            $choice=Show-MossAdminCodeRecoveryChoice
-            if($choice -eq 'skip'){
-                $script:AdultAccessVerifier=$null
-                $script:AdultPassphrase=$null
-                $script:AdultCodeSetup='Skipped'
-                [void](Save-Settings)
-                return $true
-            }
-        }
-        return $true
-    }
-    if($script:AdultCodeSetup -eq 'Skipped'){return $true}
-    $choice=Show-MossAdminCodeSetupChoice
-    if($choice -eq 'create'){
-        $code=Get-MossHistoryPassphrase $true 'administrator access'
-        if(-not $code){return $false}
-        $script:AdultAccessVerifier=Protect-MossPayload 'MOSS-ADULT-ACCESS-CHECK-V1' $code
-        $script:AdultPassphrase=$code
-        $script:AdultCodeSetup='Enabled'
-        [void](Save-Settings)
-        return $true
-    }
-    $script:AdultCodeSetup='Skipped'
-    [void](Save-Settings)
-    return $true
-}
-
 function Load-Settings([switch]$UnlockHistory) {
     if (Test-Path -LiteralPath $script:ConfigFile) {
         try {
             $saved = Get-Content -LiteralPath $script:ConfigFile -Raw | ConvertFrom-Json
             foreach ($p in $saved.PSObject.Properties) {
-                if ($p.Name -notin @('PromptHistory','PromptHistoryProtected','HistoryPasswordVerifier','PromptHistoryEnabled','AdultAccessVerifier','ChildProfiles')) { $script:Settings[$p.Name] = $p.Value }
+                if ($p.Name -notin @('PromptHistory','PromptHistoryProtected','HistoryPasswordVerifier','PromptHistoryEnabled','AdultAccessVerifier','AdultCodeSetup','ChildProfiles')) { $script:Settings[$p.Name] = $p.Value }
             }
             if ($saved.HistoryPasswordVerifier) { $script:HistoryPasswordVerifier=[string]$saved.HistoryPasswordVerifier }
-            if ($saved.AdultAccessVerifier) { $script:AdultAccessVerifier=[string]$saved.AdultAccessVerifier }
-            if ($saved.AdultCodeSetup) { $script:AdultCodeSetup=[string]$saved.AdultCodeSetup }
             if ($saved.PSObject.Properties.Name -contains 'PromptHistoryEnabled') { $script:HistoryEnabled=[bool]$saved.PromptHistoryEnabled }
             $script:HistoryStoredEnvelope=[string]$saved.PromptHistoryProtected
             if ($script:HistoryEnabled -and $saved.PromptHistoryProtected) {
@@ -236,8 +183,6 @@ function Save-Settings {
     $persist = [ordered]@{}
     foreach ($key in $script:Settings.Keys) { if ($key -ne 'PromptHistory') { $persist[$key] = $script:Settings[$key] } }
     $persist.PromptHistoryEnabled=[bool]$script:HistoryEnabled
-    $persist.AdultAccessVerifier=$script:AdultAccessVerifier
-    $persist.AdultCodeSetup=$script:AdultCodeSetup
     $history = @($script:Settings.PromptHistory)
     if (-not $script:HistoryEnabled) {
         # Disabled means no prompt history or password verifier is persisted.
@@ -839,7 +784,6 @@ try {
         Process = $null
         Timer = $null
         Job = $null
-        Index = 0
         Results = $null
         StdOut = $null
         StdErr = $null
@@ -847,7 +791,8 @@ try {
         ErrEvent = $null
         CancelRequested = $false
         CurrentFile = $null
-        CurrentSeed = 0
+        CurrentImageIndex = 0
+        CurrentImageSeed = 0
         LastErrorSummary = ''
         LastStdout = ''
         LastStderr = ''
@@ -930,13 +875,13 @@ try {
         $st = $script:GenState
         $lines.Add(('IsRunning: ' + $st.IsRunning))
         $lines.Add(('CancelRequested: ' + $st.CancelRequested))
-        $lines.Add(('Current index: ' + $st.Index))
+        $lines.Add(('Current image: ' + [int]$st.CurrentImageIndex))
         if ($null -ne $st.LastExitCode) { $lines.Add(('Last exit code: ' + $st.LastExitCode)) }
         if ($st.LastErrorSummary) { $lines.Add(('Last error summary: ' + $st.LastErrorSummary)) }
         if ($st.Job) {
             $j = $st.Job
             $lines.Add(('Job size: {0} x {1}, steps {2}, cfg {3}, count {4}, seed base {5}' -f $j.Width, $j.Height, $j.Steps, $j.Cfg, $j.Count, $j.Seed))
-            $lines.Add(('Job offload: ' + $j.Offload))
+            $lines.Add(('Weight placement: engine auto-fit (GPU, then RAM, then disk as needed)'))
             # Prompt intentionally omitted from error reports for privacy
         }
         $lines.Add('')
@@ -1005,55 +950,35 @@ try {
         return $span.ToString('m\:ss')
     }
 
-    function Get-MossAutoOffload([string]$Backend) {
-        # Prefer GPU-only execution for speed. CPU offload is enabled only when
-        # available VRAM is below the model's approximate 12 GB working set.
-        if ($Backend -eq 'CPU') { return $false }
-        $freeMb = $null
-        if ($Backend -eq 'CUDA') {
-            $smi = Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue
-            if (-not $smi) {
-                foreach ($candidate in @("$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe", "$env:WINDIR\System32\nvidia-smi.exe")) {
-                    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $smi = Get-Item -LiteralPath $candidate; break }
-                }
-            }
-            if ($smi) {
-                try {
-                    $smiPath = if ($smi.PSObject.Properties.Name -contains 'Source' -and $smi.Source) { $smi.Source } else { $smi.FullName }
-                    $reported = & $smiPath --query-gpu=memory.free --format=csv,noheader,nounits 2>$null | Select-Object -First 1
-                    $parsed = 0
-                    if ([int]::TryParse(([string]$reported).Trim(), [ref]$parsed)) { $freeMb = $parsed }
-                } catch {}
-            }
-        } else {
-            # Windows reports AdapterRAM as a 32-bit value. A value below 4 GB
-            # proves the adapter is too small; larger values may be truncated.
-            try {
-                $controllers = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -notmatch '(?i)virtual|indirect|remote|displaylink' })
-                $match = $null
-                if ($Backend -match 'AMD|HIP|Vulkan') { $match = $controllers | Where-Object { $_.Name -match '(?i)AMD|Radeon' } | Select-Object -First 1 }
-                elseif ($Backend -match 'SYCL|Intel') { $match = $controllers | Where-Object { $_.Name -match '(?i)Intel' } | Select-Object -First 1 }
-                if ($match -and [long]$match.AdapterRAM -gt 0 -and [long]$match.AdapterRAM -lt 4294967295) { $freeMb = [Math]::Max(0, [Math]::Floor([long]$match.AdapterRAM / 1MB) - 2048) }
-            } catch {}
-        }
-        if ($null -ne $freeMb) { return ([double]$freeMb -lt 12288) }
-        return $false
-    }
-
     function Update-MossLiveProgress {
         $st = $script:GenState
         if (-not $st.IsRunning -or $null -eq $st.Process -or $st.Process.HasExited) { return }
         $elapsed = 0.0
         if ($st.JobStartedAt) { $elapsed = [Math]::Max(0, ((Get-Date) - $st.JobStartedAt).TotalSeconds) }
+        $combined = ([string]$st.StdOut.ToString()) + "`n" + ([string]$st.StdErr.ToString())
+        # The whole batch runs in one engine process. Track which image of the
+        # batch is currently rendering from the engine's own progress lines.
+        $batchMatches = [regex]::Matches($combined, '(?i)generating image:\s*(\d+)\s*/\s*(\d+)\s*-\s*seed\s*(-?\d+)')
+        if ($batchMatches.Count -gt 0) {
+            $lastBatch = $batchMatches[$batchMatches.Count - 1]
+            $thisImage = [int]$lastBatch.Groups[1].Value
+            if ($thisImage -ne [int]$st.CurrentImageIndex) {
+                if ($st.ImageStartedAt -and [int]$st.CurrentImageIndex -gt 0) {
+                    [void]$st.ImageDurations.Add([Math]::Max(0.1, ((Get-Date) - $st.ImageStartedAt).TotalSeconds))
+                }
+                $st.CurrentImageIndex = $thisImage
+                $st.CurrentImageSeed = [long]$lastBatch.Groups[3].Value
+                $st.ImageStartedAt = Get-Date
+                $st.ImageProgress = 0
+            }
+        }
         $imageElapsed = 0.0
         if ($st.ImageStartedAt) { $imageElapsed = [Math]::Max(0, ((Get-Date) - $st.ImageStartedAt).TotalSeconds) }
-        $stdoutNow = [string]$st.StdOut.ToString()
-        $stderrNow = [string]$st.StdErr.ToString()
         $engineProgress = $null
-        $matches = [regex]::Matches(($stdoutNow + "`n" + $stderrNow), '(?im)\b(\d{1,3})\s*%')
+        $matches = [regex]::Matches($combined, '(?im)\b(\d{1,3})\s*%')
         if ($matches.Count -gt 0) { $engineProgress = [Math]::Max(0, [Math]::Min(100, [int]$matches[$matches.Count - 1].Groups[1].Value)) }
         if ($null -eq $engineProgress) {
-            $matches = [regex]::Matches(($stdoutNow + "`n" + $stderrNow), '(?im)(?:\bstep\s*[:#]?\s*(\d+)\s*/\s*(\d+)\b|\b(\d+)\s*/\s*(\d+)\s*steps?\b)')
+            $matches = [regex]::Matches($combined, '(?im)(?:\bstep\s*[:#]?\s*(\d+)\s*/\s*(\d+)\b|\b(\d+)\s*/\s*(\d+)\s*steps?\b)')
             if ($matches.Count -gt 0) {
                 $last = $matches[$matches.Count - 1]
                 if ($last.Groups[1].Success) { $numerator = [double]$last.Groups[1].Value; $denominator = [double]$last.Groups[2].Value }
@@ -1063,20 +988,21 @@ try {
         }
         if ($null -ne $engineProgress) { $st.ImageProgress = [int]$engineProgress }
         $job = $st.Job
-        $overall = [int][Math]::Floor((($st.Index * 100) + [int]$st.ImageProgress) / [Math]::Max(1, [int]$job.Count))
+        $currentImage = [Math]::Max(1, [int]$st.CurrentImageIndex)
+        $overall = [int][Math]::Floor(((($currentImage - 1) * 100) + [int]$st.ImageProgress) / [Math]::Max(1, [int]$job.Count))
         $overall = [Math]::Max(0, [Math]::Min(99, $overall))
         $etaText = 'ETA calculating'
         $remaining = $null
         if ($null -ne $engineProgress -and $engineProgress -gt 0) {
             $imageTotalEstimate = $imageElapsed * 100.0 / $engineProgress
-            $remaining = ($imageTotalEstimate - $imageElapsed) + ([Math]::Max(0, $job.Count - $st.Index - 1) * $imageTotalEstimate)
+            $remaining = ($imageTotalEstimate - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $imageTotalEstimate)
         } elseif ($st.ImageDurations.Count -gt 0) {
             $average = (($st.ImageDurations | Measure-Object -Average).Average)
-            $remaining = [Math]::Max(0, $average - $imageElapsed) + ([Math]::Max(0, $job.Count - $st.Index - 1) * $average)
+            $remaining = [Math]::Max(0, $average - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $average)
         }
         if ($null -ne $remaining) { $etaText = "ETA ~$(Format-MossDuration $remaining)" }
         $progressNote = if ($null -ne $engineProgress) { " | image $([int]$st.ImageProgress)%" } else { '' }
-        $status.Text = "Image $($st.Index + 1) of $($job.Count) | $overall% overall$progressNote | total elapsed $(Format-MossDuration $elapsed) | $etaText"
+        $status.Text = "Image $currentImage of $($job.Count) | $overall% overall$progressNote | total elapsed $(Format-MossDuration $elapsed) | $etaText"
     }
 
 
@@ -1089,32 +1015,17 @@ try {
         if ($script:GenState.JobStartedAt) { $status.Text += " | total elapsed $(Format-MossDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds)" }
     }
 
-    function Start-MossNextImage {
+    function Start-MossBatchEngine {
+        # One engine process renders the whole batch: the model is loaded once and
+        # the prompt conditioning is reused (--batch-count + --conditioning-cache-size).
+        # Weight placement (GPU, RAM, disk) is decided by the engine's built-in
+        # auto-fit, which works the same way for CUDA, Vulkan, SYCL and CPU builds.
         $st = $script:GenState
         $job = $st.Job
-        if ($st.CancelRequested) {
-            Complete-MossGen 'Generation cancelled'
-            $log.AppendText("`r`nGeneration was cancelled by the user.")
-            return
-        }
-        if ($st.Index -ge $job.Count) {
-            $ok = @($st.Results | Where-Object { $_.ExitCode -eq 0 }).Count
-            $total = $st.Results.Count
-            if ($ok -eq $total -and $total -gt 0) { $msg = "Completed - $ok of $total image(s) generated" }
-            elseif ($ok -gt 0) { $msg = "Partially completed - $ok of $total image(s) generated" }
-            else { $msg = 'Generation failed - engine returned no successful images' }
-            Complete-MossGen $msg
-            if ($ok -gt 0) { $log.AppendText("`r`nCompleted. Output folder: $($job.OutputPath)") }
-            if ($ok -lt $total) { $log.AppendText("`r`nOne or more engine runs failed. Review each image's exit code and engine output above.") }
-            return
-        }
 
-        $i = $st.Index
-        $thisSeed = $job.Seed + $i
         $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
-        $file = Join-Path $job.OutputPath ("MOSS_{0}_{1:D2}.png" -f $stamp, ($i + 1))
-        $st.CurrentFile = $file
-        $st.CurrentSeed = $thisSeed
+        $pattern = Join-Path $job.OutputPath ("MOSS_{0}_%02d.png" -f $stamp)
+        $st.CurrentFile = $pattern
 
         $argsList = New-Object System.Collections.Generic.List[string]
         $argsList.Add('--diffusion-model'); $argsList.Add((Quote-ProcessArgument $job.Diffusion))
@@ -1125,10 +1036,12 @@ try {
         $argsList.Add('--steps'); $argsList.Add([string]$job.Steps)
         $argsList.Add('-H'); $argsList.Add([string]$job.Height)
         $argsList.Add('-W'); $argsList.Add([string]$job.Width)
-        $argsList.Add('-s'); $argsList.Add([string]$thisSeed)
-        if ($job.Offload) { $argsList.Add('--offload-to-cpu') }
+        $argsList.Add('-s'); $argsList.Add([string]$job.Seed)
+        $argsList.Add('--batch-count'); $argsList.Add([string]$job.Count)
+        $argsList.Add('--output-begin-idx'); $argsList.Add('1')
+        $argsList.Add('--conditioning-cache-size'); $argsList.Add([string][Math]::Max(1, [int]$job.Count))
         $argsList.Add('-p'); $argsList.Add((Quote-ProcessArgument $job.Prompt))
-        $argsList.Add('-o'); $argsList.Add((Quote-ProcessArgument $file))
+        $argsList.Add('-o'); $argsList.Add((Quote-ProcessArgument $pattern))
 
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $job.Engine
@@ -1173,14 +1086,14 @@ try {
             $script:ActiveProcess = $proc
             $st.ImageStartedAt = Get-Date
             $st.ImageProgress = 0
-            $status.Text = ("Starting image {0} of {1} (seed {2})..." -f ($i + 1), $job.Count, $thisSeed)
+            $st.CurrentImageIndex = 0
+            $status.Text = ("Rendering {0} image(s) in one run (base seed {1})..." -f $job.Count, $job.Seed)
         } catch {
             $msg = "Failed to start engine: $($_.Exception.Message)"
             $log.AppendText("`r`n$msg")
             [void](Write-MossErrorLog 'MOSS engine start failure' $msg)
-            [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = -1; Seed = $thisSeed; Output = $msg })
-            $st.Index++
-            Start-MossNextImage
+            [void]$st.Results.Add([pscustomobject]@{ Path = ([string]$st.CurrentFile); ExitCode = -1; Seed = $job.Seed; Output = $msg })
+            Complete-MossGen 'Generation failed - the engine could not be started'
         }
     }
 
@@ -1189,14 +1102,11 @@ try {
         if ($null -eq $st.Process) { return }
         if (-not $st.Process.HasExited) { Update-MossLiveProgress; return }
 
-        # Process finished
+        # The whole batch has finished (one process rendered every image).
         $exitCode = $st.Process.ExitCode
         $st.LastExitCode = $exitCode
-        $file = $st.CurrentFile
-        $thisSeed = $st.CurrentSeed
-        $i = $st.Index
         $job = $st.Job
-        if ($st.ImageStartedAt) { [void]$st.ImageDurations.Add([Math]::Max(0.1, ((Get-Date) - $st.ImageStartedAt).TotalSeconds)) }
+        if ($st.ImageStartedAt -and [int]$st.CurrentImageIndex -gt 0) { [void]$st.ImageDurations.Add([Math]::Max(0.1, ((Get-Date) - $st.ImageStartedAt).TotalSeconds)) }
 
         $stdout = [string]$st.StdOut.ToString()
         $stderr = [string]$st.StdErr.ToString()
@@ -1209,7 +1119,7 @@ try {
         $st.LastStderr = $stderr
         $st.LastExitCode = $exitCode
         if ($exitCode -ne 0) {
-            $st.LastErrorSummary = "Engine exit code $exitCode for seed $thisSeed"
+            $st.LastErrorSummary = "Engine exit code $exitCode for a batch of $($job.Count) image(s)"
         }
 
         # Drain remaining data
@@ -1229,43 +1139,57 @@ try {
         $st.Process = $null
         $script:ActiveProcess = $null
 
-        $outputText = "Engine: $($job.Engine)`r`nWorking directory: $($job.Root)`r`nExit code: $exitCode`r`n--- STDOUT ---`r`n$stdout`r`n--- STDERR ---`r`n$stderr"
+        # Per-image seeds as reported by the engine ('generating image: i/N - seed S').
+        $seedMap = @{}
+        foreach ($m in [regex]::Matches($stdout, '(?i)generating image:\s*(\d+)\s*/\s*(\d+)\s*-\s*seed\s*(-?\d+)')) {
+            $seedMap[[int]$m.Groups[1].Value] = [long]$m.Groups[3].Value
+        }
 
-        if ($exitCode -eq 0 -and (Test-Path -LiteralPath $file)) {
-            try {
-                $meta = [ordered]@{
-                    Width = $job.Width; Height = $job.Height
-                    Steps = $job.Steps; CfgScale = $job.Cfg; Seed = $thisSeed
-                    Backend = $job.Backend; OffloadToCpu = $job.Offload
-                    GeneratedAt = (Get-Date).ToString('o'); Engine = $job.Engine
-                }
-                if (-not $script:HistoryLocked -and $script:HistoryPassphrase) { $meta.PromptProtected = Protect-MossPayload ([string]$job.Prompt) $script:HistoryPassphrase }
-                $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath ([System.IO.Path]::ChangeExtension($file, '.json')) -Encoding UTF8
-            } catch {
-                $outputText += "`r`nMetadata sidecar could not be saved: $($_.Exception.Message)"
+        $patternBase = ([string]$st.CurrentFile) -replace '%02d','{0:D2}'
+        $ok = 0
+        $missing = New-Object System.Collections.Generic.List[string]
+        for ($i = 1; $i -le $job.Count; $i++) {
+            $file = $patternBase -f $i
+            $thisSeed = if ($seedMap.ContainsKey($i)) { $seedMap[$i] } else { $job.Seed + ($i - 1) }
+            if ($exitCode -eq 0 -and (Test-Path -LiteralPath $file)) {
+                $ok++
+                try {
+                    $meta = [ordered]@{
+                        Width = $job.Width; Height = $job.Height
+                        Steps = $job.Steps; CfgScale = $job.Cfg; Seed = $thisSeed
+                        Backend = $job.Backend
+                        GeneratedAt = (Get-Date).ToString('o'); Engine = $job.Engine
+                    }
+                    if (-not $script:HistoryLocked -and $script:HistoryPassphrase) { $meta.PromptProtected = Protect-MossPayload ([string]$job.Prompt) $script:HistoryPassphrase }
+                    $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath ([System.IO.Path]::ChangeExtension($file, '.json')) -Encoding UTF8
+                } catch {}
+                [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = $exitCode; Seed = $thisSeed; Output = 'OK' })
+                [void]$fileList.Items.Add($file)
+                [void]$script:GeneratedFiles.Add($file)
+                $fileList.SelectedIndex = $fileList.Items.Count - 1
+            } else {
+                $missing.Add($file)
+                [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = $exitCode; Seed = $thisSeed; Output = 'Image file was not created' })
             }
         }
+
+        $outputText = "Engine: $($job.Engine)`r`nWorking directory: $($job.Root)`r`nExit code: $exitCode`r`n--- STDOUT ---`r`n$stdout`r`n--- STDERR ---`r`n$stderr"
+        $finalMsg = $null
         if ($exitCode -ne 0) {
             $outputText = "ERROR: Engine process returned exit code $exitCode.`r`n" + $outputText
-            [void](Write-MossErrorLog ("MOSS generation error - image {0} of {1} (exit {2})" -f ($i + 1), $job.Count, $exitCode) $outputText)
-        } elseif (-not (Test-Path -LiteralPath $file)) {
-            $outputText = "ERROR: Engine returned exit code 0 but the expected image file was not created: $file`r`n" + $outputText
-            [void](Write-MossErrorLog ("MOSS generation error - missing output image {0} of {1}" -f ($i + 1), $job.Count) $outputText)
+            [void](Write-MossErrorLog ("MOSS generation error - batch of {0} image(s) (exit {1})" -f $job.Count, $exitCode) $outputText)
+            $finalMsg = if ($ok -gt 0) { "Partially completed - $ok of $($job.Count) image(s) generated (engine exit $exitCode)" } else { "Generation failed - engine returned exit code $exitCode" }
+        } elseif ($missing.Count -gt 0) {
+            $outputText = ("ERROR: Engine returned exit code 0 but {0} expected image file(s) were not created:`r`n" -f $missing.Count) + (($missing | ForEach-Object { '  ' + $_ }) -join "`r`n") + "`r`n" + $outputText
+            [void](Write-MossErrorLog ("MOSS generation error - {0} of {1} image(s) missing" -f $missing.Count, $job.Count) $outputText)
+            $finalMsg = "Partially completed - $ok of $($job.Count) image(s) generated"
         }
 
-        [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = $exitCode; Seed = $thisSeed; Output = $outputText })
-
-        # UI update (we are on the GUI thread via Timer)
-        $status.Text = "Image $($i + 1) of $($job.Count) finished (exit $exitCode)"
-        $log.AppendText("`r`n--- Image $($i + 1) | seed $thisSeed | exit $exitCode ---`r`n$outputText`r`n")
-        if ($exitCode -eq 0 -and (Test-Path -LiteralPath $file)) {
-            [void]$fileList.Items.Add($file)
-            [void]$script:GeneratedFiles.Add($file)
-            $fileList.SelectedIndex = $fileList.Items.Count - 1
-        }
-
-        $st.Index++
-        Start-MossNextImage
+        if ($null -eq $finalMsg) { $finalMsg = "Completed - $ok of $($job.Count) image(s) generated" }
+        Complete-MossGen $finalMsg
+        if ($ok -gt 0) { $log.AppendText("`r`nCompleted. Output folder: $($job.OutputPath)") }
+        if ($exitCode -ne 0 -or $missing.Count -gt 0) { $log.AppendText("`r`nOne or more images failed. Engine output above; a technical report was saved to the logs folder.") }
+        $log.AppendText("`r`n--- Batch finished | exit $exitCode | $ok of $($job.Count) image(s) ---`r`n$outputText`r`n")
     }
 
     function Start-MossGeneration {
@@ -1274,10 +1198,12 @@ try {
         $script:GenState.IsRunning = $true
         $script:GenState.CancelRequested = $false
         $script:GenState.Job = $Job
-        $script:GenState.Index = 0
         $script:GenState.Results = New-Object System.Collections.ArrayList
         $script:GenState.Process = $null
         $script:GenState.CurrentFile = $null
+        $script:GenState.CurrentImageIndex = 0
+        $script:GenState.CurrentImageSeed = 0
+        $script:GenState.ImageStartedAt = $null
         $script:GenState.JobStartedAt = Get-Date
 
         $timer = New-Object System.Windows.Forms.Timer
@@ -1292,7 +1218,7 @@ try {
         $fileList.Items.Clear()
         $status.Text = 'Starting engine...'
 
-        Start-MossNextImage
+        Start-MossBatchEngine
     }
     # --- end Timer + Process worker ---
 
@@ -1312,9 +1238,8 @@ try {
         if (-not $script:HistoryLocked) { $hist=@($p)+@($history|Where-Object{$_ -ne $p});$history=@($hist|Select-Object -First 20);$script:Settings.PromptHistory=$history } else { $script:Settings.PromptHistory=@() };if(-not (Save-Settings)){[System.Windows.Forms.MessageBox]::Show('Set a password to save private prompt history. Generation was not started.','Password required')|Out-Null;return};if (-not $script:HistoryLocked) { if($historyPick.Items.Count -eq 0 -or [string]$historyPick.Items[0] -ne $p){$historyPick.Items.Insert(0,$p)};while($historyPick.Items.Count -gt 10){$historyPick.Items.RemoveAt($historyPick.Items.Count-1)} }
         $stylePrefix=switch([string]$style.SelectedItem){'Photorealistic'{'photorealistic, lifelike, realistic textures, natural lighting'}'Anime'{'anime style, expressive line art, cel shading'}'Digital illustration'{'polished digital illustration'}'Oil painting'{'oil painting, rich brush strokes'}'Watercolor'{'watercolor painting, soft pigment texture'}'3D render'{'high quality 3D render, detailed materials'}'Comic book'{'comic book art, inked outlines, bold colors'}'Cinematic'{'cinematic composition, dramatic lighting'}default{''}}
         $generationPrompt=if($stylePrefix){"$stylePrefix, $p"}else{$p}
-        $autoOffload = Get-MossAutoOffload ([string]$script:Settings.Backend)
         $gpuIndex=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIndex=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIndex=-1 } }
-        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Offload=$autoOffload;Prompt=$generationPrompt;GpuIndex=$gpuIndex}
+        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Prompt=$generationPrompt;GpuIndex=$gpuIndex}
         $generate.Enabled=$false;$cancel.Enabled=$true;$log.Clear();$fileList.Items.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
     })
     $cancel.Add_Click({
@@ -1351,7 +1276,6 @@ try {
     }
     if ((-not $SetupOnly -or $ReturnToGenerator) -and [bool]$script:Settings.HardwareSetupComplete) {
         Load-Settings
-        if(-not (Confirm-MossAdminAccess)){return}
         Load-Settings -UnlockHistory
         if($script:HistoryLocked){[System.Windows.Forms.MessageBox]::Show('MOSS will continue without prompt history. The encrypted adult history is preserved.','History locked')|Out-Null}
         Show-GeneratorWindow
