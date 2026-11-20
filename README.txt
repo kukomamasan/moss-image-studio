@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.35)
+MOSS Image Studio - portable build (v0.1.36)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,17 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.36
+----------------------
+- Improved: improves now always show the real dimensions: the source
+  image's size and the final size in megapixels, both in the confirmation
+  dialogs and in the generation log ("source 1536 x 2048 -> final 3072 x
+  4096").
+- Improved: when the final size is bigger than what most GPUs render
+  natively (over ~4.5 MP), the confirmation explains the automatic
+  half-size render and suggests the better route: work natively up to
+  2048 x 2048, then improve THAT image 2x.
 
 What is new in v0.1.35
 ----------------------
