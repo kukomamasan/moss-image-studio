@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.37'
+$script:AppVersion = '0.1.38'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -1004,6 +1004,7 @@ try {
     $refineMenu=New-Object System.Windows.Forms.ContextMenuStrip
     $miSame=$refineMenu.Items.Add('Improve this image (full quality)')
     $miBig=$refineMenu.Items.Add('Improve this image (2x bigger)')
+    $miFresh=$refineMenu.Items.Add('Re-render from the same seed (fresh full quality)')
     $miCustom=$refineMenu.Items.Add('Improve using the settings in the main window...')
     $miAll=$refineMenu.Items.Add('Improve ALL files that can be improved...')
     $miInfo=$refineMenu.Items.Add('Show image info (prompt, seed, settings)...')
@@ -1011,6 +1012,7 @@ try {
     $fileList.ContextMenuStrip=$refineMenu
     $miSame.Add_Click({ Start-MossRefineSelected 1 })
     $miBig.Add_Click({ Start-MossRefineSelected 2 })
+    $miFresh.Add_Click({ Start-MossRefineFresh })
     $miCustom.Add_Click({ Start-MossRefineWithCurrentSettings })
     $miAll.Add_Click({ Start-MossRefineAll })
     $miInfo.Add_Click({ Show-MossImageInfo })
@@ -1018,6 +1020,7 @@ try {
     $refineMenu.ShowItemToolTips=$true
     $miSame.ToolTipText='Improve this image at its current size: same seed and prompt, image-to-image keeps the composition. Fast previews get a higher strength automatically so detail is regenerated instead of the blurry enlargement.'
     $miBig.ToolTipText='Improve this image at double size: more resolution, about four times the rendering time.'
+    $miFresh.ToolTipText='Brand-new full-quality render using this image''s seed, prompt and settings - like a new generation with the same seed. Related look, but the composition can differ from the draft. Use Improve instead to keep the exact composition.'
     $miCustom.ToolTipText='Improve this image using the size, steps, CFG, seed and prompt currently shown in the main window. Fast previews get a higher strength automatically.'
     $miAll.ToolTipText='Queue every generated image that still has quality headroom (soft previews, fewer steps, smaller than the current size).'
     $miDelete.ToolTipText='Delete this image and its sidecar from disk (asks first).'
@@ -1716,6 +1719,25 @@ try {
         return $d
     }
 
+    function Start-MossRefineFresh {
+        # Fresh full-quality re-render from the image's own seed, prompt and
+        # settings: no image-to-image - the seed is used like a brand-new
+        # generation. Same seed gives a related look; because the full-quality
+        # canvas is bigger than a fast draft, the composition can differ.
+        if ($script:GenState.IsRunning) { $status.Text='Busy - wait for the current run to finish, then right-click again.'; return }
+        $selFile = [string]$script:SelectedFile
+        if (-not $selFile -or -not (Test-Path -LiteralPath $selFile -PathType Leaf)) {
+            [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (left-click it), then right-click to re-render it.','Re-render from seed')|Out-Null;return
+        }
+        $script:GenState.CancelRequested = $false
+        $d = Get-MossImproveDefaults $selFile 1
+        if ($d.Error -eq 'size') { [System.Windows.Forms.MessageBox]::Show('Could not determine the image size.','Re-render from seed')|Out-Null;return }
+        if ($d.Seed -lt 0) { $d.Seed = Get-Random -Minimum 1 -Maximum 2147483000 }
+        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$d.File; W=$d.TW; H=$d.TH; Seed=$d.Seed; Prompt=[string]$d.Prompt; NegativePrompt=[string]$d.NegativePrompt; SamplingMethod=$d.SamplingMethod; Scheduler=$d.Scheduler; Strength=0.0; Steps=$null; Cfg=$null; Tag='hq'; FreshRender=$true })
+        $script:RefineTotal = $script:RefineQueue.Count
+        Start-MossNextRefine
+    }
+
     function Start-MossRefineSelected([double]$sizeFactor) {
         # Quick improve: re-render the file selected in Generated Files with the
         # image's own settings (same seed and prompt), one click.
@@ -2002,9 +2024,13 @@ try {
             $refineSpeed = '4x'
             $log.AppendText(("`r`nNote: {0} x {1} is too large for a native render on most GPUs - rendering at half size with all {2} steps and enlarging to full size (fast-mode pipeline, never distorted)." -f $item.W, $item.H, $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})))
         }
-        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps});Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode=$refineSpeed;InitImage=[string]$item.File;InitStrength=[double]$item.Strength;RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler}
+        $isFresh = $false; if ($item.PSObject.Properties['FreshRender']) { $isFresh = [bool]$item.FreshRender }
+        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps});Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode=$refineSpeed;InitImage=$(if($isFresh){$null}else{[string]$item.File});InitStrength=$(if($isFresh){0.0}else{[double]$item.Strength});RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler}
         $status.Text = ("Improving image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
-        if (Test-MossFastPreview ([string]$item.File)) {
+        if ($isFresh) {
+            $status.Text = ("Re-rendering image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
+            $log.AppendText(("`r`nRe-rendering from the same seed: {0}, same prompt, fresh full-quality sampling at {1} x {2} (no image-to-image - like a new generation; the composition can differ from the draft)" -f $item.Seed, $item.W, $item.H))
+        } elseif (Test-MossFastPreview ([string]$item.File)) {
             $log.AppendText(("`r`nImproving: seed {0}, image-to-image from {1} ({2} x {3}) -> final {4} x {5} (strength {6} - fast preview, detail regenerated over the enlarged draft, composition kept from the image)" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $(if($item.SrcW){[int]$item.SrcW}else{0}), $(if($item.SrcH){[int]$item.SrcH}else{0}), $item.W, $item.H, $item.Strength))
         } else {
             $log.AppendText(("`r`nImproving: same seed {0}, same prompt, image-to-image from {1} ({2} x {3}) -> final {4} x {5} (strength {6})" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $(if($item.SrcW){[int]$item.SrcW}else{0}), $(if($item.SrcH){[int]$item.SrcH}else{0}), $item.W, $item.H, $item.Strength))
