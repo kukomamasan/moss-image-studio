@@ -1,4 +1,4 @@
-# MOSS Image Studio - portable hardware setup foundation
+﻿# MOSS Image Studio - portable hardware setup foundation
 # Windows PowerShell 5.1 | All paths are resolved relative to this script.
 [CmdletBinding()]
 param([switch]$SetupOnly,[switch]$ReturnToGenerator)
@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.39'
+$script:AppVersion = '0.1.40'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -577,6 +577,904 @@ function Quote-ProcessArgument([string]$value) {
     if ($null -eq $value) { return '""' }
     return '"' + ($value -replace '(\\*)"','$1$1\"' -replace '(\\+)$','$1$1') + '"'
 }
+function Get-MossEngineCommit([string]$enginePath) {
+    # Reads the installed engine version: sd-cli.exe prints e.g.
+    # 'stable-diffusion.cpp version unknown, commit c6dfa9d'. Returns the
+    # commit hash in lower case, or '' when it cannot be determined.
+    if ([string]::IsNullOrWhiteSpace($enginePath) -or -not (Test-Path -LiteralPath $enginePath -PathType Leaf)) { return '' }
+    try {
+        $out = & $enginePath --version 2>&1 | Out-String
+        if ($out -match 'commit\s+([0-9a-fA-F]{6,40})') { return $Matches[1].ToLowerInvariant() }
+    } catch {}
+    return ''
+}
+function Get-MossEngineVersionOutput([string]$enginePath) {
+    # Runs the engine once and returns its version output. Empty result means
+    # the executable did not produce any output (missing DLLs, broken exe,
+    # antivirus blocking) - used to verify the engine actually starts after
+    # an update and again after a failure-restore.
+    if ([string]::IsNullOrWhiteSpace($enginePath) -or -not (Test-Path -LiteralPath $enginePath -PathType Leaf)) { return '' }
+    try {
+        $out = & $enginePath --version 2>&1 | Out-String
+        if ([string]::IsNullOrWhiteSpace($out)) { return '' }
+        return $out.Trim()
+    } catch { return '' }
+}
+function Test-MossZipDigest([string]$zipPath,$asset) {
+    # GitHub publishes a sha256 digest for release assets when available; a
+    # mismatch means the download is corrupt and must not be installed.
+    $digest=[string]$asset.digest
+    if([string]::IsNullOrWhiteSpace($digest)){ return }
+    if($digest -match '^sha256:([0-9a-fA-F]{64})$'){
+        $expected=$Matches[1].ToLowerInvariant()
+        $hash=(Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if($hash -ne $expected){ throw ('The downloaded file is corrupt (sha256 mismatch: expected '+$expected+', got '+$hash+').') }
+    }
+}
+function Show-MossEngineBackupRestore([System.Windows.Forms.Form]$Owner,[string]$enginePath,[string]$engineBin,[System.Collections.ArrayList]$log,[string]$stamp) {
+    # Manual rollback: lists the automatic engine-backup-<time> folders the
+    # updater created next to the engine folder and copies a chosen one back.
+    # Backups contain only the engine files (exe + DLLs) - the large model
+    # files in the models folder are never backed up or modified by an engine
+    # update, so they need no backup and are never touched by a rollback.
+    $backupParent=[System.IO.Path]::GetDirectoryName($engineBin)
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    # Backups are compressed zip archives (engine-backup-<time>.zip); older
+    # uncompressed engine-backup-<time> folders from previous versions are
+    # still listed and restorable.
+    $backups=@()
+    try {
+        $backups+=@(Get-ChildItem -LiteralPath $backupParent -File -Filter 'engine-backup-*.zip' -ErrorAction SilentlyContinue | ForEach-Object {
+            $cnt=0; $bytes=0
+            try { $ar=[System.IO.Compression.ZipFile]::OpenRead($_.FullName); try { $cnt=@($ar.Entries).Count; foreach($e2 in $ar.Entries){ $bytes+=$e2.Length } } finally { $ar.Dispose() } } catch {}
+            @{ Path=$_.FullName; Kind='zip'; Name=$_.Name; Count=$cnt; Bytes=$bytes }
+        })
+        $backups+=@(Get-ChildItem -LiteralPath $backupParent -Directory -Filter 'engine-backup-*' -ErrorAction SilentlyContinue | ForEach-Object {
+            $bf=@(Get-ChildItem -LiteralPath $_.FullName -File -ErrorAction SilentlyContinue); $sz=0; foreach($f in $bf){ $sz+=$f.Length }
+            @{ Path=$_.FullName; Kind='folder'; Name=$_.Name; Count=$bf.Count; Bytes=$sz }
+        })
+    } catch {}
+    $backups=@($backups | Sort-Object -Property Name -Descending)
+    if($backups.Count -eq 0){
+        [System.Windows.Forms.MessageBox]::Show($Owner,("No engine backups were found next to:`r`n{0}`r`n`r`nA compressed backup archive is created automatically every time the engine is updated. Backups only contain the engine files - the large model files are never modified by an engine update, so they need no backup." -f $backupParent),'Restore engine backup',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+        return
+    }
+    $d=New-Object System.Windows.Forms.Form
+    $d.Text='Restore engine backup (roll back)'
+    $d.Size=New-Object System.Drawing.Size(640,400); $d.StartPosition='CenterParent'; $d.FormBorderStyle='FixedDialog'; $d.MaximizeBox=$false
+    $d.BackColor=[System.Drawing.Color]::FromArgb(25,32,45); $d.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $d.Font=New-Object System.Drawing.Font('Segoe UI',9)
+    $cText=[System.Drawing.Color]::FromArgb(230,236,245); $cMuted=[System.Drawing.Color]::FromArgb(145,161,185)
+    $info=New-Object System.Windows.Forms.Label; $info.Text='Automatic backups made before each engine update. Restoring copies the backup files back over the current ones; the engine must not be running.'; $info.Location=New-Object System.Drawing.Point(12,12); $info.Size=New-Object System.Drawing.Size(600,34); $info.ForeColor=$cMuted; $d.Controls.Add($info)
+    $lb=New-Object System.Windows.Forms.ListBox; $lb.Location=New-Object System.Drawing.Point(12,52); $lb.Size=New-Object System.Drawing.Size(600,180); $lb.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $lb.ForeColor=$cText; $lb.BorderStyle='FixedSingle'; $d.Controls.Add($lb)
+    foreach($b in $backups){
+        [void]$lb.Items.Add(($b.Name+'   ('+$b.Count+' files, '+[math]::Round($b.Bytes/1MB)+' MB'+$(if($b.Kind -eq 'zip'){', compressed'}else{''})+')'))
+    }
+    if($lb.Items.Count -gt 0){ $lb.SelectedIndex=0 }
+    $status=New-Object System.Windows.Forms.Label; $status.Location=New-Object System.Drawing.Point(12,244); $status.Size=New-Object System.Drawing.Size(600,44); $status.ForeColor=$cMuted; $d.Controls.Add($status)
+    $restoreBtn=New-Object System.Windows.Forms.Button; $restoreBtn.Text='Restore this backup...'; $restoreBtn.Location=New-Object System.Drawing.Point(12,296); $restoreBtn.Size=New-Object System.Drawing.Size(170,32); $restoreBtn.FlatStyle='Flat'; $restoreBtn.BackColor=[System.Drawing.Color]::FromArgb(45,112,173); $restoreBtn.ForeColor=[System.Drawing.Color]::White; $d.Controls.Add($restoreBtn)
+    $cancelBtn=New-Object System.Windows.Forms.Button; $cancelBtn.Text='Cancel'; $cancelBtn.Location=New-Object System.Drawing.Point(510,296); $cancelBtn.Size=New-Object System.Drawing.Size(90,32); $cancelBtn.FlatStyle='Flat'; $cancelBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $cancelBtn.ForeColor=$cText; $d.Controls.Add($cancelBtn)
+    $cancelBtn.Add_Click({$d.Close()})
+    $restoreBtn.Add_Click({
+        if($lb.SelectedIndex -lt 0){ [System.Windows.Forms.MessageBox]::Show($d,'Select a backup first.','Restore engine backup')|Out-Null; return }
+        $b=$backups[$lb.SelectedIndex]
+        $bf=@()
+        if($b.Kind -eq 'zip'){
+            try { $ar=[System.IO.Compression.ZipFile]::OpenRead($b.Path); try { $bf=@($ar.Entries | ForEach-Object { @{ Name=[System.IO.Path]::GetFileName($_.FullName); Length=$_.Length } }) } finally { $ar.Dispose() } } catch { $bf=@() }
+        } else {
+            $bf=@(Get-ChildItem -LiteralPath $b.Path -File -ErrorAction SilentlyContinue | ForEach-Object { @{ Name=$_.Name; Length=$_.Length; FullName=$_.FullName } })
+        }
+        if($bf.Count -eq 0){ [System.Windows.Forms.MessageBox]::Show($d,'That backup is empty or unreadable.','Restore engine backup',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null; return }
+        $busy=@(Get-Process -Name 'sd-cli','sd-server' -ErrorAction SilentlyContinue)
+        if($busy.Count -gt 0){ [System.Windows.Forms.MessageBox]::Show($d,'sd-cli or sd-server is currently running. Wait for it to finish and try again.','Restore engine backup',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null; return }
+        $sz=0; foreach($f in $bf){ $sz+=$f.Length }
+        $answer=[System.Windows.Forms.MessageBox]::Show($d,("Roll back the engine to this backup?`r`n`r`nBackup: {0}`r`nFiles copied into: {1}`r`nContents: {2} files ({3} MB)`r`n`r`nThe current engine files are overwritten by the backup contents. Models, prompts, outputs and settings are never touched.`r`n`r`nRestore now?" -f $b.Name,$engineBin,$bf.Count,[math]::Round($sz/1MB)),'Restore engine backup',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
+        if($answer -ne [System.Windows.Forms.DialogResult]::Yes){ return }
+        $restoreStage=''
+        try {
+            $d.Cursor='WaitCursor'; $restoreBtn.Enabled=$false; $cancelBtn.Enabled=$false
+            $status.Text='Restoring the backup files...'
+            [System.Windows.Forms.Application]::DoEvents()
+            if($b.Kind -eq 'zip'){
+                $restoreStage=Join-Path ([System.IO.Path]::GetTempPath()) ('MOSS-Backup-Restore-'+[guid]::NewGuid().ToString('N'))
+                [System.IO.Compression.ZipFile]::ExtractToDirectory($b.Path,$restoreStage)
+                foreach($f in (Get-ChildItem -LiteralPath $restoreStage -File)){ Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $engineBin $f.Name) -Force; [void]$log.Add(('Restored '+$f.Name+' from '+$b.Name+' (compressed backup)')) }
+            } else {
+                foreach($f in $bf){ Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $engineBin $f.Name) -Force; [void]$log.Add(('Restored '+$f.Name+' from '+$b.Name)) }
+            }
+            $out=Get-MossEngineVersionOutput $enginePath
+            if([string]::IsNullOrWhiteSpace($out)){
+                [void]$log.Add(('WARNING: rollback from '+$b.Name+' did not produce a working engine version output'))
+                $status.Text='Backup restored, but sd-cli.exe does not report a version.'
+                [System.Windows.Forms.MessageBox]::Show($d,("The backup files were copied, but sd-cli.exe does not report a version.`r`nIf the engine does not start, the backup itself may be incomplete - copy files manually from:`r`n{0}" -f $b.Path),'Restore engine backup',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+            } else {
+                [void]$log.Add(('Rollback from '+$b.Name+' verified, engine reports: '+$out))
+                $status.Text=('Rollback complete. Engine now: '+$out)
+                [System.Windows.Forms.MessageBox]::Show($d,("Rollback complete - the engine files from {0} were restored and the engine was verified working.`r`n`r`nEngine reports: {1}" -f $b.Name,$out),'Restore engine backup',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+            }
+        } catch {
+            [void]$log.Add(('ERROR during backup restore: '+$_.Exception.Message))
+            $status.Text=('Restore failed: '+$_.Exception.Message)
+            [System.Windows.Forms.MessageBox]::Show($d,("The restore failed: {0}`r`nCopy the files manually from the backup folder if needed.`r`n`r`nDetails: logs\engine-update-{1}.txt" -f $_.Exception.Message,$stamp),'Restore engine backup',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null
+        } finally {
+            $d.Cursor='Default'; $restoreBtn.Enabled=$true; $cancelBtn.Enabled=$true
+            if($restoreStage -and (Test-Path -LiteralPath $restoreStage)){ Remove-Item -LiteralPath $restoreStage -Recurse -Force -ErrorAction SilentlyContinue }
+            try { $logDir=Join-Path $script:AppRoot 'logs'; if(-not(Test-Path -LiteralPath $logDir)){New-Item -ItemType Directory -Path $logDir -Force|Out-Null}; ($log -join "`r`n") | Set-Content -LiteralPath (Join-Path $logDir ('engine-update-'+$stamp+'.txt')) -Encoding UTF8 } catch {}
+        }
+    })
+    [void]$d.ShowDialog($Owner)
+}
+function Get-MossModelUpdateInfo {
+    # Checks the known model sources on Hugging Face against the local files:
+    # remote LFS size vs local file size (metadata only - no multi-GB
+    # downloads). Sizes of multi-GB LFS files are a reliable version signal.
+    $known=@(
+        @{ Name='moss_image_sft_int8_convrot.safetensors'; Setting='DiffusionModelPath'; Repo='Comfy-Org/MOSS-Image'; RepoPath='diffusion_models/moss_image_sft_int8_convrot.safetensors' },
+        @{ Name='flux2-vae.safetensors'; Setting='VaePath'; Repo='Comfy-Org/MOSS-Image'; RepoPath='vae/flux2-vae.safetensors' },
+        @{ Name='Qwen3.5-9B-Q4_K_M.gguf'; Setting='LlmPath'; Repo='unsloth/Qwen3.5-9B-GGUF'; RepoPath='Qwen3.5-9B-Q4_K_M.gguf' },
+        @{ Name='tokenizer_qwen3.5.json'; Setting='TokenizerPath'; Repo='OpenMOSS-Team/MOSS-Image-Base'; RepoPath='tokenizer/tokenizer.json' }
+    )
+    $out=@()
+    $treeCache=@{}
+    foreach($m in $known){
+        $localPath=''
+        if($script:Settings.Contains($m.Setting)){
+            $candidate=Get-AbsoluteAppPath ([string]$script:Settings[$m.Setting])
+            if($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)){ $localPath=$candidate }
+        }
+        if(-not $localPath){
+            $modelsDir=Join-Path $script:AppRoot 'models'
+            $p=Join-Path $modelsDir $m.Name
+            if(Test-Path -LiteralPath $p -PathType Leaf){ $localPath=$p }
+        }
+        $info=@{ Name=$m.Name; Repo=$m.Repo; RepoPath=$m.RepoPath; RemoteUrl=('https://huggingface.co/'+$m.Repo+'/resolve/main/'+$m.RepoPath); LocalPath=$localPath; LocalSize=0; RemoteSize=0; RemoteDate=''; Status='check failed' }
+        if($localPath){ $info.LocalSize=(Get-Item -LiteralPath $localPath).Length }
+        try {
+            if(-not $treeCache.ContainsKey($m.Repo)){
+                $treeRaw=Invoke-RestMethod -Uri ('https://huggingface.co/api/models/'+$m.Repo+'/tree/main?recursive=true') -Headers @{Accept='application/json';'User-Agent'='MOSS-Image-Studio'} -TimeoutSec 20
+                $tree=@($treeRaw)
+                # PS 5.1 can deliver the JSON array as one nested array object
+                # (nondeterministic, seen live); unwrap it so matching works.
+                if($tree.Count -ge 1 -and $tree[0] -isnot [pscustomobject] -and $tree[0] -is [System.Collections.IEnumerable]){
+                    $tree=@($tree[0] | ForEach-Object { $_ })
+                }
+                $treeCache[$m.Repo]=$tree
+            }
+            # Match by the exact repository path (the local file name may
+            # differ from the remote one, e.g. tokenizer.json is saved as
+            # tokenizer_qwen3.5.json).
+            $hit=@($treeCache[$m.Repo] | Where-Object { [string]$_.path -eq $m.RepoPath } | Select-Object -First 1)
+            if(-not $hit){ $info.Status='no matching file at the source'; $out+=$info; continue }
+            $rs=$hit.size; if($hit.lfs -and $hit.lfs.size){ $rs=$hit.lfs.size }
+            $info.RemoteSize=$rs
+            $info.RemoteDate=[string]$hit.lastCommit.date
+            # Missing files keep the 'not installed' status; the remote size
+            # above lets the startup offer and the update dialog show how
+            # much a fresh download needs.
+            if(-not $localPath){ $info.Status='not installed' }
+            elseif($rs -eq $info.LocalSize){ $info.Status='up to date' } else { $info.Status='update available' }
+        } catch { $info.Status='check failed' }
+        $out+=$info
+    }
+    return $out
+}
+function Measure-MossDownloadSpeed([string]$url) {
+    # Downloads 4 MB of the file and returns the measured speed in MB/s
+    # (0 when it cannot be measured) - used for the download-time estimate.
+    try {
+        $req=[System.Net.HttpWebRequest]::Create($url)
+        $req.Method='GET'; $req.AddRange(0,4194303); $req.Timeout=20000; $req.ReadWriteTimeout=20000; $req.UserAgent='MOSS-Image-Studio'
+        $resp=$req.GetResponse()
+        try {
+            $sw=[System.Diagnostics.Stopwatch]::StartNew()
+            $stream=$resp.GetResponseStream()
+            $buf=New-Object byte[] (256KB)
+            $total=0
+            while($true){ $r=$stream.Read($buf,0,$buf.Length); if($r -le 0){ break }; $total+=$r; if($total -ge 4MB){ break } }
+            $sw.Stop()
+            if($total -gt 1MB){ return ($total/1MB)/$sw.Elapsed.TotalSeconds }
+        } finally { $resp.Close() }
+    } catch {}
+    return 0
+}
+function Find-MossRelocationDrive([int64]$needBytes) {
+    # Returns the fixed local drive (other than MOSS's current one) with the
+    # most free space, if it can hold the downloads plus a healthy margin.
+    try {
+        $currentRoot=[System.IO.Path]::GetPathRoot((Get-AbsoluteAppPath '.')).ToUpperInvariant()
+        $best=$null
+        foreach($d in (Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3')){
+            $root=([string]$d.DeviceID+'\').ToUpperInvariant()
+            if($root -eq $currentRoot){ continue }
+            if([int64]$d.FreeSpace -gt $needBytes -and ($null -eq $best -or [int64]$d.FreeSpace -gt [int64]$best.Free)){ $best=@{ Root=$root; Free=[int64]$d.FreeSpace } }
+        }
+        return $best
+    } catch { return $null }
+}
+function Move-MossToNewLocation([string]$newRoot) {
+    # Copies the MOSS application files to a roomier location and creates a
+    # desktop shortcut there. Models/bin are NOT copied - the startup offer
+    # in the new location downloads them fresh.
+    try {
+        New-Item -ItemType Directory -Path $newRoot -Force | Out-Null
+        foreach($sub in @('models','bin','config','logs')){ New-Item -ItemType Directory -Path (Join-Path $newRoot $sub) -Force | Out-Null }
+        $copied=@()
+        foreach($f in (@(Get-ChildItem -LiteralPath $script:AppRoot -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'MOSS-Image-Studio.*' }) + @(Get-ChildItem -LiteralPath $script:AppRoot -File -Filter 'README.txt' -ErrorAction SilentlyContinue))){
+            Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $newRoot $f.Name) -Force
+            $copied+=$f.Name
+        }
+        $oldConfig=Join-Path $script:AppRoot 'config\settings.json'
+        if(Test-Path -LiteralPath $oldConfig){ Copy-Item -LiteralPath $oldConfig -Destination (Join-Path $newRoot 'config\settings.json') -Force }
+        if($copied.Count -eq 0){ return $null }
+        # Desktop shortcut pointing at the new copy.
+        $desktop=[Environment]::GetFolderPath('Desktop')
+        $target=$null
+        foreach($cand in @('MOSS-Image-Studio.vbs','MOSS-Image-Studio.bat')){ if(Test-Path -LiteralPath (Join-Path $newRoot $cand) -PathType Leaf){ $target=(Join-Path $newRoot $cand); break } }
+        if(-not $target){ return $null }
+        $ws=New-Object -ComObject WScript.Shell
+        $sc=$ws.CreateShortcut((Join-Path $desktop 'MOSS Image Studio.lnk'))
+        $sc.TargetPath=$target
+        $sc.WorkingDirectory=$newRoot
+        $sc.Description='MOSS Image Studio'
+        $sc.Save()
+        return $newRoot
+    } catch {
+        return $null
+    }
+}
+function Test-MossOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
+    # Startup completeness check: if the engine or the known model files are
+    # missing, offer to download them right away so MOSS works as intended.
+    # Updates for already-installed files are NOT prompted here - they live in
+    # the 'Update engine...' dialog.
+    try {
+        $enginePath=Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)
+        $engineOk=Test-Path -LiteralPath $enginePath -PathType Leaf
+        $missing=@()
+        $modelsTotal=0
+        $firstMissingUrl=''
+        $infos=@(Get-MossModelUpdateInfo)
+        foreach($i in $infos){
+            if($i.Status -eq 'not installed'){
+                $missing+=($i.Name+'  ('+[math]::Round($i.RemoteSize/1GB,2)+' GB)')
+                $modelsTotal+=$i.RemoteSize
+                if(-not $firstMissingUrl){ $firstMissingUrl=[string]$i.RemoteUrl }
+            }
+        }
+        if(-not $engineOk -or $missing.Count -gt 0){
+            $lines=@()
+            if(-not $engineOk){ $lines+='  - the engine (sd-cli.exe and its libraries) is missing' }
+            foreach($m in $missing){ $lines+=('  - model '+$m+' is missing') }
+            $est=''
+            if($modelsTotal -gt 0 -and $firstMissingUrl){
+                $spd=Measure-MossDownloadSpeed $firstMissingUrl
+                if($spd -gt 0){ $est=' At your measured speed ('+[math]::Round($spd,1)+' MB/s) this takes about '+[math]::Round($modelsTotal/1MB/$spd/60,0)+' minutes.' }
+            }
+            # Not enough room on MOSS's current drive? Suggest a better place
+            # first - a fresh install with models needs roughly 12 GB plus
+            # the engine package and headroom.
+            $needTotal=$modelsTotal+[int64](600MB)
+            $driveRoot=[System.IO.Path]::GetPathRoot((Get-AbsoluteAppPath '.')).TrimEnd('\')
+            try { $freeHere=(New-Object System.IO.DriveInfo($driveRoot)).AvailableFreeSpace } catch { $freeHere=[int64]::MaxValue }
+            if($freeHere -lt $needTotal){
+                $better=Find-MossRelocationDrive ($needTotal*2)
+                if($better){
+                    $suggested=Join-Path $better.Root 'MOSS Image Studio'
+                    $msg=("MOSS is in a tight spot:`r`n`r`n`"{0}`" only has {1} GB free, but the missing files need about {2} GB.`r`n`r`nDrive {3} has {4} GB free. Move MOSS there?`r`n`r`nMOSS will be copied to `"{5}`" and a desktop shortcut will be created - then the downloads run from the new place (this copy can be deleted afterwards)." -f $driveRoot,[math]::Round($freeHere/1GB,1),[math]::Round($needTotal/1GB,1),$better.Root.TrimEnd('\'),[math]::Round($better.Free/1GB,1),$suggested)
+                    $answer=[System.Windows.Forms.MessageBox]::Show($Owner,$msg,'Better place for MOSS',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
+                    if($answer -eq [System.Windows.Forms.DialogResult]::Yes){
+                        $newRoot=Move-MossToNewLocation $suggested
+                        if($newRoot){
+                            try { [void](Write-MossErrorLog 'Relocated MOSS' ('New location: '+$newRoot)) } catch {}
+                            $startAnswer=[System.Windows.Forms.MessageBox]::Show($Owner,("MOSS was copied to `""+$newRoot+"`" and a desktop shortcut (MOSS Image Studio) now points there.`r`n`r`nStart the new copy now? The downloads then run from the new place - you can close this old window and delete this old copy afterwards."),'Better place for MOSS',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Information)
+                            if($startAnswer -eq [System.Windows.Forms.DialogResult]::Yes){
+                                $starter=Join-Path $newRoot 'MOSS-Image-Studio.vbs'
+                                if(Test-Path -LiteralPath $starter -PathType Leaf){ Start-Process -FilePath 'wscript.exe' -ArgumentList ('"'+$starter+'"') } else { Start-Process -FilePath 'explorer.exe' -ArgumentList ('"'+$newRoot+'"') }
+                                $Owner.Close()
+                            }
+                            return
+                        }
+                    }
+                } else {
+                    [System.Windows.Forms.MessageBox]::Show($Owner,("MOSS is in a tight spot:`r`n`r`n`""+$driveRoot+"`" only has "+[math]::Round($freeHere/1GB,1)+" GB free, but the missing files need about "+[math]::Round($needTotal/1GB,1)+" GB, and no other fixed drive has room either.`r`n`r`nFree up space (or plug in a larger drive) and start MOSS again.`r`nYou can also continue now and install only what fits."),'Better place for MOSS',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+                    return
+                }
+            }
+            $msg=("MOSS is not fully installed yet:`r`n`r`n"+(($lines) -join "`r`n")+"`r`n`r`nWithout these files MOSS cannot generate images.`r`n`r`nDownload them now?"+$est+"`r`n(You can also do this later via 'Update engine...' in the header.)")
+            $answer=[System.Windows.Forms.MessageBox]::Show($Owner,$msg,'MOSS setup',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
+            if($answer -eq [System.Windows.Forms.DialogResult]::Yes){ Show-MossEngineUpdateDialog $Owner }
+        }
+    } catch {}
+}
+function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null) {
+    # UPDATING THE ENGINE (sd-cli core files) - deliberately separate from the
+    # 'Update MOSS...' header button: MOSS is only the GUI, while sd-cli.exe
+    # and its libraries in the bin folder are the engine that renders images.
+    # This dialog updates those engine files from the official
+    # stable-diffusion.cpp releases and shows the published changelogs.
+    # Models, outputs, config and the MOSS application files are never touched.
+    if ($null -ne $script:GenState -and $script:GenState.IsRunning) {
+        [System.Windows.Forms.MessageBox]::Show($Owner,'A generation is running. Wait for it to finish (or cancel it) before updating the engine files.','Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+        return
+    }
+    $enginePath=Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)
+    if(-not (Test-Path -LiteralPath $enginePath -PathType Leaf)){
+        [System.Windows.Forms.MessageBox]::Show($Owner,("The engine executable was not found:`r`n{0}`r`n`r`nRun Hardware / Setup and locate sd-cli.exe first." -f $enginePath),'Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+        return
+    }
+    $engineBin=[System.IO.Path]::GetDirectoryName($enginePath)
+    $installedCommit=Get-MossEngineCommit $enginePath
+    $stamp=Get-Date -Format 'yyyyMMdd_HHmmss'
+    $log=New-Object System.Collections.ArrayList
+    [void]$log.Add(('Engine update started '+(Get-Date -Format 'u')))
+    [void]$log.Add(('Engine path: '+$enginePath))
+    [void]$log.Add(('Installed commit: '+$(if($installedCommit){$installedCommit}else{'unknown'})))
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol=[System.Net.SecurityProtocolType]::Tls12
+        $rawReleases=Invoke-RestMethod -Uri 'https://api.github.com/repos/leejet/stable-diffusion.cpp/releases?per_page=10' -Method Get -Headers @{Accept='application/vnd.github+json';'User-Agent'='MOSS-Image-Studio'} -TimeoutSec 15
+        $releases=@($rawReleases)
+        # Windows PowerShell 5.1 can deliver a JSON array as one nested array
+        # object; unwrap it so $releases holds one PSCustomObject per release.
+        if($releases.Count -ge 1 -and $releases[0] -isnot [pscustomobject] -and $releases[0] -is [System.Collections.IEnumerable]){
+            $releases=@($releases[0] | ForEach-Object { $_ })
+        }
+        $releases=@($releases | Where-Object { $_.PSObject.Properties['tag_name'] })
+    } catch { $releases=@() }
+    if($releases.Count -eq 0){
+        [void]$log.Add('ERROR: the release feed could not be read (offline or blocked)')
+        try { $logDir=Join-Path $script:AppRoot 'logs'; if(-not(Test-Path -LiteralPath $logDir)){New-Item -ItemType Directory -Path $logDir -Force|Out-Null}; ($log -join "`r`n") | Set-Content -LiteralPath (Join-Path $logDir ('engine-update-'+$stamp+'.txt')) -Encoding UTF8 } catch {}
+        $answer=[System.Windows.Forms.MessageBox]::Show($Owner,"MOSS could not read the engine release feed (offline or blocked?).`r`n`r`nOpen the releases page to check and download manually?`r`nChoose No to open the backup-restore dialog instead (works offline).",'Engine update',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+        if($answer -eq [System.Windows.Forms.DialogResult]::Yes){ try { Start-Process 'https://github.com/leejet/stable-diffusion.cpp/releases' } catch {} } else { Show-MossEngineBackupRestore $Owner $enginePath $engineBin $log $stamp }
+        return
+    }
+    $latest=$releases[0]
+    $latestTag=[string]$latest.tag_name
+    [void]$log.Add(('Latest release: '+$latestTag))
+    $upToDate=($installedCommit -ne '' -and $latestTag -match [regex]::Escape($installedCommit))
+    if($upToDate){ [void]$log.Add('The installed engine matches the latest release (up to date) - the dialog also offers changelogs and backup restore') }
+    # Check the model sources at the same time (metadata only - no multi-GB
+    # downloads): remote LFS size vs local file size per known source.
+    $modelInfos=@(Get-MossModelUpdateInfo)
+    $script:MossDlgModels=@($modelInfos | Where-Object { $_.Status -eq 'update available' -or $_.Status -eq 'not installed' })
+    $modelFailed=@($modelInfos | Where-Object { $_.Status -eq 'check failed' -or $_.Status -eq 'no matching file at the source' })
+    [void]$log.Add(('Model check: '+$modelInfos.Count+' known sources, '+$script:MossDlgModels.Count+' need attention'))
+    foreach($mi in $modelInfos){ [void]$log.Add(('Model '+$mi.Name+': '+$mi.Status)) }
+    # Measure the download speed once (4 MB range request) so the confirm
+    # dialog can give a real time estimate instead of a guess.
+    $measuredSpeed=0
+    foreach($mi in $script:MossDlgModels){ if($mi.RemoteUrl){ $measuredSpeed=Measure-MossDownloadSpeed $mi.RemoteUrl; break } }
+    if($measuredSpeed -gt 0){ [void]$log.Add(('Measured download speed: '+[math]::Round($measuredSpeed,1)+' MB/s')) } else { [void]$log.Add('Download speed could not be measured') }
+
+    # Dialog: release list + changelog reader + variant selection + installer.
+    $g=New-Object System.Windows.Forms.Form
+    $g.Text='Update engine (sd-cli core files)'
+    $g.Size=New-Object System.Drawing.Size(730,768); $g.MinimumSize=New-Object System.Drawing.Size(700,748); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
+    $g.BackColor=[System.Drawing.Color]::FromArgb(25,32,45); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
+    $cText=[System.Drawing.Color]::FromArgb(230,236,245); $cMuted=[System.Drawing.Color]::FromArgb(145,161,185)
+    $ttl=New-Object System.Windows.Forms.Label; $ttl.Text='UPDATE ENGINE  -  sd-cli core files'; $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',13,[System.Drawing.FontStyle]::Bold); $ttl.AutoSize=$true; $ttl.Location=New-Object System.Drawing.Point(12,10); $g.Controls.Add($ttl)
+    $sub=New-Object System.Windows.Forms.Label; $sub.Text="MOSS is the GUI - sd-cli.exe and its libraries are the engine that renders the images. This dialog updates only those engine files; the MOSS app, models, prompts, outputs and settings are never touched."; $sub.Location=New-Object System.Drawing.Point(12,40); $sub.Size=New-Object System.Drawing.Size(690,44); $sub.ForeColor=$cMuted; $g.Controls.Add($sub)
+    $installedText=$(if($installedCommit){'commit '+$installedCommit}else{'version could not be read'}); $pubDate=$(if($latest.published_at){([datetime]$latest.published_at).ToString('yyyy-MM-dd')}else{'unknown date'})
+    $verPanel=New-Object System.Windows.Forms.Panel; $verPanel.Location=New-Object System.Drawing.Point(12,88); $verPanel.Size=New-Object System.Drawing.Size(690,46); $verPanel.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $g.Controls.Add($verPanel)
+    $vin=New-Object System.Windows.Forms.Label; $vin.Text='INSTALLED'; $vin.Location=New-Object System.Drawing.Point(10,4); $vin.Size=New-Object System.Drawing.Size(340,15); $vin.Font=New-Object System.Drawing.Font('Segoe UI',8); $vin.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $verPanel.Controls.Add($vin)
+    $vinv=New-Object System.Windows.Forms.Label; $vinv.Text=$installedText; $vinv.Location=New-Object System.Drawing.Point(10,20); $vinv.Size=New-Object System.Drawing.Size(340,20); $vinv.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $verPanel.Controls.Add($vinv)
+    $vla=New-Object System.Windows.Forms.Label; $vla.Text='LATEST RELEASE'; $vla.Location=New-Object System.Drawing.Point(370,4); $vla.Size=New-Object System.Drawing.Size(310,15); $vla.Font=New-Object System.Drawing.Font('Segoe UI',8); $vla.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $verPanel.Controls.Add($vla)
+    $vlav=New-Object System.Windows.Forms.Label; $vlav.Text=($(if($upToDate){$latestTag+'   -  UP TO DATE'}else{$latestTag})); $vlav.Location=New-Object System.Drawing.Point(370,20); $vlav.Size=New-Object System.Drawing.Size(310,20); $vlav.ForeColor=($(if($upToDate){[System.Drawing.Color]::FromArgb(125,205,164)}else{[System.Drawing.Color]::FromArgb(125,205,164)})); if(-not $upToDate){$vlav.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245)}; $verPanel.Controls.Add($vlav)
+    $listLabel=New-Object System.Windows.Forms.Label; $listLabel.Text='RECENT RELEASES (select one to read its changelog)'; $listLabel.Location=New-Object System.Drawing.Point(12,116); $listLabel.Size=New-Object System.Drawing.Size(330,20); $listLabel.ForeColor=$cMuted; $g.Controls.Add($listLabel)
+    $releaseList=New-Object System.Windows.Forms.ListBox; $releaseList.Location=New-Object System.Drawing.Point(12,138); $releaseList.Size=New-Object System.Drawing.Size(330,200); $releaseList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $releaseList.ForeColor=$cText; $releaseList.BorderStyle='FixedSingle'; $g.Controls.Add($releaseList)
+    $notesLabel=New-Object System.Windows.Forms.Label; $notesLabel.Text='RELEASE NOTES / CHANGELOG'; $notesLabel.Location=New-Object System.Drawing.Point(356,116); $notesLabel.Size=New-Object System.Drawing.Size(330,20); $notesLabel.ForeColor=$cMuted; $g.Controls.Add($notesLabel)
+    $notes=New-Object System.Windows.Forms.TextBox; $notes.Multiline=$true; $notes.ReadOnly=$true; $notes.ScrollBars='Vertical'; $notes.WordWrap=$false; $notes.Location=New-Object System.Drawing.Point(356,138); $notes.Size=New-Object System.Drawing.Size(346,200); $notes.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $notes.ForeColor=$cText; $notes.BorderStyle='FixedSingle'; $notes.Font=New-Object System.Drawing.Font('Consolas',8); $g.Controls.Add($notes)
+    foreach($rel in $releases){ $relDate=$(if($rel.published_at){([datetime]$rel.published_at).ToString('yyyy-MM-dd')}else{'?'}); [void]$releaseList.Items.Add(([string]$rel.tag_name+'   ('+$relDate+')')) }
+    $releaseList.SelectedIndex=0
+    $showNotes={
+        if($releaseList.SelectedIndex -lt 0 -or $releaseList.SelectedIndex -ge $releases.Count){ $notes.Text=''; return }
+        $rel=$releases[$releaseList.SelectedIndex]
+        $body=[string]$rel.body
+        if([string]::IsNullOrWhiteSpace($body)){ $body='(No release notes were published for this build.)' }
+        $sb=New-Object System.Text.StringBuilder
+        [void]$sb.Append($body)
+        $winAssets=@($rel.assets | Where-Object { [string]$_.name -match '-win-' })
+        if($winAssets.Count -gt 0){
+            [void]$sb.Append("`r`n`r`nWindows packages in this release:`r`n")
+            foreach($wa in $winAssets){ [void]$sb.Append(('  '+$wa.name+'  ('+[math]::Round($wa.size/1MB)+' MB)'+"`r`n")) }
+        }
+        $notes.Text=$sb.ToString()
+    }
+    $releaseList.Add_SelectedIndexChanged($showNotes)
+    & $showNotes
+    $variantLabel=New-Object System.Windows.Forms.Label; $variantLabel.Text='ENGINE VARIANT (what your current engine becomes)'; $variantLabel.Location=New-Object System.Drawing.Point(12,344); $variantLabel.Size=New-Object System.Drawing.Size(400,20); $variantLabel.ForeColor=$cMuted; $g.Controls.Add($variantLabel)
+    $variant=New-Object System.Windows.Forms.ComboBox; $variant.DropDownStyle='DropDownList'; $variant.Location=New-Object System.Drawing.Point(12,364); $variant.Size=New-Object System.Drawing.Size(280,26); $variant.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $variant.ForeColor=$cText; $g.Controls.Add($variant)
+    # The CUDA versions offered are read from the selected release itself, so
+    # cuda11 / cuda12 / a future cuda13 all appear automatically. The driver's
+    # own CUDA capability is read from nvidia-smi so Auto can pick a build the
+    # driver can actually run.
+    $script:MossDlgDriverCuda=''
+    try {
+        $smiCmd=Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue
+        if(-not $smiCmd){ foreach($smiCand in @("$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe","$env:WINDIR\System32\nvidia-smi.exe")){ if(Test-Path -LiteralPath $smiCand){ $smiCmd=$smiCand; break } } }
+        if($smiCmd){ $smiOut=(& $smiCmd 2>&1 | Out-String); if($smiOut -match 'CUDA Version:\s*([0-9]+\.[0-9]+)'){ $script:MossDlgDriverCuda=$Matches[1] } }
+    } catch {}
+    $variantDesc=New-Object System.Windows.Forms.Label; $variantDesc.Location=New-Object System.Drawing.Point(306,364); $variantDesc.Size=New-Object System.Drawing.Size(396,44); $variantDesc.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($variantDesc)
+    $extraLabel=New-Object System.Windows.Forms.Label; $extraLabel.Text='ALSO MAKE AVAILABLE - extra variants in their own folders (switch later via Hardware / Setup):'; $extraLabel.Location=New-Object System.Drawing.Point(12,414); $extraLabel.Size=New-Object System.Drawing.Size(690,16); $extraLabel.ForeColor=$cMuted; $g.Controls.Add($extraLabel)
+    $extraFlow=New-Object System.Windows.Forms.FlowLayoutPanel; $extraFlow.Location=New-Object System.Drawing.Point(12,432); $extraFlow.Size=New-Object System.Drawing.Size(690,30); $extraFlow.BackColor=[System.Drawing.Color]::FromArgb(25,32,45); $extraFlow.WrapContents=$false; $g.Controls.Add($extraFlow)
+    $variantLabelOf={
+        param($key)
+        if($key -like 'cuda*'){ return ('CUDA '+$key.Substring(4)+' (NVIDIA)') }
+        switch($key){ 'vulkan' { return 'Vulkan (any GPU)' } 'rocm' { return 'AMD ROCm' } 'sycl' { return 'Intel SYCL' } 'cpu' { return 'CPU only' } }
+        return $key
+    }
+    $resolveAuto={
+        param($availKeys)
+        $key='vulkan'; $detail='no NVIDIA card detected - Vulkan runs on most GPUs'
+        try {
+            $physGpus=@(Get-GpuInventory | Where-Object { -not $_.IsVirtual })
+            if(@($physGpus | Where-Object { $_.Vendor -eq 'NVIDIA' }).Count -gt 0){
+                $cands=@($availKeys | Where-Object { $_ -like 'cuda*' })
+                if($cands.Count -gt 0){
+                    $detail='NVIDIA GPU detected'
+                    $pick=$null
+                    if($script:MossDlgDriverCuda){
+                        $dMaj=0
+                        try { $dMaj=[int](([string]$script:MossDlgDriverCuda).Split('.')[0]) } catch { $dMaj=0 }
+                        foreach($c in $cands){ $cMaj=0; try { $cMaj=[int]($c.Substring(4).Split('.')[0]) } catch { $cMaj=0 }; if($cMaj -le $dMaj){ $pick=$c; break } }
+                        if($pick){ $detail=('NVIDIA GPU detected - newest CUDA build your driver (up to CUDA '+$script:MossDlgDriverCuda+') supports') }
+                    }
+                    if(-not $pick){ $pick=$cands[0]; if(-not $script:MossDlgDriverCuda){ $detail='NVIDIA GPU detected - newest CUDA build in this release (driver capability unreadable)' } }
+                    $key=$pick
+                } else { $detail='NVIDIA GPU detected, but this release ships no CUDA build - Vulkan' }
+            }
+        } catch {}
+        return @($key,$detail)
+    }
+    $syncInstallOptions={
+        $vIdxNow=$variant.SelectedIndex
+        $primaryNow='auto'
+        if($vIdxNow -ge 0 -and $vIdxNow -lt $script:MossDlgKeys.Count){ $primaryNow=[string]$script:MossDlgKeys[$vIdxNow] }
+        $detailNow=''
+        if($primaryNow -eq 'auto'){ $r=& $resolveAuto $script:MossDlgConcrete; $primaryNow=[string]$r[0]; $detailNow=[string]$r[1] }
+        $desc=''
+        if($vIdxNow -eq 0){
+            $desc=('Auto picks '+(& $variantLabelOf $primaryNow)+' - '+$detailNow+'.')
+        } elseif($primaryNow -like 'cuda*'){
+            $desc=('For NVIDIA cards using CUDA '+$primaryNow.Substring(4)+' - the fastest option.')
+            if($script:MossDlgDriverCuda){ $desc+=(' Your driver supports up to CUDA '+$script:MossDlgDriverCuda+' - a higher CUDA build may not start on it.') } else { $desc+=' The driver CUDA version could not be read - if the engine fails to start, pick a lower CUDA version or Vulkan.' }
+        } else {
+            switch($primaryNow){
+                'vulkan' { $desc='Runs on almost any modern GPU - NVIDIA, AMD and Intel. Slightly slower than a native CUDA build, but the most compatible choice.' }
+                'rocm' { $desc='For supported AMD Radeon cards (official ROCm build). If it fails to start on your card, switch to Vulkan. No CUDA runtime is needed.' }
+                'sycl' { $desc='For Intel Arc and integrated Intel graphics (SYCL build). Not in every release - Vulkan is the safe alternative.' }
+                'cpu' { $desc='Needs no graphics card at all. Works on any PC but is much slower - mainly for testing or small models.' }
+            }
+        }
+        $variantDesc.Text=$desc
+        foreach($k in @($script:MossDlgConcrete)){
+            $cb=$script:MossDlgExtras[$k]
+            if($null -eq $cb){ continue }
+            if($k -eq $primaryNow){ $cb.Enabled=$false; $cb.Checked=$false } else { $cb.Enabled=$true }
+        }
+        # cudart is REQUIRED for CUDA builds and is downloaded automatically
+        # (version-matched) whenever a CUDA variant is selected - nothing to
+        # configure, no checkbox, no note.
+    }
+    $syncVariantCombo={
+        if($releaseList.SelectedIndex -lt 0 -or $releaseList.SelectedIndex -ge $releases.Count){ return }
+        $rel=$releases[$releaseList.SelectedIndex]
+        $cudaVers=@()
+        foreach($a in @($rel.assets)){ $an=[string]$a.name; if($an -match 'bin-win-cuda([0-9]+(?:\.[0-9]+)?)-x64\.zip'){ $cudaVers+=$Matches[1] } }
+        $cudaVers=@($cudaVers | Sort-Object -Unique | Sort-Object -Property { $v=[string]$_; if($v -notmatch '\.'){ $v=$v+'.0' }; [version]$v } -Descending)
+        $concrete=@()
+        foreach($cv in $cudaVers){ $concrete+=('cuda'+$cv) }
+        if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-vulkan-x64.zip' }).Count -gt 0){ $concrete+='vulkan' }
+        if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-rocm*' }).Count -gt 0){ $concrete+='rocm' }
+        if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-sycl*' }).Count -gt 0){ $concrete+='sycl' }
+        if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-cpu-x64.zip' }).Count -gt 0){ $concrete+='cpu' }
+        $script:MossDlgConcrete=$concrete
+        $script:MossDlgKeys=@('auto')+$concrete
+        $variant.Items.Clear()
+        [void]$variant.Items.Add('Auto (recommended for my hardware)')
+        foreach($k in $concrete){ [void]$variant.Items.Add((& $variantLabelOf $k)) }
+        if($variant.Items.Count -gt 0){ $variant.SelectedIndex=0 }
+        while($extraFlow.Controls.Count -gt 0){ $extraFlow.Controls.RemoveAt(0) }
+        $newExtras=@{}
+        foreach($k in $concrete){
+            $cb=New-Object System.Windows.Forms.CheckBox; $cb.Text=(& $variantLabelOf $k); $cb.AutoSize=$true; $cb.ForeColor=$cMuted; $cb.Tag=$k
+            $cb.Add_CheckedChanged($syncInstallOptions)
+            [void]$extraFlow.Controls.Add($cb)
+            $newExtras[$k]=$cb
+        }
+        $script:MossDlgExtras=$newExtras
+        & $syncInstallOptions
+    }
+    $releaseList.Add_SelectedIndexChanged({ & $syncVariantCombo })
+    & $syncVariantCombo
+    # MODELS section: only models that need attention are listed (updates
+    # available or not installed); up-to-date models do not appear.
+    $modelsLabelText=$(if($script:MossDlgModels.Count -gt 0){'MODELS - '+$script:MossDlgModels.Count+' update(s) available (checked = download and install):'}else{'MODELS - all known models are up to date.'})
+    if($modelFailed.Count -gt 0){ $modelsLabelText+=' (some sources could not be checked - offline?)' }
+    $modelsLabel=New-Object System.Windows.Forms.Label; $modelsLabel.Text=$modelsLabelText; $modelsLabel.Location=New-Object System.Drawing.Point(12,470); $modelsLabel.Size=New-Object System.Drawing.Size(690,16); $modelsLabel.ForeColor=$cMuted; $g.Controls.Add($modelsLabel)
+    $modelsList=New-Object System.Windows.Forms.CheckedListBox; $modelsList.Location=New-Object System.Drawing.Point(12,488); $modelsList.Size=New-Object System.Drawing.Size(690,96); $modelsList.CheckOnClick=$true; $modelsList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $modelsList.ForeColor=$cText; $modelsList.BorderStyle='FixedSingle'
+    foreach($mi in $script:MossDlgModels){
+        [void]$modelsList.Items.Add(($mi.Name+'   ('+[math]::Round($mi.RemoteSize/1GB,2)+' GB download'+$(if($mi.Status -eq 'update available'){', update'}else{', new install'})+')'))
+        $modelsList.SetItemChecked($modelsList.Items.Count-1,$true)
+    }
+    $modelsList.Visible=($script:MossDlgModels.Count -gt 0)
+    $g.Controls.Add($modelsList)
+    $modelBackupCheck=New-Object System.Windows.Forms.CheckBox; $modelBackupCheck.Text='Back up the old model files first (renamed to <name>.old-<time> - instant; the newest 3 backups are kept)'; $modelBackupCheck.Location=New-Object System.Drawing.Point(12,590); $modelBackupCheck.Size=New-Object System.Drawing.Size(690,22); $modelBackupCheck.ForeColor=$cMuted; $modelBackupCheck.Visible=($script:MossDlgModels.Count -gt 0); $modelBackupCheck.Checked=$true; $g.Controls.Add($modelBackupCheck)
+    $installBtn=New-Object System.Windows.Forms.Button; $installBtn.Text='Download and install...'; $installBtn.Location=New-Object System.Drawing.Point(12,618); $installBtn.Size=New-Object System.Drawing.Size(180,32); $installBtn.FlatStyle='Flat'; $installBtn.BackColor=[System.Drawing.Color]::FromArgb(45,112,173); $installBtn.ForeColor=[System.Drawing.Color]::White; $g.Controls.Add($installBtn)
+    $restoreBtn=New-Object System.Windows.Forms.Button; $restoreBtn.Text='Restore a backup...'; $restoreBtn.Location=New-Object System.Drawing.Point(202,618); $restoreBtn.Size=New-Object System.Drawing.Size(150,32); $restoreBtn.FlatStyle='Flat'; $restoreBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $restoreBtn.ForeColor=$cText; $g.Controls.Add($restoreBtn)
+    $pageBtn=New-Object System.Windows.Forms.Button; $pageBtn.Text='Open releases page'; $pageBtn.Location=New-Object System.Drawing.Point(362,618); $pageBtn.Size=New-Object System.Drawing.Size(150,32); $pageBtn.FlatStyle='Flat'; $pageBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $pageBtn.ForeColor=$cText; $g.Controls.Add($pageBtn)
+    $closeBtn=New-Object System.Windows.Forms.Button; $closeBtn.Text='Close'; $closeBtn.Location=New-Object System.Drawing.Point(610,618); $closeBtn.Size=New-Object System.Drawing.Size(80,32); $closeBtn.FlatStyle='Flat'; $closeBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $closeBtn.ForeColor=$cText; $g.Controls.Add($closeBtn)
+    $status=New-Object System.Windows.Forms.Label; $status.Location=New-Object System.Drawing.Point(12,658); $status.Size=New-Object System.Drawing.Size(690,50); $status.ForeColor=$cMuted; $status.Text='Pick a release above to read its changelog. Engine files and models are checked at the same time; the current engine files are backed up before anything changes; models are only touched when you select a model update. Use Restore a backup... to roll back the engine.'; $g.Controls.Add($status)
+    $pageBtn.Add_Click({ try { Start-Process 'https://github.com/leejet/stable-diffusion.cpp/releases' } catch { [System.Windows.Forms.MessageBox]::Show($g,'The releases page could not be opened. Visit github.com/leejet/stable-diffusion.cpp and open Releases.','Engine update')|Out-Null } })
+    $closeBtn.Add_Click({$g.Close()})
+    $restoreBtn.Add_Click({ Show-MossEngineBackupRestore $g $enginePath $engineBin $log $stamp })
+    $installBtn.Add_Click({
+        if($releaseList.SelectedIndex -lt 0){ [System.Windows.Forms.MessageBox]::Show($g,'Select a release first.','Engine update')|Out-Null; return }
+        $rel=$releases[$releaseList.SelectedIndex]; $relTag=[string]$rel.tag_name
+        # Re-derive the variants actually present in the SELECTED release (the
+        # dropdown is built from the latest release; older ones may differ).
+        $availKeys=@()
+        $cudaVers=@()
+        foreach($a in @($rel.assets)){ $an=[string]$a.name; if($an -match 'bin-win-cuda([0-9]+(?:\.[0-9]+)?)-x64\.zip'){ $cudaVers+=$Matches[1] } }
+        $cudaVers=@($cudaVers | Sort-Object -Unique | Sort-Object -Property { $v=[string]$_; if($v -notmatch '\.'){ $v=$v+'.0' }; [version]$v } -Descending)
+        foreach($cv in $cudaVers){ $availKeys+=('cuda'+$cv) }
+        if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-vulkan-x64.zip' }).Count -gt 0){ $availKeys+='vulkan' }
+        if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-rocm*' }).Count -gt 0){ $availKeys+='rocm' }
+        if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-sycl*' }).Count -gt 0){ $availKeys+='sycl' }
+        if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-cpu-x64.zip' }).Count -gt 0){ $availKeys+='cpu' }
+        if($availKeys.Count -eq 0){
+            [void]$log.Add(('ERROR: release '+$relTag+' has no Windows engine builds'))
+            [System.Windows.Forms.MessageBox]::Show($g,'This release does not include any Windows engine builds. Choose another release or open the releases page to download manually.','Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+            return
+        }
+        $vIdx=$variant.SelectedIndex
+        $primaryKey=''
+        if($vIdx -le 0){ $r=& $resolveAuto $availKeys; $primaryKey=[string]$r[0] }
+        else { $primaryKey=[string]$script:MossDlgKeys[$vIdx]; if($availKeys -notcontains $primaryKey){
+            [void]$log.Add(('ERROR: '+$primaryKey+' not available in release '+$relTag))
+            $availText=(($availKeys | ForEach-Object { & $variantLabelOf $_ }) -join ', ')
+            [System.Windows.Forms.MessageBox]::Show($g,("The selected release does not include a build for {0}.`r`nThis release offers: {1}`r`nChoose another release or pick one of the available variants." -f (& $variantLabelOf $primaryKey),$availText),'Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+            return
+        } }
+        # Additional variants checked in 'ALSO MAKE AVAILABLE' - each installed
+        # side by side into its own engines\<variant> folder next to the main
+        # one, so several engines can coexist (switch via Hardware / Setup).
+        $extras=@()
+        foreach($k in $availKeys){
+            $cb=$script:MossDlgExtras[$k]
+            if($null -ne $cb -and $cb.Enabled -and $cb.Checked -and $k -ne $primaryKey){ $extras+=$k }
+        }
+        $enginesRoot=Join-Path ([System.IO.Path]::GetDirectoryName($engineBin)) 'engines'
+        $plan=@()
+        $plan+=@{ Key=$primaryKey; Target=$engineBin; IsPrimary=$true }
+        foreach($k in $extras){ $plan+=@{ Key=$k; Target=(Join-Path $enginesRoot $k); IsPrimary=$false } }
+        $assetFor={
+            param($relIn,$keyIn)
+            $pat=$(if($keyIn -like 'cuda*'){('bin-win-cuda'+$keyIn.Substring(4)+'-x64.zip')}elseif($keyIn -eq 'vulkan'){'bin-win-vulkan-x64.zip'}elseif($keyIn -eq 'rocm'){'bin-win-rocm'}elseif($keyIn -eq 'sycl'){'bin-win-sycl'}else{'bin-win-cpu-x64.zip'})
+            $hits=@($relIn.assets | Where-Object { [string]$_.name -like ('*'+$pat+'*') } | Select-Object -First 1)
+            if($hits.Count -gt 0){ return $hits[0] }
+            return $null
+        }
+        $engineAssets=@{}
+        foreach($k in (@($plan | ForEach-Object { $_.Key }) | Sort-Object -Unique)){
+            $hit=& $assetFor $rel $k
+            if(-not $hit -or -not $hit.browser_download_url){
+                [void]$log.Add(('ERROR: no '+$k+' package in release '+$relTag))
+                [System.Windows.Forms.MessageBox]::Show($g,("This release does not include a Windows build for {0}.`r`nChoose another variant or open the releases page to download manually." -f (& $variantLabelOf $k)),'Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+                return
+            }
+            $engineAssets[$k]=$hit
+        }
+        # CUDA runtime (cudart) is required for CUDA builds, in the matching
+        # major version (cu12 files do not run a cu13 engine and vice versa).
+        # Every selected CUDA variant gets it automatically (primary and
+        # side-by-side extras alike).
+        $cudartNeededMajors=@()
+        foreach($p in $plan){
+            if($p.Key -like 'cuda*'){
+                $mj=$p.Key.Substring(4).Split('.')[0]
+                if($cudartNeededMajors -notcontains $mj){ $cudartNeededMajors+=$mj }
+            }
+        }
+        $cudartAssets=@{}
+        foreach($mj in $cudartNeededMajors){
+            $ca=@($rel.assets | Where-Object { [string]$_.name -like ('cudart-sd-bin-win-cu'+$mj+'*-x64.zip') } | Select-Object -First 1)
+            if($ca){ $cudartAssets[$mj]=$ca[0] }
+        }
+        $missingCudartExtra=$false
+        foreach($p in $plan){
+            if(-not $p.IsPrimary -and $p.Key -like 'cuda*'){
+                $mj=$p.Key.Substring(4).Split('.')[0]
+                if(-not $cudartAssets.ContainsKey($mj)){ $missingCudartExtra=$true }
+            }
+        }
+        if($missingCudartExtra){
+            [void]$log.Add(('ERROR: no cudart package for an extra CUDA variant in release '+$relTag))
+            [System.Windows.Forms.MessageBox]::Show($g,'This release has no CUDA runtime package for one of the extra CUDA variants you selected, and a fresh CUDA engine folder cannot start without it.`r`nUncheck that extra variant (or choose Vulkan for it) and try again.','Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+            return
+        }
+        # Models selected in the MODELS section - downloaded and installed
+        # after the engine update succeeds. Sizes warn the user; the old
+        # files are renamed (instant) or overwritten per the checkbox.
+        $modelPlan=@()
+        foreach($idx in @($modelsList.CheckedIndices)){ if($idx -lt $script:MossDlgModels.Count){ $modelPlan+=$script:MossDlgModels[$idx] } }
+        $modelsTotal=0
+        foreach($mi in $modelPlan){ if($mi.RemoteSize -gt 0){ $modelsTotal+=$mi.RemoteSize } }
+        if($modelPlan.Count -gt 0){ [void]$log.Add(('Models to update: '+(($modelPlan | ForEach-Object { $_.Name }) -join ', ')+' ('+[math]::Round($modelsTotal/1GB,2)+' GB total)')) }
+        # Disk space pre-check: download + unpack + backup must fit on both
+        # the temp drive and the drive holding the engine/models, or the
+        # install would fail halfway through replacing files.
+        $needBase=500MB
+        $totalDl=0
+        foreach($k in $engineAssets.Keys){ $totalDl+=[int64]$engineAssets[$k].size }
+        foreach($mj in $cudartAssets.Keys){ $totalDl+=[int64]$cudartAssets[$mj].size }
+        $needTemp=$totalDl*3 + $needBase + $modelsTotal*2
+        $needBin=$totalDl*4 + $needBase + $modelsTotal*2
+        try { $freeTemp=(New-Object System.IO.DriveInfo([System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath()))).AvailableFreeSpace } catch { $freeTemp=[int64]::MaxValue }
+        try { $freeBin=(New-Object System.IO.DriveInfo([System.IO.Path]::GetPathRoot($engineBin))).AvailableFreeSpace } catch { $freeBin=[int64]::MaxValue }
+        if($freeTemp -lt $needTemp -or $freeBin -lt $needBin){
+            [void]$log.Add(('ERROR: insufficient disk space (temp free '+[math]::Round($freeTemp/1GB,1)+' GB, engine-drive free '+[math]::Round($freeBin/1GB,1)+' GB, need ~'+[math]::Round($needTemp/1GB,1)+' GB and ~'+[math]::Round($needBin/1GB,1)+' GB)'))
+            [System.Windows.Forms.MessageBox]::Show($g,("Not enough free disk space for the engine update.`r`n`r`nNeeded: about {0} GB on the temp drive ({1}) and {2} GB on {3}`r`nAvailable: {4} GB and {5} GB`r`n`r`nFree up some space (or install fewer variants) and try again." -f [math]::Round($needTemp/1GB,1),[System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath()).TrimEnd('\'),[math]::Round($needBin/1GB,1),[System.IO.Path]::GetPathRoot($engineBin).TrimEnd('\'),[math]::Round($freeTemp/1GB,1),[math]::Round($freeBin/1GB,1)),'Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+            return
+        }
+        $busy=@(Get-Process -Name 'sd-cli','sd-server' -ErrorAction SilentlyContinue)
+        if($busy.Count -gt 0){ [System.Windows.Forms.MessageBox]::Show($g,'sd-cli or sd-server is currently running. Wait for it to finish and try again.','Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null; return }
+        $planText=''
+        foreach($p in $plan){ $planText+=((('  '+(& $variantLabelOf $p.Key))+$(if($p.IsPrimary){''}else{' (extra)'})+'  ->  '+$p.Target)+"`r`n") }
+        $modelText=if($modelPlan.Count -gt 0){ ((($modelPlan | ForEach-Object { '  '+$_.Name+'  ('+[math]::Round($_.RemoteSize/1GB,2)+' GB download, current file: '+$(if($_.LocalSize -gt 0){[math]::Round($_.LocalSize/1GB,2)+' GB'}else{'not installed'})+')' }) -join "`r`n")+"`r`n  Old model files: "+$(if($modelBackupCheck.Checked){'kept as <name>.old-<time> (renamed, instant - older backups beyond the newest 3 are deleted automatically)'}else{'overwritten WITHOUT a backup'})) } else { '  (no model updates selected)' }
+        $modelText+="`r`n"
+        $timeText='depends on your connection'
+        if($measuredSpeed -gt 0 -and $modelsTotal -gt 0){ $timeText='about '+[math]::Round(($modelsTotal/1MB)/$measuredSpeed/60,0)+' minutes for the models at your measured speed ('+[math]::Round($measuredSpeed,1)+' MB/s)' }
+        $dlText=''
+        foreach($p in $plan){ $a=$engineAssets[$p.Key]; $dlText+=((('  '+$a.name)+'  ('+[math]::Round($a.size/1MB)+' MB)')+"`r`n") }
+        foreach($mj in ($cudartAssets.Keys | Sort-Object)){ $ca=$cudartAssets[$mj]; $dlText+=((('  '+$ca.name)+'  ('+[math]::Round($ca.size/1MB)+' MB)')+"`r`n") }
+        foreach($mi in $modelPlan){ $dlText+=(('  '+$mi.Name+'  ('+[math]::Round($mi.RemoteSize/1GB,2)+' GB)')+"`r`n") }
+        $backupZip=Join-Path ([System.IO.Path]::GetDirectoryName($engineBin)) ('engine-backup-'+$stamp+'.zip')
+        # Legacy (pre-compression) folder name, only checked when no zip exists.
+        $backupDir=Join-Path ([System.IO.Path]::GetDirectoryName($engineBin)) ('engine-backup-'+$stamp)
+        $answer=[System.Windows.Forms.MessageBox]::Show($g,("Ready to install the update:`r`n`r`nRelease: {0}`r`nInstall plan:`r`n{1}Models to update:`r`n{2}Download:`r`n{3}Engine backup (compressed zip): {4}`r`nDisk space needed: about {5} GB on the temp drive and {6} GB on the engine+models drive`r`nEstimated model download time: {7}`r`n`r`nMOSS will be unresponsive during the download (several minutes on slower connections; GB-sized models take longer).`r`n`r`nInstall now?" -f $relTag,$planText,$modelText,$dlText,$backupZip,[math]::Round($needTemp/1GB,1),[math]::Round($needBin/1GB,1),$timeText),'Install engine & model update',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
+        if($answer -ne [System.Windows.Forms.DialogResult]::Yes){ return }
+        $oldProgress=$ProgressPreference; $ProgressPreference='SilentlyContinue'
+        $tempRoot=Join-Path ([System.IO.Path]::GetTempPath()) ('MOSS-Engine-Update-'+[guid]::NewGuid().ToString('N'))
+        try {
+            $g.Cursor='WaitCursor'; $installBtn.Enabled=$false; $pageBtn.Enabled=$false; $closeBtn.Enabled=$false
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $engineFiles=@{}
+            $dlTotal=@($engineAssets.Keys).Count + @($cudartAssets.Keys).Count
+            $dlIndex=0
+            foreach($k in (@($plan | ForEach-Object { $_.Key }) | Sort-Object -Unique)){
+                $a=$engineAssets[$k]; $dlIndex++
+                $status.Text=('Downloading '+(& $variantLabelOf $k)+': '+$a.name+' ('+[math]::Round($a.size/1MB)+' MB) ['+$dlIndex+'/'+$dlTotal+']...')
+                [System.Windows.Forms.Application]::DoEvents()
+                [void]$log.Add(('Downloading '+$a.browser_download_url))
+                New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+                $zipPath=Join-Path $tempRoot ($k+'.zip')
+                Invoke-WebRequest -Uri ([string]$a.browser_download_url) -OutFile $zipPath -UseBasicParsing -TimeoutSec 3600
+                if(-not (Test-Path -LiteralPath $zipPath -PathType Leaf) -or (Get-Item -LiteralPath $zipPath).Length -le 0){ throw ('The '+$k+' download did not produce a file. Nothing has been changed.') }
+                Test-MossZipDigest $zipPath $a
+                [void]$log.Add(($k+' download ok ('+[math]::Round((Get-Item -LiteralPath $zipPath).Length/1MB)+' MB)'))
+                $status.Text=('Verifying and unpacking '+(& $variantLabelOf $k)+'...')
+                [System.Windows.Forms.Application]::DoEvents()
+                $archive=[System.IO.Compression.ZipFile]::OpenRead($zipPath)
+                try {
+                    $relEntry=@($archive.Entries | Where-Object { [string]$_.FullName -match '(^|/)sd-cli\.exe$' } | Select-Object -First 1)
+                    if(-not $relEntry){ throw ('The '+$k+' package does not contain sd-cli.exe. Nothing has been changed.') }
+                    $entryDir=[System.IO.Path]::GetDirectoryName([string]$relEntry.FullName)
+                } finally { $archive.Dispose() }
+                $stageK=Join-Path $tempRoot ('stage-'+$k)
+                [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath,$stageK)
+                $srcK=$stageK; if(-not [string]::IsNullOrWhiteSpace($entryDir)){ $srcK=Join-Path $stageK ($entryDir -replace '/','\') }
+                $filesK=@(Get-ChildItem -LiteralPath $srcK -Recurse -File | ForEach-Object { $_.FullName })
+                if($filesK.Count -eq 0){ throw ('The '+$k+' package unpacked to no files. Nothing has been changed.') }
+                $engineFiles[$k]=$filesK
+            }
+            $cudartFilesByMaj=@{}
+            foreach($mj in (@($cudartAssets.Keys) | Sort-Object)){
+                $ca=$cudartAssets[$mj]; $dlIndex++
+                $status.Text=('Downloading the CUDA '+$mj+' runtime: '+$ca.name+' ('+[math]::Round($ca.size/1MB)+' MB) ['+$dlIndex+'/'+$dlTotal+']...')
+                [System.Windows.Forms.Application]::DoEvents()
+                [void]$log.Add(('Downloading '+$ca.browser_download_url))
+                $cudartZip=Join-Path $tempRoot ('cudart-cu'+$mj+'.zip')
+                Invoke-WebRequest -Uri ([string]$ca.browser_download_url) -OutFile $cudartZip -UseBasicParsing -TimeoutSec 3600
+                if(-not (Test-Path -LiteralPath $cudartZip -PathType Leaf) -or (Get-Item -LiteralPath $cudartZip).Length -le 0){ throw 'The CUDA runtime download did not produce a file. Nothing has been changed.' }
+                Test-MossZipDigest $cudartZip $ca
+                [void]$log.Add(('CUDA '+$mj+' runtime download ok ('+[math]::Round((Get-Item -LiteralPath $cudartZip).Length/1MB)+' MB)'))
+                $stageC=Join-Path $tempRoot ('stage-cudart-'+$mj)
+                [System.IO.Compression.ZipFile]::ExtractToDirectory($cudartZip,$stageC)
+                $cudartFilesByMaj[$mj]=@(Get-ChildItem -LiteralPath $stageC -Recurse -File | ForEach-Object { $_.FullName })
+            }
+            # The download took minutes: re-check that no engine process has
+            # appeared, otherwise replacing its files would fail or corrupt it.
+            $busyNow=@(Get-Process -Name 'sd-cli','sd-server' -ErrorAction SilentlyContinue)
+            if($busyNow.Count -gt 0){ throw 'sd-cli or sd-server started while the download was running. Nothing has been changed - try again when no engine process is running.' }
+            $status.Text='Backing up the current engine files (compressing)...'
+            [System.Windows.Forms.Application]::DoEvents()
+            [void]$log.Add(('Backup archive: '+$backupZip))
+            $primaryPlan=@($plan | Where-Object { $_.IsPrimary })[0]
+            Add-Type -AssemblyName System.IO.Compression
+            $replaced=@()
+            $backupArchive=[System.IO.Compression.ZipFile]::Open($backupZip,[System.IO.Compression.ZipArchiveMode]::Create)
+            try {
+                foreach($src in @($engineFiles[$primaryPlan.Key])){
+                    $name=[System.IO.Path]::GetFileName($src); $dest=Join-Path $engineBin $name
+                    if(Test-Path -LiteralPath $dest -PathType Leaf){
+                        # Zip via stream copy (CreateEntryFromFile is not
+                        # available on every .NET/PowerShell 5.1 setup). Files
+                        # larger than 8 MB get a 4 MB sample from the MIDDLE
+                        # of the file compressed first: DLL headers at the
+                        # start compress far better than the code bulk and
+                        # would mislead a start sample. If the middle sample
+                        # barely shrinks (>= 0.95), the file is stored
+                        # uncompressed - no time wasted on incompressible
+                        # machine code (e.g. ggml-cuda.dll: 4% whole-file
+                        # gain). Small gains on huge files are still taken
+                        # (cublasLt: 29% = ~186 MB).
+                        $level=[System.IO.Compression.CompressionLevel]::Optimal
+                        $fiB=Get-Item -LiteralPath $dest
+                        if($fiB.Length -gt 8MB){
+                            $fsS=[System.IO.File]::OpenRead($dest)
+                            try {
+                                $sampleBytes=4MB
+                                $offS=[int][math]::Max(0,(($fsS.Length/2)-($sampleBytes/2)))
+                                [void]$fsS.Seek($offS,[System.IO.SeekOrigin]::Begin)
+                                $bufS=New-Object byte[] $sampleBytes
+                                $readS=$fsS.Read($bufS,0,$sampleBytes)
+                                $msS=New-Object System.IO.MemoryStream
+                                try {
+                                    $dsS=New-Object System.IO.Compression.DeflateStream($msS,[System.IO.Compression.CompressionLevel]::Optimal,$true)
+                                    try { $dsS.Write($bufS,0,$readS) } finally { $dsS.Dispose() }
+                                    if(($msS.Length / [double]$readS) -ge 0.95){ $level=[System.IO.Compression.CompressionLevel]::NoCompression }
+                                } finally { $msS.Dispose() }
+                            } finally { $fsS.Dispose() }
+                        }
+                        $entry=$backupArchive.CreateEntry($name,$level)
+                        $es=$entry.Open()
+                        try { $fs=[System.IO.File]::OpenRead($dest); try { $fs.CopyTo($es) } finally { $fs.Dispose() } } finally { $es.Dispose() }
+                        $replaced+=$name
+                    }
+                }
+            } finally { $backupArchive.Dispose() }
+            [void]$log.Add(('Backed up '+$replaced.Count+' files, '+[math]::Round((Get-Item -LiteralPath $backupZip).Length/1MB)+' MB compressed: '+(($replaced | Sort-Object) -join ', ')))
+            # Keep at most 3 engine backups: delete the oldest beyond that.
+            $backupParent=[System.IO.Path]::GetDirectoryName($engineBin)
+            $oldBackups=@(Get-ChildItem -LiteralPath $backupParent -File -Filter 'engine-backup-*.zip' -ErrorAction SilentlyContinue | Sort-Object -Property Name -Descending)
+            $oldBackups+=@(Get-ChildItem -LiteralPath $backupParent -Directory -Filter 'engine-backup-*' -ErrorAction SilentlyContinue | Sort-Object -Property Name -Descending)
+            for($bi=3; $bi -lt $oldBackups.Count; $bi++){
+                try { Remove-Item -LiteralPath $oldBackups[$bi].FullName -Recurse -Force -ErrorAction Stop; [void]$log.Add(('Deleted old engine backup beyond the limit of 3: '+$oldBackups[$bi].Name)) } catch { [void]$log.Add(('Could not delete old engine backup '+$oldBackups[$bi].Name+': '+$_.Exception.Message)) }
+            }
+            # Install every target: the primary replaces the current engine, the
+            # extras land in their own engines\<variant> folders (a previous
+            # extra folder of the same variant is moved aside to *.old-<time>).
+            foreach($p in $plan){
+                $filesP=@($engineFiles[$p.Key])
+                if($p.Key -like 'cuda*'){
+                    $mjP=$p.Key.Substring(4).Split('.')[0]
+                    if($cudartFilesByMaj.ContainsKey($mjP)){ $filesP=@($filesP)+@($cudartFilesByMaj[$mjP]) }
+                }
+                if($p.IsPrimary){
+                    $status.Text='Replacing the engine files...'
+                    [System.Windows.Forms.Application]::DoEvents()
+                    foreach($src in $filesP){ Copy-Item -LiteralPath $src -Destination (Join-Path $engineBin ([System.IO.Path]::GetFileName($src))) -Force }
+                } else {
+                    $status.Text=('Installing extra '+(& $variantLabelOf $p.Key)+'...')
+                    [System.Windows.Forms.Application]::DoEvents()
+                    if(Test-Path -LiteralPath $p.Target -PathType Container){
+                        $oldTarget=Join-Path ([System.IO.Path]::GetDirectoryName($p.Target)) (($p.Key)+'.old-'+$stamp)
+                        Move-Item -LiteralPath $p.Target -Destination $oldTarget -Force
+                        [void]$log.Add(('Previous extra folder moved aside: '+$p.Target+' -> '+$oldTarget))
+                    }
+                    New-Item -ItemType Directory -Path $p.Target -Force | Out-Null
+                    foreach($src in $filesP){ Copy-Item -LiteralPath $src -Destination (Join-Path $p.Target ([System.IO.Path]::GetFileName($src))) -Force }
+                    [void]$log.Add(('Installed extra variant '+$p.Key+' into '+$p.Target))
+                }
+            }
+            # Verify the new engine actually starts BEFORE declaring success:
+            # no version output means missing DLLs or a broken exe - restore.
+            $status.Text='Checking that the new engine starts...'
+            [System.Windows.Forms.Application]::DoEvents()
+            $newOut=Get-MossEngineVersionOutput $enginePath
+            if([string]::IsNullOrWhiteSpace($newOut)){ throw 'The new engine files were copied, but sd-cli.exe does not start (no version output). The previous engine files will be restored.' }
+            $newCommit=''
+            if($newOut -match 'commit\s+([0-9a-fA-F]{6,40})'){ $newCommit=$Matches[1].ToLowerInvariant() }
+            [void]$log.Add(('New engine version output: '+$newOut))
+            $extraLines=''; $extraOk=0; $extraWarn=0
+            foreach($p in @($plan | Where-Object { -not $_.IsPrimary })){
+                $exeP=Join-Path $p.Target 'sd-cli.exe'
+                if(Test-Path -LiteralPath $exeP -PathType Leaf){
+                    $oP=Get-MossEngineVersionOutput $exeP
+                    if([string]::IsNullOrWhiteSpace($oP)){
+                        $extraWarn++
+                        $extraLines+=("`r`nWARNING: the extra "+(& $variantLabelOf $p.Key)+" did not start (no version output) - it stays in "+$p.Target+" but may need a different variant.")
+                        [void]$log.Add(('WARNING: extra '+$p.Key+' did not report a version'))
+                    } else {
+                        $extraOk++
+                        $extraLines+=("`r`nExtra "+(& $variantLabelOf $p.Key)+": verified working.")
+                        [void]$log.Add(('Extra '+$p.Key+' verified: '+$oP))
+                    }
+                }
+            }
+            $modelLines=''; $modelOk=0; $modelFail=0
+            foreach($mi in $modelPlan){
+                try {
+                    $status.Text=('Downloading model '+$mi.Name+' ('+[math]::Round($mi.RemoteSize/1GB,2)+' GB)...')
+                    [System.Windows.Forms.Application]::DoEvents()
+                    [void]$log.Add(('Downloading model '+$mi.RemoteUrl))
+                    $mTemp=Join-Path $tempRoot ('model-'+$mi.Name+'.part')
+                    Invoke-WebRequest -Uri ([string]$mi.RemoteUrl) -OutFile $mTemp -UseBasicParsing -TimeoutSec 7200
+                    $got=(Get-Item -LiteralPath $mTemp).Length
+                    if($mi.RemoteSize -gt 0 -and $got -ne $mi.RemoteSize){ throw ('download size mismatch (got '+[math]::Round($got/1GB,2)+' GB, expected '+[math]::Round($mi.RemoteSize/1GB,2)+' GB)') }
+                    [void]$log.Add(('Model download ok ('+[math]::Round($got/1GB,2)+' GB)'))
+                    $destModel=$mi.LocalPath; if(-not $destModel){ $destModel=Join-Path $script:AppRoot ('models\'+$mi.Name) }
+                    if((Test-Path -LiteralPath $destModel -PathType Leaf) -and $modelBackupCheck.Checked){
+                        $oldName=([System.IO.Path]::GetFileNameWithoutExtension($destModel))+'.old-'+$stamp+([System.IO.Path]::GetExtension($destModel))
+                        Rename-Item -LiteralPath $destModel -Destination (Join-Path ([System.IO.Path]::GetDirectoryName($destModel)) $oldName) -Force
+                        [void]$log.Add(('Old model kept as '+$oldName))
+                        # Keep at most 3 backups per model: delete the oldest.
+                        $oldSiblings=@(Get-ChildItem -LiteralPath ([System.IO.Path]::GetDirectoryName($destModel)) -File -Filter (([System.IO.Path]::GetFileNameWithoutExtension($destModel))+'.old-*') -ErrorAction SilentlyContinue | Sort-Object -Property Name -Descending)
+                        for($bi=3; $bi -lt $oldSiblings.Count; $bi++){
+                            try { Remove-Item -LiteralPath $oldSiblings[$bi].FullName -Force -ErrorAction Stop; [void]$log.Add(('Deleted old model backup beyond the limit of 3: '+$oldSiblings[$bi].Name)) } catch { [void]$log.Add(('Could not delete old model backup '+$oldSiblings[$bi].Name+': '+$_.Exception.Message)) }
+                        }
+                    }
+                    $status.Text=('Installing model '+$mi.Name+'...')
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Copy-Item -LiteralPath $mTemp -Destination $destModel -Force
+                    Remove-Item -LiteralPath $mTemp -Force -ErrorAction SilentlyContinue
+                    $modelOk++
+                    $modelLines+=("`r`nModel updated: "+$mi.Name+" ("+[math]::Round($mi.RemoteSize/1GB,2)+" GB)")
+                    [void]$log.Add(('Model updated: '+$mi.Name))
+                } catch {
+                    $modelFail++
+                    $modelLines+=("`r`nWARNING: model "+$mi.Name+" could not be updated: "+$_.Exception.Message)
+                    [void]$log.Add(('ERROR updating model '+$mi.Name+': '+$_.Exception.Message))
+                    try { if($mTemp -and (Test-Path -LiteralPath $mTemp)){ Remove-Item -LiteralPath $mTemp -Force -ErrorAction SilentlyContinue } } catch {}
+                }
+            }
+            $switchHint=''
+            if(@($plan | Where-Object { -not $_.IsPrimary }).Count -gt 0){ $switchHint="`r`n`r`nExtra engines are switchable at any time: Hardware / Setup -> Browse -> select that engine's sd-cli.exe." }
+            $sameNote=''
+            if($newCommit -and $installedCommit -and ($newCommit -eq $installedCommit)){
+                $sameNote="`r`nNote: this is the same commit as before - you reinstalled the current version (useful as a repair)."
+                [void]$log.Add('Note: the installed commit is unchanged (reinstall)')
+            }
+            $status.Text=('Done. Engine now: '+$(if($newCommit){'commit '+$newCommit}else{$newOut})+'   -   details in logs\engine-update-'+$stamp+'.txt')
+            [System.Windows.Forms.MessageBox]::Show($g,("The update was completed.`r`n`r`nEngine - previous: {0}, now: {1}{2}{3}{4}{5}`r`n`r`nIf anything behaves strangely, you can restore the previous engine files from the compressed backup:`r`n{6}" -f $(if($installedCommit){'commit '+$installedCommit}else{'unknown'}),$(if($newCommit){'commit '+$newCommit}else{$newOut}),$sameNote,$extraLines,$modelLines,$switchHint,$backupZip),'Engine & models updated',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+        } catch {
+            [void]$log.Add(('ERROR: '+$_.Exception.Message))
+            $restoredNote='No files needed restoring - the failure happened before anything was replaced.'
+            try {
+                $hadBackup=@()
+                $restoreStage=''
+                if(Test-Path -LiteralPath $backupZip -PathType Leaf){
+                    $restoreStage=Join-Path ([System.IO.Path]::GetTempPath()) ('MOSS-Backup-Restore-'+[guid]::NewGuid().ToString('N'))
+                    New-Item -ItemType Directory -Path $restoreStage -Force | Out-Null
+                    Add-Type -AssemblyName System.IO.Compression.FileSystem
+                    [System.IO.Compression.ZipFile]::ExtractToDirectory($backupZip,$restoreStage)
+                    $hadBackup=@(Get-ChildItem -LiteralPath $restoreStage -File)
+                } elseif(Test-Path -LiteralPath $backupDir){
+                    $hadBackup=@(Get-ChildItem -LiteralPath $backupDir -File)
+                }
+                if($hadBackup.Count -gt 0){
+                    foreach($bak in $hadBackup){ Copy-Item -LiteralPath $bak.FullName -Destination (Join-Path $engineBin $bak.Name) -Force }
+                    # Verify the previous engine works again after the restore.
+                    $bakOut=Get-MossEngineVersionOutput $enginePath
+                    if(-not [string]::IsNullOrWhiteSpace($bakOut)){
+                        $restoredNote='The previous engine files were restored and verified working again.'
+                        [void]$log.Add('Previous engine verified working after restore')
+                    } else {
+                        $restoredNote='The previous engine files were restored, but sd-cli.exe still does not report a version - copy the files back manually from the backup archive if needed.'
+                        [void]$log.Add(('WARNING: the previous engine did not report a version after restore'))
+                    }
+                }
+            } catch { [void]$log.Add(('ERROR during restore: '+$_.Exception.Message)) }
+            $status.Text=('Engine update failed: '+$_.Exception.Message)
+            [System.Windows.Forms.MessageBox]::Show($g,("The engine update failed: {0}`r`n`r`n{1}`r`n`r`nDetails: logs\engine-update-{2}.txt" -f $_.Exception.Message,$restoredNote,$stamp),'Engine update failed',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null
+        } finally {
+            $g.Cursor='Default'; $installBtn.Enabled=$true; $pageBtn.Enabled=$true; $closeBtn.Enabled=$true; $ProgressPreference=$oldProgress
+            try { $logDir=Join-Path $script:AppRoot 'logs'; if(-not(Test-Path -LiteralPath $logDir)){New-Item -ItemType Directory -Path $logDir -Force|Out-Null}; ($log -join "`r`n") | Set-Content -LiteralPath (Join-Path $logDir ('engine-update-'+$stamp+'.txt')) -Encoding UTF8 } catch {}
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    })
+    [void]$g.ShowDialog($Owner)
+}
 function Show-GeneratorWindow {
     $defaultOutput=Join-Path $script:AppRoot 'outputs'
     if(-not(Test-Path -LiteralPath $defaultOutput)){New-Item -ItemType Directory -Path $defaultOutput -Force|Out-Null}
@@ -629,10 +1527,15 @@ function Show-GeneratorWindow {
     if($script:Settings.Contains('PreferredGpuIndex') -and [int]$script:Settings.PreferredGpuIndex -ge 0){ $gpuSubtitle="GPU: $($script:Settings.PreferredGpuName)" }
     $subt=New-Object System.Windows.Forms.Label; $subt.Text="LOCAL IMAGE GENERATION  -  $gpuSubtitle"; $subt.ForeColor=$cMuted; $subt.AutoSize=$true; $subt.Location=New-Object System.Drawing.Point(23,42); $head.Controls.Add($subt)
     $backendText=[string]$script:Settings.Backend; if (-not $script:Settings.BackendSelectionSaved) { $backendText='Not configured' }
-    $backendBadge=New-Object System.Windows.Forms.Label; $backendBadge.Text="BACKEND  $backendText"; $backendBadge.AutoSize=$true; $backendBadge.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $backendBadge.Location=New-Object System.Drawing.Point(680,25); $backendBadge.Anchor='Top,Right'; $head.Controls.Add($backendBadge)
+    $backendBadge=New-Object System.Windows.Forms.Label; $backendBadge.Text="BACKEND  $backendText"; $backendBadge.AutoSize=$true; $backendBadge.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $backendBadge.Location=New-Object System.Drawing.Point(535,25); $backendBadge.Anchor='Top,Right'; $head.Controls.Add($backendBadge)
     $setupBtn=New-Object System.Windows.Forms.Button; $setupBtn.Text='Hardware / Setup'; $setupBtn.Size=New-Object System.Drawing.Size(130,30); $setupBtn.Location=New-Object System.Drawing.Point(1025,18); $setupBtn.Anchor='Top,Right'; $setupBtn.FlatStyle='Flat'; $setupBtn.BackColor=$cAccent; $setupBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($setupBtn)
     $setupBtn.Add_Click({ $f.Tag='SETUP'; $f.Close() })
-$updateBtn=New-Object System.Windows.Forms.Button; $updateBtn.Text='Check updates'; $updateBtn.Size=New-Object System.Drawing.Size(130,30); $updateBtn.Location=New-Object System.Drawing.Point(880,18); $updateBtn.Anchor='Top,Right'; $updateBtn.FlatStyle='Flat'; $updateBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $updateBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($updateBtn)
+$headTip=New-Object System.Windows.Forms.ToolTip; $headTip.InitialDelay=300
+$updateBtn=New-Object System.Windows.Forms.Button; $updateBtn.Text='Update MOSS...'; $updateBtn.Size=New-Object System.Drawing.Size(130,30); $updateBtn.Location=New-Object System.Drawing.Point(880,18); $updateBtn.Anchor='Top,Right'; $updateBtn.FlatStyle='Flat'; $updateBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $updateBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($updateBtn)
+$headTip.SetToolTip($updateBtn,"Updates the MOSS application itself (the program files). Models, outputs and the sd-cli engine are not touched. Use 'Update engine...' for the rendering engine.")
+$engineBtn=New-Object System.Windows.Forms.Button; $engineBtn.Text='Update engine...'; $engineBtn.Size=New-Object System.Drawing.Size(130,30); $engineBtn.Location=New-Object System.Drawing.Point(735,18); $engineBtn.Anchor='Top,Right'; $engineBtn.FlatStyle='Flat'; $engineBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $engineBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($engineBtn)
+$headTip.SetToolTip($engineBtn,'Updates the sd-cli engine core files (the renderer in the bin folder): shows release changelogs and installs the newest engine build. MOSS itself is not changed.')
+$engineBtn.Add_Click({ Show-MossEngineUpdateDialog $f })
 $updateBtn.Add_Click({
     $release=$null
     try {
@@ -2068,6 +2971,7 @@ try {
     $f.Add_Shown({
         Hide-MossConsoleWindow
         Unlock-MossHistoryAfterShow
+        Test-MossOfferStartupDownload $f
     })
     [void]$f.ShowDialog()
     if($preview.Image){$preview.Image.Dispose()}
@@ -2098,6 +3002,7 @@ try {
     try { [System.Windows.Forms.MessageBox]::Show(("MOSS Image Studio could not start.`r`n`r`n"+$_.Exception.Message+"`r`n`r`nA technical report was saved to the logs folder."),'MOSS Image Studio',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null } catch {}
     exit 1
 }
+
 
 
 
