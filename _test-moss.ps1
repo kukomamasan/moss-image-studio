@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.65' ($src.Contains("AppVersion = '0.1.65'"))
+Test 'version is 0.1.66' ($src.Contains("AppVersion = '0.1.66'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -343,7 +343,7 @@ try {
 } catch { Test 'runtime: full-steps block ran without exception' $false }
 # v0.1.65: the header subtitle 'GPU: automatic' now names the detected GPU
 # the engine will use (user: 'it should instead show what gpu was chosen').
-Test 'automatic GPU subtitle names the detected adapter' ($src.Contains('''GPU: automatic ('' + [string]$gpusAuto[0].Name + '')''') -and $src.Contains('-not $_.IsVirtual -and $_.Vendor -ne ''Unknown'''))
+Test 'GPU subtitle shows just the detected adapter name (no word automatic, user request)' ($src.Contains('''GPU: '' + [string]$gpusAuto[0].Name') -and -not $src.Contains("'GPU: automatic ('"))
 Test 'manual GPU selection still shows the chosen name' ($src.Contains('PreferredGpuName'))
 try {
     $g = @(Get-CimInstance -ClassName Win32_VideoController | ForEach-Object {
