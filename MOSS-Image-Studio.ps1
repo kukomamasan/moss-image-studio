@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.26'
+$script:AppVersion = '0.1.27'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -759,16 +759,18 @@ try {
         $box=New-Object System.Windows.Forms.TextBox; $box.Multiline=$true; $box.ScrollBars='Vertical'; $box.Text=[string]$script:Settings.NegativePrompt; $box.Location=New-Object System.Drawing.Point(12,34); $box.Size=New-Object System.Drawing.Size(520,120); $box.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $box.ForeColor=$cText; $box.BorderStyle='FixedSingle'; $g.Controls.Add($box)
         Add-Label $g 'Sampler' 12 170 100 | Out-Null
         $optSampler=New-Object System.Windows.Forms.ComboBox; $optSampler.DropDownStyle='DropDownList'; $optSampler.Location=New-Object System.Drawing.Point(12,192); $optSampler.Size=New-Object System.Drawing.Size(250,26); $optSampler.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSampler.ForeColor=$cText
-        foreach($s in @('Default (model)','euler','euler_a','heun','dpm2','dpm++2s_a','dpm++2m','dpm++2mv2','ipndm','ipndm_v','lcm','ddim_trailing','tcd','res_multistep','res_2s','er_sde','euler_cfg_pp','euler_a_cfg_pp','euler_ge','dpm++2m_sde','dpm++2m_sde_bt','lms')){[void]$optSampler.Items.Add($s)}
-        $optSampler.SelectedItem=[string]$script:Settings.SamplingMethod; if($optSampler.SelectedIndex -lt 0){$optSampler.SelectedIndex=0}; $g.Controls.Add($optSampler)
+        foreach($s in @('Default (euler)','euler','euler_a','heun','dpm2','dpm++2s_a','dpm++2m','dpm++2mv2','ipndm','ipndm_v','lcm','ddim_trailing','tcd','res_multistep','res_2s','er_sde','euler_cfg_pp','euler_a_cfg_pp','euler_ge','dpm++2m_sde','dpm++2m_sde_bt','lms')){[void]$optSampler.Items.Add($s)}
+        $storedSampler=[string]$script:Settings.SamplingMethod; if($storedSampler -eq 'Default (model)'){$storedSampler='Default (euler)'}
+        $optSampler.SelectedItem=$storedSampler; if($optSampler.SelectedIndex -lt 0){$optSampler.SelectedIndex=0}; $g.Controls.Add($optSampler)
         Add-Label $g 'Scheduler' 280 170 100 | Out-Null
         $optSched=New-Object System.Windows.Forms.ComboBox; $optSched.DropDownStyle='DropDownList'; $optSched.Location=New-Object System.Drawing.Point(280,192); $optSched.Size=New-Object System.Drawing.Size(250,26); $optSched.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSched.ForeColor=$cText
-        foreach($s in @('Default (model)','discrete','karras','exponential','ays','gits','sgm_uniform','simple','smoothstep','kl_optimal','lcm','bong_tangent','ltx2','logit_normal','flux2','flux','beta','llada_image')){[void]$optSched.Items.Add($s)}
-        $optSched.SelectedItem=[string]$script:Settings.Scheduler; if($optSched.SelectedIndex -lt 0){$optSched.SelectedIndex=0}; $g.Controls.Add($optSched)
+        foreach($s in @('Default (flux schedule)','discrete','karras','exponential','ays','gits','sgm_uniform','simple','smoothstep','kl_optimal','lcm','bong_tangent','ltx2','logit_normal','flux2','flux','beta','llada_image')){[void]$optSched.Items.Add($s)}
+        $storedSched=[string]$script:Settings.Scheduler; if($storedSched -eq 'Default (model)'){$storedSched='Default (flux schedule)'}
+        $optSched.SelectedItem=$storedSched; if($optSched.SelectedIndex -lt 0){$optSched.SelectedIndex=0}; $g.Controls.Add($optSched)
         # Plain-language descriptions: shown inline below each dropdown and on
         # hover, updated as the user browses the lists.
         $samplerDescriptions=@{
-          'Default (model)'="Uses the engine's default for this model: euler. Recommended."
+          'Default (euler)'="Uses the engine's default for this model: euler. Recommended."
           'euler'='Simple, reliable all-rounder; good at any step count.'
           'euler_a'='Ancestral euler: adds randomness each step - more variety, but the same seed can give slightly different images.'
           'heun'='More accurate per step, but roughly twice the work per step.'
@@ -792,7 +794,7 @@ try {
           'lms'='Linear multistep: classic, conservative solver.'
         }
         $schedulerDescriptions=@{
-          'Default (model)'="Uses the engine's default for this model: a Flux-family sigma schedule, chosen automatically. Recommended."
+          'Default (flux schedule)'="Uses the engine's default for this model: a Flux-family sigma schedule, chosen automatically. Recommended."
           'discrete'='Classic discrete sigma schedule (the traditional default).'
           'karras'='Karras schedule: more steps on fine detail near the end; often sharper texture.'
           'exponential'='Exponential sigma spacing: smooth, even denoising.'
@@ -823,14 +825,16 @@ try {
         $impStrengthBox=Add-TextBox $g ([string]$script:Settings.ImproveStrength) 12 314 100
         $impStrengthHint=New-Object System.Windows.Forms.Label; $impStrengthHint.Text='How strongly an image is re-rendered when improving it. 0.45 keeps the look; 0.6 refreshes detail; 0.8 re-renders strongly.'; $impStrengthHint.Location=New-Object System.Drawing.Point(120,317); $impStrengthHint.Size=New-Object System.Drawing.Size(412,46); $impStrengthHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($impStrengthHint)
         $dlgTip.SetToolTip($impStrengthBox,'Improvement strength: how freely the image is re-rendered when improving. Low keeps it mostly as it is; high repaints more. Fast previews automatically use at least 0.5-0.74 regardless of this setting.')
-        $note=New-Object System.Windows.Forms.Label; $note.Text="'Default (model)' uses the engine's own choice - recommended unless you want to experiment. Quick improve reuses the image's own settings; 'Improve using the settings in the main window' applies the values you see now."; $note.Location=New-Object System.Drawing.Point(12,366); $note.Size=New-Object System.Drawing.Size(520,34); $note.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($note)
+        $note=New-Object System.Windows.Forms.Label; $note.Text="'Default (euler)' and 'Default (flux schedule)' use the engine's own choice - recommended unless you want to experiment. Quick improve reuses the image's own settings; 'Improve using the settings in the main window' applies the values you see now."; $note.Location=New-Object System.Drawing.Point(12,366); $note.Size=New-Object System.Drawing.Size(520,34); $note.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($note)
         $negOk=Add-Button $g 'Save' 350 404 80 30
         $negCancel=Add-Button $g 'Cancel' 440 404 90 30
         $negOk.Add_Click({
             $impCheck=0.0
             $script:Settings.NegativePrompt=($box.Text -replace "(\r?\n)+",' ').Trim()
-            $script:Settings.SamplingMethod=[string]$optSampler.SelectedItem
-            $script:Settings.Scheduler=[string]$optSched.SelectedItem
+            $saveSampler=[string]$optSampler.SelectedItem; if($saveSampler -eq 'Default (euler)'){$saveSampler='Default (model)'}
+            $saveSched=[string]$optSched.SelectedItem; if($saveSched -eq 'Default (flux schedule)'){$saveSched='Default (model)'}
+            $script:Settings.SamplingMethod=$saveSampler
+            $script:Settings.Scheduler=$saveSched
             if(-not (ConvertTo-MossDouble $impStrengthBox.Text ([ref]$impCheck)) -or $impCheck -lt 0.05 -or $impCheck -gt 0.95){[System.Windows.Forms.MessageBox]::Show('Improve strength must be between 0.05 and 0.95 (use a dot or a comma for decimals, e.g. 0.6 or 0,6).','Invalid strength')|Out-Null;return}
             $script:Settings.ImproveStrength=ConvertFrom-MossDouble $impCheck
             $negState.Text=if($script:Settings.NegativePrompt){('negative prompt: set ('+$script:Settings.NegativePrompt.Length+' chars)')}else{'negative prompt: not set'}
