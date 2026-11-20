@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.58'
+$script:AppVersion = '0.1.59'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -2244,19 +2244,43 @@ try {
         $imageElapsed = 0.0
         if ($st.ImageStartedAt) { $imageElapsed = [Math]::Max(0, ((Get-Date) - $st.ImageStartedAt).TotalSeconds) }
         $engineProgress = $null
-        $matches = [regex]::Matches($combined, '(?im)\b(\d{1,3})\s*%')
-        if ($matches.Count -gt 0) { $engineProgress = [Math]::Max(0, [Math]::Min(100, [int]$matches[$matches.Count - 1].Groups[1].Value)) }
+        $st.StepNum = 0; $st.StepDen = 0
+        # Only look at output of the image that is rendering right now: older
+        # lines of a batch keep their final 'N/N' bar and would fake 100%.
+        $progressWindow = $combined
+        $lastImgIdx = $combined.LastIndexOf('generating image:')
+        if ($lastImgIdx -ge 0) { $progressWindow = $combined.Substring($lastImgIdx) }
+        # PRIMARY: the engine's sampling progress is a console bar, printed
+        # carriage-return separated: '  |====>  | 1/4 - 1.37s/it'. It shows NO
+        # percent sign and NO word 'steps' - the old regexes could never match
+        # it, so the bar walked as marquee, % stayed 0 and ETA never computed.
+        # Only bars ending in it/s or s/it are sampling steps - model-load and
+        # VAE-decode bars use the same N/M shape but GB/s / MB/s units.
+        $matches = [regex]::Matches($progressWindow, '(?im)\|\s*(\d{1,5})\s*/\s*(\d{1,5})\s*-\s*[^|\r\n]*?(it/s|s/it)')
+        if ($matches.Count -gt 0) {
+            $last = $matches[$matches.Count - 1]
+            $numerator = [double]$last.Groups[1].Value; $denominator = [double]$last.Groups[2].Value
+            if ($denominator -gt 0) { $engineProgress = [Math]::Max(0, [Math]::Min(100, [int](($numerator * 100) / $denominator))) }
+            # Keep the raw step counter for the status line ('step 17/50').
+            $st.StepNum = [int]$numerator; $st.StepDen = [int]$denominator
+        }
         if ($null -eq $engineProgress) {
-            $matches = [regex]::Matches($combined, '(?im)(?:\bstep\s*[:#]?\s*(\d+)\s*/\s*(\d+)\b|\b(\d+)\s*/\s*(\d+)\s*steps?\b)')
+            # Textual step counters ('step 17/50', '17/50 steps') from other
+            # engine builds that print them.
+            $matches = [regex]::Matches($progressWindow, '(?im)(?:\bstep\s*[:#]?\s*(\d+)\s*/\s*(\d+)\b|\b(\d+)\s*/\s*(\d+)\s*steps?\b)')
             if ($matches.Count -gt 0) {
                 $last = $matches[$matches.Count - 1]
                 if ($last.Groups[1].Success) { $numerator = [double]$last.Groups[1].Value; $denominator = [double]$last.Groups[2].Value }
                 else { $numerator = [double]$last.Groups[3].Value; $denominator = [double]$last.Groups[4].Value }
                 if ($denominator -gt 0) { $engineProgress = [Math]::Max(0, [Math]::Min(100, [int](($numerator * 100) / $denominator))) }
-                # Keep the raw step counter for the status line ('step 17/50').
                 $st.StepNum = [int]$numerator; $st.StepDen = [int]$denominator
             }
-        } else { $st.StepNum = 0; $st.StepDen = 0 }
+        }
+        if ($null -eq $engineProgress) {
+            # Percent readouts as the last resort.
+            $matches = [regex]::Matches($progressWindow, '(?im)\b(\d{1,3})\s*%')
+            if ($matches.Count -gt 0) { $engineProgress = [Math]::Max(0, [Math]::Min(100, [int]$matches[$matches.Count - 1].Groups[1].Value)) }
+        }
         if ($null -ne $engineProgress) { $st.ImageProgress = [int]$engineProgress }
         $job = $st.Job
         $currentImage = [Math]::Max(1, [int]$st.CurrentImageIndex)
