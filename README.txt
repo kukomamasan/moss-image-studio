@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.47)
+MOSS Image Studio - portable build (v0.1.49)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -119,6 +119,33 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.49
+----------------------
+- 'Improve this image' now opens a pick-your-quality dialog: the target
+  size defaults to the image's own size with Same / 2x / 4x buttons,
+  steps and CFG are prefilled from the main window and stay editable,
+  and the seed is prefilled with the image's own seed (change it to
+  experiment). The composition and seed always come from the image, and
+  the result is saved as a NEW file - the original is never modified.
+- Fixed: maximizing the window hid the Generated Files box, its title
+  and the generation log. One layout is now used for all window states,
+  so the file list stays available when maximized.
+
+What is new in v0.1.48
+----------------------
+- The right-click menu on a generated image was reordered and clarified:
+  'Improve using the settings in the main window...' is now the FIRST
+  item. The re-render item was renamed to 'Re-render with this image's
+  OWN seed and size (ignores the main window settings)' - it previously
+  sat first and sounded like the way to make a full-quality version of
+  the image, but it deliberately ignores the main-window settings and
+  re-renders with the image's own seed, so different settings in the
+  main window had no effect on it.
+- Re-rendering an upscaled fast draft now warns before starting: the
+  same seed on a full-size canvas is different noise, so the picture
+  will NOT look like the draft. The warning points at the Improve
+  action, which keeps the composition. Choosing 'No' cancels.
 
 What is new in v0.1.47
 ----------------------
