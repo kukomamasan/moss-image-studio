@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.43)
+MOSS Image Studio - portable build (v0.1.44)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -120,8 +120,19 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
-What is new in v0.1.43
+What is new in v0.1.44
 ----------------------
+- Engine updater: when everything is already up to date, pressing
+  'Download and install...' now asks for a deliberate confirmation
+  first (showing the download size) instead of silently re-downloading
+  the same files - no more wasted time and bandwidth by accident.
+  Model updates and extra engine variants are unaffected.
+- Faster cleanup in Generated Files: the list is multi-select now
+  (Ctrl+click or Shift+click), and the right-click menu has 'Delete
+  selected file(s)...' and 'Delete ALL files...' - one confirmation
+  shows the count and how much disk space is freed, then everything
+  (images + sidecars) is deleted in one go. No per-file prompts.
+
 - Fixed: the history code dialog no longer pins itself above ALL windows
   (Topmost removed) - it stays above MOSS where it belongs, but other
   programs can take focus normally while it waits. It still grabs the
@@ -458,6 +469,8 @@ Interface
 - MOSS is resizable; resizing gives extra vertical space to the image preview;
   maximizing hides the file list and log until the window is restored.
 - Designed for Windows PowerShell 5.1. No installation is required.
+
+
 
 
 
