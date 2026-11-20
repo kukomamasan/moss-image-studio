@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.22'
+$script:AppVersion = '0.1.23'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -838,8 +838,8 @@ try {
     $matched=-1; for($ri=0;$ri -lt $resMap.Count;$ri++){if([int]$script:Settings.Width -eq $resMap[$ri][0] -and [int]$script:Settings.Height -eq $resMap[$ri][1]){$matched=$ri;break}}; if($matched -ge 0){$res.SelectedIndex=$matched}else{$res.SelectedIndex=15}
     $res.Add_SelectedIndexChanged({ if($res.SelectedIndex -ge 0 -and $res.SelectedIndex -lt $resMap.Count){$wBox.Text=[string]$resMap[$res.SelectedIndex][0];$hBox.Text=[string]$resMap[$res.SelectedIndex][1]} })
     Add-Label $left 'Steps' 18 344 70 | Out-Null; $steps=Add-TextBox $left ([string]$script:Settings.Steps) 18 367 75
-    Add-Label $left 'CFG scale' 110 344 90 | Out-Null; $cfg=Add-TextBox $left ([string]$script:Settings.CfgScale) 110 367 75
-    $cfgHelp=Add-Button $left '?' 185 341 20 22
+    Add-Label $left 'CFG scale' 110 344 90 | Out-Null; $cfg=Add-TextBox $left ([string]$script:Settings.CfgScale) 110 367 62
+    $cfgHelp=Add-Button $left '?' 174 367 20 26
     $cfgHelp.Add_Click({
         [System.Windows.Forms.MessageBox]::Show('CFG scale (Classifier-Free Guidance) controls how strictly the image follows your prompt.`r`n`r`n- Low (1-4): more artistic freedom, softer prompt adherence. This model is tuned for this range - the default 3 suits it well.`r`n- Medium (5-10): stronger prompt following; colors and contrast grow.`r`n- High (15-30): forces the prompt hard - often causes burned, oversaturated or distorted images.`r`n`r`nRule of thumb: raise it only if the image ignores parts of your prompt; lower it if images look overcooked.','What is CFG scale?',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
     })
@@ -940,7 +940,8 @@ try {
     $tip.SetToolTip($wBox,'Image width in pixels (64 to 8192).')
     $tip.SetToolTip($hBox,'Image height in pixels (64 to 8192).')
     $tip.SetToolTip($steps,'More steps = more refined detail and slower rendering. 25-50 is a good range; this model is tuned around 50.')
-    $tip.SetToolTip($cfg,'How strictly the image follows the prompt. Click the ? button next to it for details.')
+    $tip.SetToolTip($cfg,'How strictly the image follows the prompt: low = more artistic freedom, high = burned or distorted images. This model is tuned for about 3. Click the ? button for details.')
+    $tip.SetToolTip($cfgHelp,'Explains what CFG scale does: how strictly the image follows your prompt.')
     $tip.SetToolTip($count,'How many images to render in one batch. No hard limit - very large batches ask first.')
     $tip.SetToolTip($seed,'Same seed + same prompt = the same image. -1 picks a random seed each run.')
     $tip.SetToolTip($out,'Where finished images are saved.')

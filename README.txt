@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.22)
+MOSS Image Studio - portable build (v0.1.23)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,15 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.23
+----------------------
+- Fixed: the small "?" button next to CFG scale was misplaced (it overlapped
+  the Images column and floated above the label row). It now sits neatly
+  inline with the CFG scale box, and its tooltip explains what CFG does.
+  The tooltip on the CFG scale box itself now contains the real explanation
+  (low = more artistic freedom, high = burned or distorted images, the
+  model is tuned for about 3) instead of only pointing to the button.
 
 What is new in v0.1.22
 ----------------------
