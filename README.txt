@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.20)
+MOSS Image Studio - portable build (v0.1.21)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -114,6 +114,14 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.21
+----------------------
+- Fixed: second startup crash (.NET dialog about 'System.Void'). A PowerShell
+  5.1 compiler bug was triggered by one line in the history unlock code;
+  that single line made the whole function fail to compile, so MOSS crashed
+  the moment the main window appeared. The line is fixed and the pattern was
+  audited out of the entire script.
 
 What is new in v0.1.20
 ----------------------
