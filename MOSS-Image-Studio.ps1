@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.59'
+$script:AppVersion = '0.1.60'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -2065,10 +2065,9 @@ try {
         Timer = $null
         Job = $null
         Results = $null
-        StdOut = $null
-        StdErr = $null
-        OutEvent = $null
-        ErrEvent = $null
+        Capture = $null
+        CaptureRunner = $null
+        CaptureAsync = $null
         CancelRequested = $false
         CurrentFile = $null
         CurrentImageIndex = 0
@@ -2110,13 +2109,12 @@ try {
             try { $script:GenState.Process.Dispose() } catch {}
             $script:GenState.Process = $null
         }
-        if ($script:GenState.OutEvent) {
-            try { Unregister-Event -SourceIdentifier $script:GenState.OutEvent.Name -ErrorAction SilentlyContinue } catch {}
-            $script:GenState.OutEvent = $null
-        }
-        if ($script:GenState.ErrEvent) {
-            try { Unregister-Event -SourceIdentifier $script:GenState.ErrEvent.Name -ErrorAction SilentlyContinue } catch {}
-            $script:GenState.ErrEvent = $null
+        if ($script:GenState.CaptureRunner) {
+            # The capture thread ends on its own once the pipes close (engine
+            # exit or kill); Stop() just cuts it loose if it is stuck.
+            try { $script:GenState.CaptureRunner.Stop() } catch {}
+            $script:GenState.CaptureRunner = $null
+            $script:GenState.CaptureAsync = $null
         }
         $script:GenState.IsRunning = $false
         $script:ActiveProcess = $null
@@ -2222,9 +2220,10 @@ try {
     function Update-MossLiveProgress {
         $st = $script:GenState
         if (-not $st.IsRunning -or $null -eq $st.Process -or $st.Process.HasExited) { return }
+        if ($null -eq $st.Capture) { return }
         $elapsed = 0.0
         if ($st.JobStartedAt) { $elapsed = [Math]::Max(0, ((Get-Date) - $st.JobStartedAt).TotalSeconds) }
-        $combined = ([string]$st.StdOut.ToString()) + "`n" + ([string]$st.StdErr.ToString())
+        $combined = ([string]$st.Capture.Out) + "`n" + ([string]$st.Capture.Err)
         # The whole batch runs in one engine process. Track which image of the
         # batch is currently rendering from the engine's own progress lines.
         $batchMatches = [regex]::Matches($combined, '(?i)generating image:\s*(\d+)\s*/\s*(\d+)\s*-\s*seed\s*(-?\d+)')
@@ -2427,27 +2426,42 @@ try {
         $proc.StartInfo = $psi
         $proc.EnableRaisingEvents = $false
 
-        $st.StdOut = New-Object System.Text.StringBuilder
-        $st.StdErr = New-Object System.Text.StringBuilder
-
-        $outAction = {
-            if ($null -ne $EventArgs.Data -and $EventArgs.Data.Length -gt 0) {
-                [void]$script:GenState.StdOut.AppendLine($EventArgs.Data)
-            }
+        # Engine output capture on a BACKGROUND RUNSPACE THREAD: PowerShell's
+        # Register-ObjectEvent actions NEVER fire while the WinForms message
+        # loop is running (the PS event queue is not pumped), so the old
+        # event-based capture delivered NOTHING - live progress, %, ETA and
+        # even the finished-run log all saw empty output for the whole life of
+        # this feature. A dedicated thread blocks in ReadLine() and appends
+        # every line to a synchronized hashtable that the timer tick reads.
+        $st.Capture = [hashtable]::Synchronized(@{ Out = ''; Err = '' })
+        $captureScript = {
+            param($p, $c)
+            try {
+                while ($true) {
+                    $line = $p.StandardOutput.ReadLine()
+                    if ($null -eq $line) { break }
+                    $c.Out = $c.Out + $line + "`n"
+                }
+            } catch {}
+            try {
+                while ($true) {
+                    $line = $p.StandardError.ReadLine()
+                    if ($null -eq $line) { break }
+                    $c.Err = $c.Err + $line + "`n"
+                }
+            } catch {}
         }
-        $errAction = {
-            if ($null -ne $EventArgs.Data -and $EventArgs.Data.Length -gt 0) {
-                [void]$script:GenState.StdErr.AppendLine($EventArgs.Data)
-            }
-        }
-
-        $st.OutEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $outAction
-        $st.ErrEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action $errAction
+        $st.CaptureRunner = $null
+        $st.CaptureAsync = $null
 
         try {
             [void]$proc.Start()
-            $proc.BeginOutputReadLine()
-            $proc.BeginErrorReadLine()
+            # Start the capture thread AFTER the process exists (ReadLine
+            # needs live stream readers); output already buffered by the pipe
+            # is picked up by the thread, nothing is lost.
+            $st.CaptureRunner = [powershell]::Create()
+            [void]$st.CaptureRunner.AddScript($captureScript).AddArgument($proc).AddArgument($st.Capture)
+            $st.CaptureAsync = $st.CaptureRunner.BeginInvoke()
             $st.Process = $proc
             $script:ActiveProcess = $proc
             $st.ImageStartedAt = Get-Date
@@ -2502,8 +2516,11 @@ try {
         $job = $st.Job
         if ($st.ImageStartedAt -and [int]$st.CurrentImageIndex -gt 0) { [void]$st.ImageDurations.Add([Math]::Max(0.1, ((Get-Date) - $st.ImageStartedAt).TotalSeconds)) }
 
-        $stdout = [string]$st.StdOut.ToString()
-        $stderr = [string]$st.StdErr.ToString()
+        # Let the capture thread finish draining (pipes close at exit, so
+        # ReadLine returns $null immediately) before reading the final output.
+        try { if ($st.CaptureAsync -and -not $st.CaptureAsync.IsCompleted) { [void]$st.CaptureRunner.EndInvoke($st.CaptureAsync) } } catch {}
+        $stdout = [string]$st.Capture.Out
+        $stderr = [string]$st.Capture.Err
         # Engines sometimes echo their input. Keep prompt text out of logs and diagnostic reports.
         if (-not [string]::IsNullOrEmpty([string]$job.Prompt)) {
             $stdout = $stdout.Replace([string]$job.Prompt, '[prompt redacted]')
@@ -2517,17 +2534,12 @@ try {
         }
 
         # Drain remaining data
-        try { $st.Process.CancelOutputRead() } catch {}
-        try { $st.Process.CancelErrorRead() } catch {}
-
-        if ($st.OutEvent) {
-            try { Unregister-Event -SourceIdentifier $st.OutEvent.Name -ErrorAction SilentlyContinue } catch {}
-            $st.OutEvent = $null
+        if ($st.CaptureRunner) {
+            try { $st.CaptureRunner.Stop() } catch {}
+            $st.CaptureRunner = $null
+            $st.CaptureAsync = $null
         }
-        if ($st.ErrEvent) {
-            try { Unregister-Event -SourceIdentifier $st.ErrEvent.Name -ErrorAction SilentlyContinue } catch {}
-            $st.ErrEvent = $null
-        }
+        $st.Capture = $null
 
         try { $st.Process.Dispose() } catch {}
         $st.Process = $null
@@ -2623,9 +2635,22 @@ try {
             $log.AppendText("`r`nOne or more images failed. Engine output above; a technical report was saved to the logs folder.")
             # Most common silent failure: the engine dies without any output at
             # very large render sizes (out of GPU/RAM). Give plain guidance.
-            if ($exitCode -ne 0 -and -not $stdout.Trim() -and -not $stderr.Trim()) {
+            # Output is now REALLY captured (background-thread reader). A
+            # memory crash is not silent any more - it leaves the whole load
+            # log behind. 'Silent death' now means: no [E] error line anywhere
+            # in the output (the engine prints [E] for every diagnosed
+            # failure), or the last [E] line itself points at memory.
+            $engineErrorText = ''
+            $errMatches = [regex]::Matches(($stdout + "`n" + $stderr), '(?m)^\[E\][^\r\n]*')
+            $hasExplicitError = $errMatches.Count -gt 0
+            if ($hasExplicitError) { $engineErrorText = $errMatches[$errMatches.Count - 1].Value.Trim() }
+            $memoryDeath = -not $hasExplicitError
+            if ($hasExplicitError -and $engineErrorText -match 'memory|allocat|out of mem|OOM') { $memoryDeath = $true }
+            if ($exitCode -ne 0 -and $memoryDeath) {
                 $mp = [Math]::Round(([double]$job.Width * [double]$job.Height / 1000000.0), 1)
-                $oomHint = ("`r`nHint: the engine stopped without any message. At {0} x {1} ({2} MP, {3} steps) the most common cause is running out of GPU or system memory. Try a smaller size, fewer steps, or a fast speed mode (which renders small and enlarges)." -f $job.Width, $job.Height, $mp, $job.Steps)
+                $oomHint = "`r`nHint: the engine stopped without finishing"
+                if ($engineErrorText) { $oomHint += (" - its last error: {0}" -f $engineErrorText) } else { $oomHint += ' without any error message' }
+                $oomHint += (". At {0} x {1} ({2} MP, {3} steps) the most common cause is running out of GPU or system memory. Try a smaller size, fewer steps, or a fast speed mode (which renders small and enlarges)." -f $job.Width, $job.Height, $mp, $job.Steps)
                 # AUTO-RETRY for improves: an img2img job that dies instantly
                 # with EMPTY output is almost always out of GPU/system memory
                 # at the render size. Retry the SAME improvement with the
