@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.15)
+MOSS Image Studio - portable build (v0.1.16)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -38,20 +38,42 @@ Image generation
   noticeably faster than restarting the engine for each image. Seeds increment
   automatically (base seed, base+1, ...) exactly as before.
 - Render speed selector (next to the image settings): Exact (native render),
-  or faster drafts at roughly 2x / 3x / 5x / 7x speed. The faster settings
-  render at a reduced size, upscale in latent space and refine briefly at the
-  chosen size. Measured on an RTX 3080 Ti at 2K portrait, 50 steps: Exact
-  about 4 minutes, ~3x about 90 seconds, ~7x about 34 seconds while the
-  picture stays clearly recognizable. ~7x is the maximum reasonable speed;
-  faster refine passes lose recognizability. Multipliers are approximate and
-  vary with size and step count. No extra model files are needed and the
-  feature works the same on NVIDIA, AMD, Intel and CPU builds.
+  or faster modes that render at a reduced size with the FULL step count and
+  then upscale the finished image in pixel space (high-quality bicubic).
+  No second sampling pass runs, so results are faithful - possibly grainy or
+  soft at high speeds, but never distorted. Measured on an RTX 3080 Ti at
+  2K portrait, 50 steps: Exact about 4 minutes; ~4x (upscale from 50%) about
+  1 minute; Fastest (upscale from the smallest render, 256-pixel side) about
+  15 seconds. 'Fastest' and '~8x' are draft quality: good enough to see what
+  the picture is; use Exact when detail matters. Multipliers are approximate
+  and vary with size and step count. Works the same on NVIDIA, AMD, Intel and
+  CPU builds.
 - Weight placement (GPU, then RAM, then disk as needed) is decided by the
   engine's built-in auto-fit system, which works the same way for NVIDIA, AMD,
   Intel and CPU builds. MOSS no longer forces a CPU-offload mode itself.
 - Cancel stops the active engine process and its child processes, then reports
   that generation was cancelled.
-- Images are saved under outputs\admin\ by default (configurable in the app).
+- Images are saved under outputs\ by default (configurable in the app).
+  Installs that still point at the old outputs\admin default are moved to
+  outputs\ automatically; folders you chose yourself are never changed.
+
+Native refinement of generated files (right-click)
+---------------------------------------------------
+- In the "Generated files" list, right-click any image to refine it natively:
+  MOSS re-renders exactly that picture (same seed and prompt, read from the
+  image's sidecar) at full quality using image-to-image - the composition
+  (same apple, same table) stays, the detail becomes genuinely native.
+- "Refine natively (same size)" keeps the image's size; "Refine natively
+  (2x bigger)" doubles it (large sizes ask for confirmation first).
+- The strength (0.45) keeps most of the composition while replacing the
+  low-resolution detail; the full step count applies.
+- Refined files are easy to spot in the output folder: ..._hq_01.png for
+  same-size refinement, ..._hq2x_01.png for the 2x version.
+- A typical workflow: render a fast preview batch with the speed selector,
+  pick the previews you like, right-click each winner and refine it natively
+  while you look at something else.
+- If you know the prompt-history code, MOSS reuses the exact prompt of the
+  refined image; otherwise it uses the text currently in the prompt box.
 
 Hardware and setup
 ------------------
