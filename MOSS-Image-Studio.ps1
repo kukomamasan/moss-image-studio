@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.65'
+$script:AppVersion = '0.1.66'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -1561,7 +1561,7 @@ function Show-GeneratorWindow {
         # will be in practice.
         try {
             $gpusAuto = @(Get-GpuInventory | Where-Object { -not $_.IsVirtual -and $_.Vendor -ne 'Unknown' })
-            if ($gpusAuto.Count -gt 0) { $gpuSubtitle = 'GPU: automatic (' + [string]$gpusAuto[0].Name + ')' }
+            if ($gpusAuto.Count -gt 0) { $gpuSubtitle = 'GPU: ' + [string]$gpusAuto[0].Name }
         } catch {}
     }
     $subt=New-Object System.Windows.Forms.Label; $subt.Text="LOCAL IMAGE GENERATION  -  $gpuSubtitle"; $subt.ForeColor=$cMuted; $subt.AutoSize=$true; $subt.Location=New-Object System.Drawing.Point(23,42); $head.Controls.Add($subt)
