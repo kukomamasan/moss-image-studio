@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.46)
+MOSS Image Studio - portable build (v0.1.47)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -119,6 +119,17 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.47
+----------------------
+- Fixed: the output folder could silently be saved as a wrong absolute
+  path when MOSS was started from a working directory other than its
+  own folder (for example from a terminal in another folder). Relative
+  paths such as 'outputs' are now always anchored to the MOSS folder
+  before they are normalized - they no longer depend on where MOSS was
+  started from. If a wrong absolute output folder was already saved in
+  your settings, open Options and set the folder again (or restore the
+  default 'outputs'); your images are not affected by the fix itself.
 
 What is new in v0.1.46
 ----------------------
