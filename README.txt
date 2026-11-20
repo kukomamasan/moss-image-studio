@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.12)
+MOSS Image Studio - portable build (v0.1.13)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
