@@ -5,7 +5,7 @@ param([switch]$SetupOnly,[switch]$ReturnToGenerator)
 
 $ErrorActionPreference = 'Stop'
 $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$script:AppVersion = '0.1.14'
+$script:AppVersion = '0.1.15'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -695,9 +695,10 @@ try {
     $res.Add_SelectedIndexChanged({ if($res.SelectedIndex -ge 0 -and $res.SelectedIndex -lt $resMap.Count){$wBox.Text=[string]$resMap[$res.SelectedIndex][0];$hBox.Text=[string]$resMap[$res.SelectedIndex][1]} })
     Add-Label $left 'Steps' 18 354 70 | Out-Null; $steps=Add-TextBox $left ([string]$script:Settings.Steps) 18 377 75
     Add-Label $left 'CFG scale' 110 354 90 | Out-Null; $cfg=Add-TextBox $left ([string]$script:Settings.CfgScale) 110 377 75
-    Add-Label $left 'Images' 202 354 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDownList'; $count.Location=New-Object System.Drawing.Point(202,377); $count.Size=New-Object System.Drawing.Size(75,26); foreach($n in @(1,2,4,8)){[void]$count.Items.Add([string]$n)}; $count.SelectedItem=[string]$script:Settings.ImageCount; if($count.SelectedIndex -lt 0){$count.SelectedIndex=0}; $left.Controls.Add($count)
+    Add-Label $left 'Images' 202 354 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDown'; $count.Location=New-Object System.Drawing.Point(202,377); $count.Size=New-Object System.Drawing.Size(75,26); foreach($n in @(1,2,4,8,16,32,64,128,256,512,1000)){[void]$count.Items.Add([string]$n)}; $count.Text=[string]$script:Settings.ImageCount; $left.Controls.Add($count)
     Add-Label $left 'Seed (-1 = random)' 300 354 150 | Out-Null; $seed=Add-TextBox $left ([string]$script:Settings.Seed) 300 377 90
-    $performance=New-Object System.Windows.Forms.Label; $performance.Text='Performance: Automatic'; $performance.Location=New-Object System.Drawing.Point(410,379); $performance.Size=New-Object System.Drawing.Size(270,24); $performance.ForeColor=$cMuted; $left.Controls.Add($performance)
+    $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(410,377); $speedCombo.Size=New-Object System.Drawing.Size(270,24); $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (native render)','~2x faster (soft)','~3x faster (softer)','~5x faster (soft draft)','~7x faster (maximum, draft)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo)
+    $speedHint=New-Object System.Windows.Forms.Label; $speedHint.Text='Faster settings render small, then upscale and refine at the chosen size. Exact renders natively at full size and steps. ~7x is the maximum that keeps the picture recognizable; multipliers are approximate.'; $speedHint.Location=New-Object System.Drawing.Point(410,402); $speedHint.Size=New-Object System.Drawing.Size(270,30); $speedHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $left.Controls.Add($speedHint)
     Add-Label $left 'OUTPUT FOLDER' 18 414 190 | Out-Null
     $out=Add-TextBox $left ([string]$script:Settings.OutputPath) 18 439 540; $out.Anchor='Top,Left,Right'; $out.ReadOnly=$true; $outBrowse=Add-Button $left 'Browse...' 570 438 110; $outBrowse.Anchor='Top,Right'; $outBrowse.Enabled=$true
     $outBrowse.Add_Click({
@@ -1039,7 +1040,35 @@ try {
         $argsList.Add('-s'); $argsList.Add([string]$job.Seed)
         $argsList.Add('--batch-count'); $argsList.Add([string]$job.Count)
         $argsList.Add('--output-begin-idx'); $argsList.Add('1')
-        $argsList.Add('--conditioning-cache-size'); $argsList.Add([string][Math]::Max(1, [int]$job.Count))
+        $argsList.Add('--conditioning-cache-size'); $argsList.Add([string][Math]::Min([Math]::Max(1, [int]$job.Count), 32))
+        # Speed modes: render at a reduced size, upscale in latent space, then a
+        # short refine pass at the chosen size. Same engine feature for every
+        # backend (Latent upscaler needs no extra model file). 'Exact' renders
+        # natively at full size and steps.
+        $speedScale = 0.0; $speedRefineFraction = 0.0; $speedRefineMin = 3
+        switch ([string]$job.SpeedMode) {
+            '2x'  { $speedScale = 0.75; $speedRefineFraction = 0.15; $speedRefineMin = 4 }
+            '3x'  { $speedScale = 0.5;  $speedRefineFraction = 0.2;  $speedRefineMin = 5 }
+            '5x'  { $speedScale = 0.35; $speedRefineFraction = 0.12; $speedRefineMin = 4 }
+            '7x'  { $speedScale = 0.25; $speedRefineFraction = 0.0;  $speedRefineMin = 3 }
+        }
+        if ($speedScale -gt 0) {
+            $smallW = [int][Math]::Max(256, [Math]::Floor($job.Width * $speedScale))
+            $smallH = [int][Math]::Max(256, [Math]::Floor($job.Height * $speedScale))
+            if ($smallW -lt $job.Width -and $smallH -lt $job.Height) {
+                $refineSteps = [int][Math]::Max($speedRefineMin, [Math]::Ceiling($job.Steps * $speedRefineFraction))
+                $argsList.Add('-W'); $argsList.Add([string]$smallW)
+                $argsList.Add('-H'); $argsList.Add([string]$smallH)
+                $argsList.Add('--hires')
+                $argsList.Add('--hires-width'); $argsList.Add([string]$job.Width)
+                $argsList.Add('--hires-height'); $argsList.Add([string]$job.Height)
+                # Use the engine's default Latent upscaler: it upscales in latent
+                # space, avoiding a pixel-space VAE round-trip that can exceed the
+                # VRAM budget at 2K and larger targets.
+                $argsList.Add('--hires-steps'); $argsList.Add([string]$refineSteps)
+                $argsList.Add('--hires-denoising-strength'); $argsList.Add('0.7')
+            }
+        }
         $argsList.Add('-p'); $argsList.Add((Quote-ProcessArgument $job.Prompt))
         $argsList.Add('-o'); $argsList.Add((Quote-ProcessArgument $pattern))
 
@@ -1088,6 +1117,7 @@ try {
             $st.ImageProgress = 0
             $st.CurrentImageIndex = 0
             $status.Text = ("Rendering {0} image(s) in one run (base seed {1})..." -f $job.Count, $job.Seed)
+            if ($job.SpeedMode -ne 'Exact') { $status.Text = ("{0} mode: rendering {1} image(s) small, then refining at full size..." -f $job.SpeedMode, $job.Count) }
         } catch {
             $msg = "Failed to start engine: $($_.Exception.Message)"
             $log.AppendText("`r`n$msg")
@@ -1158,6 +1188,7 @@ try {
                         Width = $job.Width; Height = $job.Height
                         Steps = $job.Steps; CfgScale = $job.Cfg; Seed = $thisSeed
                         Backend = $job.Backend
+                        SpeedMode = [string]$job.SpeedMode
                         GeneratedAt = (Get-Date).ToString('o'); Engine = $job.Engine
                     }
                     if (-not $script:HistoryLocked -and $script:HistoryPassphrase) { $meta.PromptProtected = Protect-MossPayload ([string]$job.Prompt) $script:HistoryPassphrase }
@@ -1232,14 +1263,26 @@ try {
         $outPath=Get-AbsoluteAppPath $out.Text.Trim();if(-not $outPath){[System.Windows.Forms.MessageBox]::Show('Choose an output folder.','Output folder')|Out-Null;return};if(-not(Test-Path -LiteralPath $outPath)){New-Item -ItemType Directory -Path $outPath -Force|Out-Null}
         $wi=0;$he=0;if(-not [int]::TryParse($wBox.Text,[ref]$wi) -or -not [int]::TryParse($hBox.Text,[ref]$he) -or $wi -lt 64 -or $he -lt 64 -or $wi -gt 8192 -or $he -gt 8192){[System.Windows.Forms.MessageBox]::Show('Width and height must be between 64 and 8192 pixels.','Invalid dimensions')|Out-Null;return}
         $st=0;$cf=0.0;$sd=0;if(-not [int]::TryParse($steps.Text,[ref]$st) -or $st -lt 1 -or $st -gt 200){[System.Windows.Forms.MessageBox]::Show('Steps must be between 1 and 200.','Invalid steps')|Out-Null;return};if(-not [double]::TryParse($cfg.Text,[ref]$cf) -or $cf -le 0 -or $cf -gt 30){[System.Windows.Forms.MessageBox]::Show('CFG scale must be greater than 0 and no more than 30.','Invalid CFG')|Out-Null;return};if(-not [int]::TryParse($seed.Text,[ref]$sd) -or $sd -lt -1){[System.Windows.Forms.MessageBox]::Show('Seed must be -1 (random) or a non-negative integer.','Invalid seed')|Out-Null;return}
-        $n=[int]$count.SelectedItem; $baseSeed=$sd;if($baseSeed -eq -1){$baseSeed=Get-Random -Minimum 1 -Maximum 2147483000}
+        # Image count: any whole number >= 1 - no artificial cap. Practical
+        # limits (disk space, hours of runtime) are the user's choice, with a
+        # plain-language warning for very large batches.
+        $n=0; if(-not [int]::TryParse(([string]$count.Text).Trim(),[ref]$n) -or $n -lt 1){[System.Windows.Forms.MessageBox]::Show('Number of images must be a whole number of 1 or more.','Invalid image count')|Out-Null;return}
+        if($n -gt 200){
+            $hours=[Math]::Round($n*0.35/60,1)
+            $bigAnswer=[System.Windows.Forms.MessageBox]::Show(("You are about to render {0} images in one batch. This can run for many hours (rough estimate: {1} h) and needs disk space for {0} images. Cancel stops it at any time. Start now?" -f $n,$hours),'Large batch',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+            if($bigAnswer -ne [System.Windows.Forms.DialogResult]::Yes){return}
+        }
+        # Keep the random base seed low enough that base+count stays inside the
+        # engine's 32-bit seed range even for very large batches.
+        $baseSeed=$sd;if($baseSeed -eq -1){$baseSeed=Get-Random -Minimum 1 -Maximum ([Math]::Max(2, 2147483000 - [Math]::Min($n, 2000000000)))}
         if(($wi -ge 2560 -or $he -ge 2560) -and [System.Windows.Forms.MessageBox]::Show("You are about to render at $wi x $he directly. Large renders can use substantial VRAM and RAM and may take a long time. Continue?",'Large image warning',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne 'Yes'){return}
         $script:Settings.ImageStyle=[string]$style.SelectedItem;$script:Settings.EnginePath=Get-RelativeAppPath $enginePath;$script:Settings.DiffusionModelPath=Get-RelativeAppPath $paths[1];$script:Settings.LlmPath=Get-RelativeAppPath $paths[2];$script:Settings.VaePath=Get-RelativeAppPath $paths[3];$script:Settings.TokenizerPath=Get-RelativeAppPath $paths[4];$script:Settings.OutputPath=Get-RelativeAppPath $outPath;$script:Settings.Steps=$st;$script:Settings.CfgScale=$cf;$script:Settings.Width=$wi;$script:Settings.Height=$he;$script:Settings.ImageCount=$n;$script:Settings.Seed=$sd
         if (-not $script:HistoryLocked) { $hist=@($p)+@($history|Where-Object{$_ -ne $p});$history=@($hist|Select-Object -First 20);$script:Settings.PromptHistory=$history } else { $script:Settings.PromptHistory=@() };if(-not (Save-Settings)){[System.Windows.Forms.MessageBox]::Show('Set a password to save private prompt history. Generation was not started.','Password required')|Out-Null;return};if (-not $script:HistoryLocked) { if($historyPick.Items.Count -eq 0 -or [string]$historyPick.Items[0] -ne $p){$historyPick.Items.Insert(0,$p)};while($historyPick.Items.Count -gt 10){$historyPick.Items.RemoveAt($historyPick.Items.Count-1)} }
         $stylePrefix=switch([string]$style.SelectedItem){'Photorealistic'{'photorealistic, lifelike, realistic textures, natural lighting'}'Anime'{'anime style, expressive line art, cel shading'}'Digital illustration'{'polished digital illustration'}'Oil painting'{'oil painting, rich brush strokes'}'Watercolor'{'watercolor painting, soft pigment texture'}'3D render'{'high quality 3D render, detailed materials'}'Comic book'{'comic book art, inked outlines, bold colors'}'Cinematic'{'cinematic composition, dramatic lighting'}default{''}}
         $generationPrompt=if($stylePrefix){"$stylePrefix, $p"}else{$p}
         $gpuIndex=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIndex=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIndex=-1 } }
-        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Prompt=$generationPrompt;GpuIndex=$gpuIndex}
+        $speedMode=switch([string]$speedCombo.SelectedItem){'~2x faster (soft)'{'2x'}'~3x faster (softer)'{'3x'}'~5x faster (soft draft)'{'5x'}'~7x faster (maximum, draft)'{'7x'}default{'Exact'}}
+        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Prompt=$generationPrompt;GpuIndex=$gpuIndex;SpeedMode=$speedMode}
         $generate.Enabled=$false;$cancel.Enabled=$true;$log.Clear();$fileList.Items.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
     })
     $cancel.Add_Click({

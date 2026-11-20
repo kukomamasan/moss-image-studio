@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.14)
+MOSS Image Studio - portable build (v0.1.15)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -28,10 +28,24 @@ Image generation
   entire image batch, with an ETA when the engine reports step progress or
   enough images have completed. CPU offload is selected automatically only when
   detected GPU memory is too limited for the model.
+- Batch size has no cap: type any whole number of images (1 and up). Common
+  sizes are offered as presets (1 to 1000), and a plain-language warning with
+  a rough runtime estimate appears before very large batches. Cancel stops a
+  long batch at any time; Cancel or closing MOSS also stops the engine and
+  its child processes.
 - Multiple images are rendered in a single engine run: the model is loaded once
   and the prompt conditioning is reused for every image in the batch, which is
   noticeably faster than restarting the engine for each image. Seeds increment
   automatically (base seed, base+1, ...) exactly as before.
+- Render speed selector (next to the image settings): Exact (native render),
+  or faster drafts at roughly 2x / 3x / 5x / 7x speed. The faster settings
+  render at a reduced size, upscale in latent space and refine briefly at the
+  chosen size. Measured on an RTX 3080 Ti at 2K portrait, 50 steps: Exact
+  about 4 minutes, ~3x about 90 seconds, ~7x about 34 seconds while the
+  picture stays clearly recognizable. ~7x is the maximum reasonable speed;
+  faster refine passes lose recognizability. Multipliers are approximate and
+  vary with size and step count. No extra model files are needed and the
+  feature works the same on NVIDIA, AMD, Intel and CPU builds.
 - Weight placement (GPU, then RAM, then disk as needed) is decided by the
   engine's built-in auto-fit system, which works the same way for NVIDIA, AMD,
   Intel and CPU builds. MOSS no longer forces a CPU-offload mode itself.
