@@ -971,9 +971,9 @@ try {
     $miAll.Add_Click({ Start-MossRefineAll })
     $miDelete.Add_Click({ Remove-MossSelectedFile })
     $refineMenu.ShowItemToolTips=$true
-    $miSame.ToolTipText='Re-render this image at its current size with full detail - same seed and prompt, more detail.'
+    $miSame.ToolTipText='Re-render this image at its current size with full detail - same seed and prompt, more detail. Upscaled fast previews are re-rendered from scratch (not from the blurry preview pixels).'
     $miBig.ToolTipText='Re-render this image at double size: more resolution, about four times the rendering time.'
-    $miCustom.ToolTipText='Improve this image using the size, steps, CFG, seed and prompt currently shown in the main window.'
+    $miCustom.ToolTipText='Improve this image using the size, steps, CFG, seed and prompt currently shown in the main window. Upscaled fast previews are re-rendered from scratch.'
     $miAll.ToolTipText='Queue every generated image that still has quality headroom (soft previews, fewer steps, smaller than the current size).'
     $miDelete.ToolTipText='Delete this image and its sidecar from disk (asks first).'
     # Show ALL previously generated images at startup, not just this session's:
@@ -1590,6 +1590,18 @@ try {
         Start-MossBatchEngine
     }
 
+    function Test-MossFastPreview([string]$file) {
+        # A fast-mode preview is saved at its TARGET size after an in-place
+        # bicubic upscale (sidecar notes UpscaledFrom). The soft look is baked
+        # into the pixels, so image-to-image from this file inherits the blur.
+        # True when the file should be re-rendered from scratch instead.
+        $side=[System.IO.Path]::ChangeExtension($file,'.json')
+        if (Test-Path -LiteralPath $side -PathType Leaf) {
+            try { $sc = Get-Content -LiteralPath $side -Raw | ConvertFrom-Json; if ($sc.UpscaledFrom) { return $true }; if ($sc.SpeedMode -and [string]$sc.SpeedMode -ne 'Exact') { return $true } } catch {}
+        }
+        return $false
+    }
+
     function Get-MossImproveDefaults([string]$selFile,[double]$sizeFactor) {
         # Shared prefill for all improve paths: target size, seed, prompt
         # (decrypted only if the history code was entered), negative prompt,
@@ -1637,7 +1649,7 @@ try {
         if (($d.TW -ge 2560 -or $d.TH -ge 2560) -and [System.Windows.Forms.MessageBox]::Show(("Improving will render at {0} x {1}. Large renders use substantial VRAM/RAM and take a long time. Continue?" -f $d.TW,$d.TH),'Large image improvement',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne [System.Windows.Forms.DialogResult]::Yes){return}
         if ($d.Seed -lt 0) { $d.Seed = Get-Random -Minimum 1 -Maximum 2147483000 }
         $quickStrength=0.6; try { $t=[double]$script:Settings.ImproveStrength; if($t -ge 0.05 -and $t -le 0.95){ $quickStrength=$t } } catch {}
-        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$d.File; W=$d.TW; H=$d.TH; Seed=$d.Seed; Prompt=[string]$d.Prompt; NegativePrompt=[string]$d.NegativePrompt; SamplingMethod=$d.SamplingMethod; Scheduler=$d.Scheduler; Strength=$quickStrength; Steps=$null; Cfg=$null; Tag=$(if($sizeFactor -gt 1){'hq2x'}else{'hq'}) })
+        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$d.File; W=$d.TW; H=$d.TH; Seed=$d.Seed; Prompt=[string]$d.Prompt; NegativePrompt=[string]$d.NegativePrompt; SamplingMethod=$d.SamplingMethod; Scheduler=$d.Scheduler; Strength=$quickStrength; Steps=$null; Cfg=$null; Tag=$(if($sizeFactor -gt 1){'hq2x'}else{'hq'}); FreshRender=(Test-MossFastPreview $d.File) })
         $script:RefineTotal = $script:RefineQueue.Count
         Start-MossNextRefine
     }
@@ -1664,11 +1676,17 @@ try {
         $cStrength=0.6; try { $t=[double]$script:Settings.ImproveStrength; if($t -ge 0.05 -and $t -le 0.95){ $cStrength=$t } } catch {}
         $useSeed=$csd; if($useSeed -lt 0){ $useSeed=Get-Random -Minimum 1 -Maximum 2147483000 }
         if(($cw -ge 2560 -or $chh -ge 2560) -and [System.Windows.Forms.MessageBox]::Show(("Improving will render at {0} x {1}. Large renders use substantial VRAM/RAM and take a long time. Continue?" -f $cw,$chh),'Large image improvement',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne [System.Windows.Forms.DialogResult]::Yes){return}
-        $answer=[System.Windows.Forms.MessageBox]::Show(("Improving {0} using the settings currently in the main window:`r`n{1} x {2}, steps {3}, CFG {4}, seed {5}, strength {6}`r`n`r`nThe prompt is the text in the prompt box. Start?" -f [System.IO.Path]::GetFileName($selFile),$cw,$chh,$cst,$ccf,$useSeed,$cStrength),'Improve with current settings',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
+        $isPreview=Test-MossFastPreview $selFile
+        if($isPreview){
+            $settingsLine=("`r`n{0} x {1}, steps {2}, CFG {3}, seed {4}, fresh full-quality render (this is an upscaled fast preview, so image-to-image is skipped - it would inherit the blurry upscale). Same seed and prompt." -f $cw,$chh,$cst,$ccf,$useSeed)
+        }else{
+            $settingsLine=("`r`n{0} x {1}, steps {2}, CFG {3}, seed {4}, strength {5}" -f $cw,$chh,$cst,$ccf,$useSeed)
+        }
+        $answer=[System.Windows.Forms.MessageBox]::Show(("Improving {0} using the settings currently in the main window:{1}`r`n`r`nThe prompt is the text in the prompt box. Start?" -f [System.IO.Path]::GetFileName($selFile),$settingsLine),'Improve with current settings',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
         if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
         $useSampler=$null; if([string]$script:Settings.SamplingMethod -ne 'Default (model)'){ $useSampler=[string]$script:Settings.SamplingMethod }
         $useSched=$null; if([string]$script:Settings.Scheduler -ne 'Default (model)'){ $useSched=[string]$script:Settings.Scheduler }
-        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$cw; H=$chh; Seed=$useSeed; Prompt=$cPrompt; NegativePrompt=[string]$script:Settings.NegativePrompt; SamplingMethod=$useSampler; Scheduler=$useSched; Strength=$cStrength; Steps=$cst; Cfg=$ccf; Tag='hq' })
+        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$cw; H=$chh; Seed=$useSeed; Prompt=$cPrompt; NegativePrompt=[string]$script:Settings.NegativePrompt; SamplingMethod=$useSampler; Scheduler=$useSched; Strength=$cStrength; Steps=$cst; Cfg=$ccf; Tag='hq'; FreshRender=$isPreview })
         $script:RefineTotal = $script:RefineQueue.Count
         Start-MossNextRefine
     }
@@ -1721,7 +1739,7 @@ try {
                 }
             }
             if($d.Seed -lt 0){ $d.Seed=Get-Random -Minimum 1 -Maximum 2147483000 }
-            [void]$eligible.Add([pscustomobject]@{ File=[string]$f; W=$tw; H=$th; Seed=$d.Seed; Prompt=[string]$d.Prompt; NegativePrompt=[string]$d.NegativePrompt; SamplingMethod=$d.SamplingMethod; Scheduler=$d.Scheduler; Strength=$d.Strength; Steps=$null; Cfg=$null; Tag='hq'; Reason=$reason })
+            [void]$eligible.Add([pscustomobject]@{ File=[string]$f; W=$tw; H=$th; Seed=$d.Seed; Prompt=[string]$d.Prompt; NegativePrompt=[string]$d.NegativePrompt; SamplingMethod=$d.SamplingMethod; Scheduler=$d.Scheduler; Strength=$d.Strength; Steps=$null; Cfg=$null; Tag='hq'; Reason=$reason; FreshRender=($speedMode -ne 'Exact' -or $upscaled) })
         }
         $bulkStrength=0.6; try { $t=[double]$script:Settings.ImproveStrength; if($t -ge 0.05 -and $t -le 0.95){ $bulkStrength=$t } } catch {}
         if($eligible.Count -eq 0){
@@ -1787,9 +1805,15 @@ try {
             return
         }
         $gpuIdx=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIdx=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIdx=-1 } }
-        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps});Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode='Exact';InitImage=[string]$item.File;InitStrength=[double]$item.Strength;RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler}
-        $status.Text = ("Improving image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
-        $log.AppendText(("`r`nImproving: same seed {0}, same prompt, image-to-image from {1} (strength {2})" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $item.Strength))
+        $fresh=[bool]$item.FreshRender
+        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps});Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode='Exact';InitImage=$(if($fresh){$null}else{[string]$item.File});InitStrength=$(if($fresh){0.0}else{[double]$item.Strength});RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler}
+        if ($fresh) {
+            $status.Text = ("Re-rendering image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
+            $log.AppendText(("`r`nRe-rendering: seed {0}, same prompt, from scratch at full quality ({1} is an upscaled fast preview - image-to-image skipped so the result is not blurry)" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File)))
+        } else {
+            $status.Text = ("Improving image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
+            $log.AppendText(("`r`nImproving: same seed {0}, same prompt, image-to-image from {1} (strength {2})" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $item.Strength))
+        }
         Start-MossGeneration -Job $job -ForRefine
     }
 
