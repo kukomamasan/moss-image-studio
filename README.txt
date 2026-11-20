@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.49)
+MOSS Image Studio - portable build (v0.1.50)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -119,6 +119,16 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.50
+----------------------
+- If you continue WITHOUT the password (history code) at startup, the
+  prompt is now saved with the image anyway - PLAIN TEXT, not encrypted.
+  Improving such images works without entering the code (the prompt is
+  read from the image's sidecar). Your encrypted prompt history in
+  settings.json is untouched; only the small .json sidecar next to each
+  image carries the plain prompt. If you want prompts encrypted, enter
+  your code when MOSS asks.
 
 What is new in v0.1.49
 ----------------------

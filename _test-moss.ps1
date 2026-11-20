@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.49' ($src.Contains("AppVersion = '0.1.49'"))
+Test 'version is 0.1.50' ($src.Contains("AppVersion = '0.1.50'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -53,6 +53,8 @@ Test 'improve-with-settings falls back to sidecar prompt' (($src -match 'fall ba
 Test 'history code field focused on show + timer reinforcement' (($src -match 'Add_Shown\(\{ try \{ \$dialog\.Activate\(\) \} catch \{\}; \[void\]\$first\.Focus') -and ($src -match 'focusTimer\.Add_Tick') -and ($src -match '\[MossNativeWindow\]::SetForegroundWindow\(\$dialog\.Handle\)'))
 Test 'right-click menu is settings-driven' ($src.Contains('Improve this image (same seed and composition)...') -and $src.Contains("Re-render with this image''s OWN seed and size (ignores the main window settings)...") -and (-not ($src.Contains('Re-render from the same seed (fresh full quality)'))) -and (-not ($src.Contains('Improve this image (full quality)'))) -and (-not ($src.Contains('Start-MossRefineSelected'))))
 Test 'improve is the FIRST right-click item (before the re-render item)' ($src.IndexOf("miCustom=`$refineMenu.Items.Add('Improve this image (same seed and composition)...')") -lt $src.IndexOf('miFresh='))
+Test 'plain sidecar prompt saved even when history is locked (continue without password)' ($src.Contains('chose to continue WITHOUT the password at startup') -and $src.Contains('The encrypted history envelope in settings.json is') -and (-not ($src.Contains('} elseif (-not $script:HistoryLocked) {'))))
+Test 'readers accept plain sidecar prompts (improve works without the code)' ($src.Contains('if (-not ([string]$d.Prompt).Trim() -and $sc.Prompt)') -and $src.Contains('if(-not $cPrompt -and $sc.Prompt)') -and $src.Contains("Plain sidecar prompt (no code entered when the image was made)"))
 Test 'improve dialog: size picker with Same/2x/4x and image seed prefill' ($src.Contains('PICK-YOUR-QUALITY DIALOG') -and $src.Contains('Target size') -and $src.Contains('$sameBtn') -and $src.Contains('$twoBtn') -and $src.Contains('$fourBtn') -and $src.Contains('the image''s own seed - keeps the result aligned with it') -and $src.Contains('the original is never modified'))
 Test 'maximize keeps the generated files box visible (no hiding special case)' ((-not ($src.Contains('Maximized'))) -and $src.Contains('the file list and the log stay usable'))
 Test 'improve dialog shows source size and warns on aspect and oversize' ($src.Contains('source {0} x {1}') -and $src.Contains('the composition will be squashed or stretched') -and $src.Contains('rendered at HALF SIZE with all {1} steps'))

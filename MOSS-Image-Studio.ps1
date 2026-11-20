@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.49'
+$script:AppVersion = '0.1.50'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -2500,10 +2500,14 @@ try {
                         # sidecar (the guard refuses improves when not unlocked).
                         $meta.PromptProtected = Protect-MossPayload ([string]$job.Prompt) $script:HistoryPassphrase
                         if ($job.NegativePrompt) { $meta.NegativePromptProtected = Protect-MossPayload ([string]$job.NegativePrompt) $script:HistoryPassphrase }
-                    } elseif (-not $script:HistoryLocked) {
-                        # No code in use: store prompts PLAIN so improving always
-                        # works, even after a restart (user: never nag for a code,
-                        # never improve into a different picture).
+                    } else {
+                        # No code entered - either none in use, or the user
+                        # chose to continue WITHOUT the password at startup:
+                        # store prompts PLAIN so improving always works. The
+                        # user asked for exactly this: saving the prompt anyway,
+                        # unencrypted, when continuing without the password.
+                        # (The encrypted history envelope in settings.json is
+                        # untouched - only the sidecar next to the image.)
                         $meta.Prompt = [string]$job.Prompt
                         if ($job.NegativePrompt) { $meta.NegativePrompt = [string]$job.NegativePrompt }
                     }
@@ -2652,6 +2656,10 @@ try {
                     try { $p = Unprotect-MossPayload ([string]$sc.PromptProtected) $script:HistoryPassphrase; if ($p) { $d.Prompt = [string]$p } } catch {}
                     if ($sc.NegativePromptProtected) { try { $np = Unprotect-MossPayload ([string]$sc.NegativePromptProtected) $script:HistoryPassphrase; if ($null -ne $np) { $d.NegativePrompt = [string]$np } } catch {} }
                 }
+                # Plain sidecar prompt (no code in use, or the user continues
+                # without the password): readable without any code.
+                if (-not ([string]$d.Prompt).Trim() -and $sc.Prompt) { $d.Prompt = [string]$sc.Prompt }
+                if (-not [string]$d.NegativePrompt -and $sc.NegativePrompt) { $d.NegativePrompt = [string]$sc.NegativePrompt }
             } catch {}
         }
         if (-not $d.SamplingMethod -and [string]$script:Settings.SamplingMethod -ne 'Default (model)') { $d.SamplingMethod = [string]$script:Settings.SamplingMethod }
@@ -2723,6 +2731,8 @@ try {
                     if (-not $script:HistoryLocked -and $script:HistoryPassphrase -and $sc.PromptProtected) {
                         try { $dp = Unprotect-MossPayload ([string]$sc.PromptProtected) $script:HistoryPassphrase; if ($dp) { $cPrompt = ([string]$dp -replace "(\r?\n)+",' ').Trim(); $prompt.Text=[string]$dp } } catch {}
                     }
+                    # Plain sidecar prompt (no code entered): use it directly.
+                    if(-not $cPrompt -and $sc.Prompt){ $cPrompt = ([string]$sc.Prompt -replace "(\r?\n)+",' ').Trim(); $prompt.Text=[string]$sc.Prompt }
                 } catch {}
             }
         }
@@ -2947,6 +2957,9 @@ try {
                     } else {
                         $promptLockedNote='(encrypted - enter your history code in MOSS to see the prompt)'
                     }
+                } elseif ($sc.Prompt) {
+                    # Plain sidecar prompt (no code entered when the image was made).
+                    $prompt=[string]$sc.Prompt
                 } else {
                     $promptLockedNote='(not saved - no history code was active when this image was created)'
                 }
