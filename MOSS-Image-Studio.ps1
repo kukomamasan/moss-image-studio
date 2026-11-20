@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.63'
+$script:AppVersion = '0.1.64'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -2685,7 +2685,7 @@ try {
                     }
                 }
                 if ($retryMode) {
-                    [void]$script:RefineQueue.Insert(0,[pscustomobject]@{ File=[string]$job.InitImage; W=[int]$job.Width; H=[int]$job.Height; Seed=[long]$job.Seed; Prompt=[string]$job.Prompt; NegativePrompt=[string]$job.NegativePrompt; SamplingMethod=$job.SamplingMethod; Scheduler=$job.Scheduler; Strength=[double]$job.InitStrength; Steps=[int]$job.Steps; Cfg=[double]$job.Cfg; Tag='hq'; SrcW=[int]$job.SrcW; SrcH=[int]$job.SrcH; ForcedSpeed=$retryMode })
+                    [void]$script:RefineQueue.Insert(0,[pscustomobject]@{ File=[string]$job.InitImage; W=[int]$job.Width; H=[int]$job.Height; Seed=[long]$job.Seed; Prompt=[string]$job.Prompt; NegativePrompt=[string]$job.NegativePrompt; SamplingMethod=$job.SamplingMethod; Scheduler=$job.Scheduler; Strength=[double]$job.InitStrength; Steps=[int]$job.ChosenSteps; Cfg=[double]$job.Cfg; Tag='hq'; SrcW=[int]$job.SrcW; SrcH=[int]$job.SrcH; ForcedSpeed=$retryMode })
                     $oomHint += "`r`n`r`nMOSS will now AUTOMATICALLY RETRY this improvement with a SMALLER render size ($retryMode speed mode: rendered small with all steps, then enlarged to the full target) - the composition still comes from your image."
                 }
                 $log.AppendText($oomHint)
@@ -2932,7 +2932,7 @@ try {
         # window and editable. The result is a NEW file - the original is
         # never touched.
         $g=New-Object System.Windows.Forms.Form
-        $g.Text='Improve this image'; $g.Size=New-Object System.Drawing.Size(600,492); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false; $g.MinimizeBox=$false
+        $g.Text='Improve this image'; $g.Size=New-Object System.Drawing.Size(600,466); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false; $g.MinimizeBox=$false
         $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
         $ttl=New-Object System.Windows.Forms.Label; $ttl.Text=('Improve  ' + [System.IO.Path]::GetFileName($selFile)); $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',11,[System.Drawing.FontStyle]::Bold); $ttl.Location=New-Object System.Drawing.Point(14,10); $ttl.AutoSize=$true; $g.Controls.Add($ttl)
         $sub=New-Object System.Windows.Forms.Label; $sub.Text=('Same picture, your chosen quality. Composition and seed come from this image (source {0} x {1}). The result is saved as a NEW file - the original is never modified.' -f $csW,$csH); $sub.Location=New-Object System.Drawing.Point(14,42); $sub.Size=New-Object System.Drawing.Size(556,46); $sub.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($sub)
@@ -2953,25 +2953,19 @@ try {
         $sdIn=New-Object System.Windows.Forms.TextBox; $sdIn.Text=([string]$imgSeed); $sdIn.Location=New-Object System.Drawing.Point(110,228); $sdIn.Size=New-Object System.Drawing.Size(130,26); $g.Controls.Add($sdIn)
         $sdNote=New-Object System.Windows.Forms.Label; if($imgSeed -ge 0){ $sdNote.Text=" (the image's own seed - keeps the result aligned; -1 = random)" } else { $sdNote.Text=' (no stored seed - a random seed will be used)' }; $sdNote.Location=New-Object System.Drawing.Point(256,232); $sdNote.Size=New-Object System.Drawing.Size(300,32); $sdNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($sdNote)
         $stNoteBase=('Strength {0} (from Options). Image-to-image: the composition comes from the image - low strength = very faithful, high = more changes.{1}' -f $cStrength,($(if($isPreview){' This is an upscaled fast draft, so a raised strength is used automatically: detail is regenerated instead of the blurry enlargement.'}else{''})))
-        # Img2img does not run all steps: the engine skips the early denoising
-        # steps because the init image already provides the composition, so
-        # the effective step count is about steps x strength (+1). Say so -
-        # the user selected 50 steps and read '31/31' as a bug (live report).
+        # ALL chosen steps always run: img2img would skip early steps (about
+        # steps x strength), so MOSS raises the ENGINE step count to
+        # ceil((chosen-1)/strength) - verified with the real engine: 80 engine
+        # steps at strength 0,6148 -> t_enc 49 -> exactly 50 sampling steps.
         $stepsEffText={
             $n=0
-            if([int]::TryParse($stIn.Text,[ref]$n) -and $cStrength -gt 0 -and $cStrength -lt 1){ (' Img2img runs about {0} of the {1} denoising steps: the early steps are skipped because the image already provides the composition (higher strength = more steps).' -f ([Math]::Floor($n*$cStrength)+1), $n) } else { '' }
+            if([int]::TryParse($stIn.Text,[ref]$n) -and $cStrength -gt 0.01 -and $cStrength -lt 1){ (' All {0} denoising steps run at this strength (MOSS raises the engine step count to {1} for that, since the strength alone would skip the early ones).' -f $n, [Math]::Ceiling(($n - 1) / $cStrength)) } else { '' }
         }
         $stNote=New-Object System.Windows.Forms.Label; $stNote.Text=($stNoteBase + (& $stepsEffText)); $stNote.Location=New-Object System.Drawing.Point(14,274); $stNote.Size=New-Object System.Drawing.Size(556,66); $stNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($stNote)
         $stIn.Add_TextChanged({ $stNote.Text = ($stNoteBase + (& $stepsEffText)) })
-        # OPTION: run the FULL chosen step count. Img2img skips early steps
-        # (about steps x strength), so 50 chosen steps at strength 0,6148 run
-        # only ~31. With this option MOSS raises the ENGINE step count
-        # (verified with the real engine: 80 engine steps at strength 0,6148
-        # -> t_enc 49 -> exactly 50 sampling steps) so all 50 actually run.
-        $fullCb=New-Object System.Windows.Forms.CheckBox; $fullCb.Text='Run ALL steps anyway (slower - MOSS raises the engine step count to compensate)'; $fullCb.Location=New-Object System.Drawing.Point(110,340); $fullCb.Size=New-Object System.Drawing.Size(460,26); $fullCb.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($fullCb)
-        $pNote=New-Object System.Windows.Forms.Label; $pNote.Text='Prompt: the text in the main window prompt box (change it there first).'; $pNote.Location=New-Object System.Drawing.Point(14,374); $pNote.Size=New-Object System.Drawing.Size(556,32); $pNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($pNote)
-        $impBtn=New-Object System.Windows.Forms.Button; $impBtn.Text='Improve'; $impBtn.Location=New-Object System.Drawing.Point(320,412); $impBtn.Size=New-Object System.Drawing.Size(120,32); $g.Controls.Add($impBtn)
-        $cnBtn=New-Object System.Windows.Forms.Button; $cnBtn.Text='Cancel'; $cnBtn.Location=New-Object System.Drawing.Point(452,412); $cnBtn.Size=New-Object System.Drawing.Size(100,32); $g.Controls.Add($cnBtn)
+        $pNote=New-Object System.Windows.Forms.Label; $pNote.Text='Prompt: the text in the main window prompt box (change it there first).'; $pNote.Location=New-Object System.Drawing.Point(14,346); $pNote.Size=New-Object System.Drawing.Size(556,32); $pNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($pNote)
+        $impBtn=New-Object System.Windows.Forms.Button; $impBtn.Text='Improve'; $impBtn.Location=New-Object System.Drawing.Point(320,388); $impBtn.Size=New-Object System.Drawing.Size(120,32); $g.Controls.Add($impBtn)
+        $cnBtn=New-Object System.Windows.Forms.Button; $cnBtn.Text='Cancel'; $cnBtn.Location=New-Object System.Drawing.Point(452,388); $cnBtn.Size=New-Object System.Drawing.Size(100,32); $g.Controls.Add($cnBtn)
         $g.AcceptButton=$impBtn; $g.CancelButton=$cnBtn
         $sameBtn.Add_Click({ $wIn.Text=[string]$csW; $hIn.Text=[string]$csH })
         $twoBtn.Add_Click({ $wIn.Text=[string][Math]::Min(8192,([int]$csW*2)); $hIn.Text=[string][Math]::Min(8192,([int]$csH*2)) })
@@ -2990,7 +2984,7 @@ try {
             if($bigNote -or $aspectNote){ $ans=[System.Windows.Forms.MessageBox]::Show($g,("Start the improve with {0} x {1} ({2} MP)?{3}{4}" -f $cw,$chh,$finalMP,$bigNote,$aspectNote),'Improve this image',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question); if($ans -ne [System.Windows.Forms.DialogResult]::Yes){return} }
             $useSampler=$null; if([string]$script:Settings.SamplingMethod -ne 'Default (model)'){ $useSampler=[string]$script:Settings.SamplingMethod }
             $useSched=$null; if([string]$script:Settings.Scheduler -ne 'Default (model)'){ $useSched=[string]$script:Settings.Scheduler }
-            [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$cw; H=$chh; Seed=$csd; Prompt=$cPrompt; NegativePrompt=[string]$script:Settings.NegativePrompt; SamplingMethod=$useSampler; Scheduler=$useSched; Strength=$cStrength; Steps=$cst; Cfg=$ccf; Tag='hq'; SrcW=$csW; SrcH=$csH; FullSteps=$fullCb.Checked })
+            [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$cw; H=$chh; Seed=$csd; Prompt=$cPrompt; NegativePrompt=[string]$script:Settings.NegativePrompt; SamplingMethod=$useSampler; Scheduler=$useSched; Strength=$cStrength; Steps=$cst; Cfg=$ccf; Tag='hq'; SrcW=$csW; SrcH=$csH })
             $script:RefineTotal = $script:RefineQueue.Count
             $g.Close()
             Start-MossNextRefine
@@ -3243,30 +3237,29 @@ try {
             $refineSpeed = $forcedSpeed
             $log.AppendText(("`r`nRetrying the improvement with a SMALLER render size ({0} speed mode) after the previous render ran out of memory: target {1} x {2}, all {3} steps, enlarged to full size (composition kept from the image)." -f $forcedSpeed, $item.W, $item.H, $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})))
         }
-        $jobSteps = $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})
-        $jobStrength = $(if($item.PSObject.Properties['Strength']){[double]$item.Strength}else{0.6})
-        # 'Run ALL steps anyway' from the improve dialog: img2img skips early
-        # steps (about steps x strength), so MOSS raises the ENGINE step count
-        # to ceil((chosen-1)/strength) - verified with the real engine: 80
-        # engine steps at strength 0,6148 -> t_enc 49 -> exactly 50 sampling
-        # steps. Without it 50 chosen steps run only about 31.
-        $fullStepsWanted = $false; if ($item.PSObject.Properties['FullSteps']) { $fullStepsWanted = [bool]$item.FullSteps }
-        if ($fullStepsWanted -and -not $isFresh -and $jobStrength -gt 0.01 -and $jobStrength -lt 1 -and $jobSteps -gt 1) {
-            $engineSteps = [Math]::Min(1000, [Math]::Ceiling(($jobSteps - 1) / $jobStrength))
-            $log.AppendText(("`r`nNote: running ALL {0} denoising steps at strength {1} - the engine step count is raised to {2} (img2img would otherwise run only about {3})." -f $jobSteps, $jobStrength, $engineSteps, ([Math]::Floor($jobSteps*$jobStrength)+1)))
-            $jobSteps = $engineSteps
+        $refineSteps = $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})
+        $refineStrength = $(if($item.PSObject.Properties['Strength']){[double]$item.Strength}else{0.6})
+        # ALL CHOSEN STEPS ALWAYS RUN (user: 'if i want the quality at 50 it
+        # should do the 50'). Img2img would skip early steps (about steps x
+        # strength), so MOSS raises the ENGINE step count to
+        # ceil((chosen-1)/strength) - verified with the real engine: 80
+        # engine steps at strength 0,6148 -> t_enc 49 -> exactly 50 sampled.
+        # ChosenSteps keeps the user's count so an OOM auto-retry cannot
+        # compensate twice.
+        $engineSteps = $refineSteps
+        if (-not $isFresh -and $refineStrength -gt 0.01 -and $refineStrength -lt 1 -and $refineSteps -gt 1) {
+            $engineSteps = [Math]::Min(1000, [Math]::Ceiling(($refineSteps - 1) / $refineStrength))
+            $log.AppendText(("`r`nNote: running ALL {0} denoising steps at strength {1} - the engine step count is raised to {2} (the strength alone would run only about {3})." -f $refineSteps, $refineStrength, $engineSteps, ([Math]::Floor($refineSteps*$refineStrength)+1)))
         }
-        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$jobSteps;Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode=$refineSpeed;InitImage=$(if($isFresh){$null}else{[string]$item.File});InitStrength=$(if($isFresh){0.0}else{[double]$item.Strength});RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler;SrcW=$(if($item.PSObject.Properties['SrcW']){[int]$item.SrcW}else{0});SrcH=$(if($item.PSObject.Properties['SrcH']){[int]$item.SrcH}else{0})}
+        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$engineSteps;ChosenSteps=$refineSteps;Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode=$refineSpeed;InitImage=$(if($isFresh){$null}else{[string]$item.File});InitStrength=$(if($isFresh){0.0}else{[double]$item.Strength});RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler;SrcW=$(if($item.PSObject.Properties['SrcW']){[int]$item.SrcW}else{0});SrcH=$(if($item.PSObject.Properties['SrcH']){[int]$item.SrcH}else{0})}
         $status.Text = ("Improving image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
         if ($isFresh) {
             $status.Text = ("Re-rendering image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
             $log.AppendText(("`r`nRe-rendering from the same seed: {0}, same prompt, fresh full-quality sampling at {1} x {2} (no image-to-image - like a new generation; the composition can differ from the draft)" -f $item.Seed, $item.W, $item.H))
         } elseif (Test-MossFastPreview ([string]$item.File)) {
-            $stepsTail = if ($fullStepsWanted) { ('ALL {0} denoising steps run at this strength (the engine step count was raised to {1} for that)' -f $item.Steps, $jobSteps) } else { ('img2img runs about {0} of the {1} denoising steps, the early ones are skipped because the image provides the composition' -f ([Math]::Floor([double]$item.Steps * [double]$item.Strength) + 1), [int]$item.Steps) }
-            $log.AppendText(("`r`nImproving: seed {0}, image-to-image from {1} ({2} x {3}) -> final {4} x {5} (strength {6} - fast preview, detail regenerated over the enlarged draft, composition kept from the image; {7})" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $(if($item.SrcW){[int]$item.SrcW}else{0}), $(if($item.SrcH){[int]$item.SrcH}else{0}), $item.W, $item.H, $item.Strength, $stepsTail))
+            $log.AppendText(("`r`nImproving: seed {0}, image-to-image from {1} ({2} x {3}) -> final {4} x {5} (strength {6} - fast preview, detail regenerated over the enlarged draft, composition kept from the image; ALL {7} denoising steps run at this strength - the engine step count was raised to {8} to get them)" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $(if($item.SrcW){[int]$item.SrcW}else{0}), $(if($item.SrcH){[int]$item.SrcH}else{0}), $item.W, $item.H, $item.Strength, $refineSteps, $engineSteps))
         } else {
-            $stepsTail2 = if ($fullStepsWanted) { ('ALL {0} denoising steps run at this strength (the engine step count was raised to {1} for that)' -f $item.Steps, $jobSteps) } else { ('img2img runs about {0} of the {1} denoising steps, the early ones are skipped because the image provides the composition' -f ([Math]::Floor([double]$item.Steps * [double]$item.Strength) + 1), [int]$item.Steps) }
-            $log.AppendText(("`r`nImproving: same seed {0}, same prompt, image-to-image from {1} ({2} x {3}) -> final {4} x {5} (strength {6}; {7})" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $(if($item.SrcW){[int]$item.SrcW}else{0}), $(if($item.SrcH){[int]$item.SrcH}else{0}), $item.W, $item.H, $item.Strength, $stepsTail2))
+            $log.AppendText(("`r`nImproving: same seed {0}, same prompt, image-to-image from {1} ({2} x {3}) -> final {4} x {5} (strength {6}; ALL {7} denoising steps run at this strength - the engine step count was raised to {8} to get them)" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $(if($item.SrcW){[int]$item.SrcW}else{0}), $(if($item.SrcH){[int]$item.SrcH}else{0}), $item.W, $item.H, $item.Strength, $refineSteps, $engineSteps))
         }
         Start-MossGeneration -Job $job -ForRefine
     }
