@@ -928,7 +928,7 @@ try {
     $tip.SetToolTip($openOut,'Opens the output folder in Explorer.')
     $tip.SetToolTip($btnReport,'Copies an anonymised technical error report to the clipboard (and saves it under logs).')
     $tip.SetToolTip($refineNative,'Takes your most recent image and re-renders it at full quality: same composition, same seed and prompt, more detail. Right-click any file in Generated files to improve that one instead.')
-    $tip.SetToolTip($speedCombo,'How new images are rendered: Exact (full quality), or a faster draft mode that renders small and enlarges.')
+    $tip.SetToolTip($speedCombo,'How new images are rendered: Exact (full quality), or a faster draft mode that renders small and enlarges. Fastest renders at a 128-pixel side - very rough, but one click of Improve re-renders it sharp.')
     $tip.SetToolTip($negBtn,'Generation options: negative prompt, sampler and scheduler.')
     $tip.SetToolTip($modelToggle,'Show or hide the engine and model file paths.')
     $tip.SetToolTip($prompt,'Describe the image you want. Pasted multi-line text is flattened to one line automatically.')
@@ -1332,12 +1332,12 @@ try {
             '2x' { $speedScale = 0.7 }
             '4x' { $speedScale = 0.5 }
             '8x' { $speedScale = 0.35 }
-            'Fast' { $speedScale = [Math]::Min(0.35, 256.0 / [Math]::Min($job.Width, $job.Height)) }
+            'Fast' { $speedScale = [Math]::Min(0.35, 128.0 / [Math]::Min($job.Width, $job.Height)) }
         }
         $st.UpscaleTarget = $null
         if ($speedScale -gt 0) {
-            $smallW = [int][Math]::Max(256, [Math]::Floor($job.Width * $speedScale))
-            $smallH = [int][Math]::Max(256, [Math]::Floor($job.Height * $speedScale))
+            $smallW = [int][Math]::Max(128, [Math]::Floor($job.Width * $speedScale))
+            $smallH = [int][Math]::Max(128, [Math]::Floor($job.Height * $speedScale))
             if ($smallW -lt $job.Width -and $smallH -lt $job.Height) {
                 $argsList.Add('-W'); $argsList.Add([string]$smallW)
                 $argsList.Add('-H'); $argsList.Add([string]$smallH)

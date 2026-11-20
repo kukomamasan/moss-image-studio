@@ -44,9 +44,11 @@ Image generation
   No second sampling pass runs, so results are faithful - possibly grainy or
   soft at high speeds, but never distorted. Measured on an RTX 3080 Ti at
   2K portrait, 50 steps: Exact about 4 minutes; ~4x (upscale from 50%) about
-  1 minute; Fastest (upscale from the smallest render, 256-pixel side) about
-  15 seconds. 'Fastest' and '~8x' are draft quality: good enough to see what
-  the picture is; use Exact when detail matters. Multipliers are approximate
+  1 minute; Fastest (upscale from the smallest render, 128-pixel side) a few
+  seconds. 'Fastest' and '~8x' are draft quality: good enough to see what
+  the picture is, and 'Fastest' can be visibly soft at large sizes - right-click
+  it and choose Improve to re-render it sharp with the same seed. Use Exact
+  when detail matters. Multipliers are approximate
   and vary with size and step count. Works the same on NVIDIA, AMD, Intel and
   CPU builds.
 - Weight placement (GPU, then RAM, then disk as needed) is decided by the
