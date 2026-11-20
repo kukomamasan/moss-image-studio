@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.51'
+$script:AppVersion = '0.1.52'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -1540,6 +1540,7 @@ function Show-GeneratorWindow {
     $script:SelectedFile = $null
     $script:RefineQueue = New-Object System.Collections.ArrayList
     $script:RefineTotal = 0
+    $script:RefineStartedAt = $null
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "MOSS Image Studio v$($script:AppVersion) (GUI for sd-cli) | Generator"; $f.Size = New-Object System.Drawing.Size(1180,850); $f.MinimumSize = New-Object System.Drawing.Size(1000,740); $f.StartPosition='CenterScreen'
@@ -1908,6 +1909,10 @@ try {
     $tip.SetToolTip($out,'Where finished images are saved.')
     $tip.SetToolTip($outBrowse,'Choose the output folder.')
     $status=New-Object System.Windows.Forms.Label; $status.Text='Ready'; $status.Location=New-Object System.Drawing.Point(18,670); $status.Size=New-Object System.Drawing.Size(660,24); $status.ForeColor=$cMuted; $left.Controls.Add($status)
+    # Slim progress bar directly above the status line: marquee while the
+    # engine warms up (no reliable step count yet), then driven by the
+    # engine's STEP COUNTER, full when the batch completes.
+    $prog=New-Object System.Windows.Forms.ProgressBar; $prog.Location=New-Object System.Drawing.Point(18,644); $prog.Size=New-Object System.Drawing.Size(664,18); $prog.Anchor='Top,Left,Right'; $prog.Style='Blocks'; $prog.Visible=$false; $left.Controls.Add($prog)
 
     Add-Label $right 'OUTPUT PREVIEW' 16 14 200 | Out-Null
     $preview=New-Object System.Windows.Forms.PictureBox; $preview.Location=New-Object System.Drawing.Point(16,42); $preview.Size=New-Object System.Drawing.Size(383,285); $preview.Anchor='Top,Left,Right'; $preview.SizeMode='Zoom'; $preview.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $right.Controls.Add($preview)
@@ -2051,6 +2056,8 @@ try {
         ImageStartedAt = $null
         ImageDurations = New-Object System.Collections.ArrayList
         ImageProgress = 0
+        StepNum = 0
+        StepDen = 0
         JobStartedAt = $null
     }
 
@@ -2221,8 +2228,10 @@ try {
                 if ($last.Groups[1].Success) { $numerator = [double]$last.Groups[1].Value; $denominator = [double]$last.Groups[2].Value }
                 else { $numerator = [double]$last.Groups[3].Value; $denominator = [double]$last.Groups[4].Value }
                 if ($denominator -gt 0) { $engineProgress = [Math]::Max(0, [Math]::Min(100, [int](($numerator * 100) / $denominator))) }
+                # Keep the raw step counter for the status line ('step 17/50').
+                $st.StepNum = [int]$numerator; $st.StepDen = [int]$denominator
             }
-        }
+        } else { $st.StepNum = 0; $st.StepDen = 0 }
         if ($null -ne $engineProgress) { $st.ImageProgress = [int]$engineProgress }
         $job = $st.Job
         $currentImage = [Math]::Max(1, [int]$st.CurrentImageIndex)
@@ -2238,8 +2247,14 @@ try {
             $remaining = [Math]::Max(0, $average - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $average)
         }
         if ($null -ne $remaining) { $etaText = "ETA ~$(Format-MossDuration $remaining)" }
-        $progressNote = if ($null -ne $engineProgress) { " | image $([int]$st.ImageProgress)%" } else { '' }
+        $progressNote = if ($st.StepDen -gt 0) { " | step $([int]$st.StepNum)/$([int]$st.StepDen)" } elseif ($null -ne $engineProgress) { " | image $([int]$st.ImageProgress)%" } else { '' }
         $status.Text = "Image $currentImage of $($job.Count) | $overall% overall$progressNote | total elapsed $(Format-MossDuration $elapsed) | $etaText"
+        # Drive the progress bar from the step counter (same numbers as the text).
+        $prog.Visible = $true
+        if ($null -ne $engineProgress) {
+            if ($prog.Style -ne 'Blocks') { $prog.Style = 'Blocks' }
+            $prog.Value = [Math]::Max($prog.Minimum,[Math]::Min($prog.Maximum,$overall))
+        }
     }
 
 
@@ -2250,6 +2265,15 @@ try {
         $cancel.Enabled = $false
         if ($FinalStatus) { $status.Text = $FinalStatus }
         if ($script:GenState.JobStartedAt) { $status.Text += " | total elapsed $(Format-MossDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds)" }
+        # Progress bar: full on success, hidden on failures (a full bar next
+        # to a failure message would be misleading).
+        if ($FinalStatus -like 'Completed*') {
+            $prog.Style = 'Blocks'
+            $prog.Value = $prog.Maximum
+            $prog.Visible = $true
+        } else {
+            $prog.Visible = $false
+        }
     }
 
     function Start-MossBatchEngine {
@@ -2372,6 +2396,7 @@ try {
             $script:ActiveProcess = $proc
             $st.ImageStartedAt = Get-Date
             $st.ImageProgress = 0
+            $st.StepNum = 0; $st.StepDen = 0
             $st.CurrentImageIndex = 0
             $status.Text = ("Rendering {0} image(s) in one run (base seed {1})..." -f $job.Count, $job.Seed)
             if ($up) { $status.Text = ("Fast mode: rendering {0} image(s) small (will upscale after render)..." -f $job.Count) }
@@ -2547,9 +2572,13 @@ try {
                 $log.AppendText(("`r`nHint: the engine stopped without any message. At {0} x {1} ({2} MP, {3} steps) the most common cause is running out of GPU or system memory. Try a smaller size, fewer steps, or a fast speed mode (which renders small and enlarges)." -f $job.Width, $job.Height, $mp, $job.Steps))
             }
         }
-        $log.AppendText("`r`n--- Batch finished | exit $exitCode | $ok of $($job.Count) image(s) ---`r`n$outputText`r`n")
+        $batchTimeText = ''
+        if ($st.JobStartedAt) { $batchTimeText = ' | total time ' + (Format-MossDuration ((Get-Date) - $st.JobStartedAt).TotalSeconds) }
+        # The log is a persistent record: the total time stays here after the
+        # status line moves on (user: the time taken was lost when done).
+        $log.AppendText("`r`n--- Batch finished | exit $exitCode | $ok of $($job.Count) image(s)$batchTimeText ---`r`n$outputText`r`n")
         # Continue any pending native refinement queue unless the user cancelled.
-        if (-not $st.CancelRequested) { Start-MossNextRefine } else { $script:RefineQueue.Clear(); $script:RefineTotal = 0 }
+        if (-not $st.CancelRequested) { Start-MossNextRefine } else { $script:RefineQueue.Clear(); $script:RefineTotal = 0; $script:RefineStartedAt = $null }
     }
 
     function Start-MossGeneration {
@@ -2578,6 +2607,10 @@ try {
         # Keep the existing file list: it is the full history of generated
         # files (populated at startup). New images are appended as they land.
         $status.Text = 'Starting engine...'
+        # Progress bar: marquee until the engine reports the first step.
+        $prog.Value = 0
+        $prog.Style = 'Marquee'
+        $prog.Visible = $true
 
         Start-MossBatchEngine
     }
@@ -3008,17 +3041,24 @@ try {
     function Start-MossNextRefine {
         # Sequentially processes the improvement queue (one engine run per image).
         if ($script:GenState.IsRunning) { return }
-        if ($script:GenState.CancelRequested) { if($script:RefineQueue.Count -gt 0){ $log.AppendText("`r`nImprovement queue cancelled.") }; $script:RefineQueue.Clear(); $script:RefineTotal = 0; return }
+        if ($script:GenState.CancelRequested) { if($script:RefineQueue.Count -gt 0){ $log.AppendText("`r`nImprovement queue cancelled.") }; $script:RefineQueue.Clear(); $script:RefineTotal = 0; $script:RefineStartedAt = $null; return }
         if ($script:RefineQueue.Count -eq 0) {
             if ($script:RefineTotal -gt 0) {
-                $status.Text = "Improvement finished - $script:RefineTotal image(s) processed"
-                $log.AppendText("`r`nImprovement finished - $script:RefineTotal image(s) processed.")
+                # Keep the time taken: the total elapsed survives completion
+                # (it was previously overwritten by this very message).
+                $queueElapsed = ''
+                if ($script:RefineStartedAt) { $queueElapsed = ' | total elapsed ' + (Format-MossDuration ((Get-Date) - $script:RefineStartedAt).TotalSeconds) }
+                $status.Text = "Improvement finished - $script:RefineTotal image(s) processed$queueElapsed"
+                $log.AppendText("`r`nImprovement finished - $script:RefineTotal image(s) processed$(if($queueElapsed){' | total time ' + $queueElapsed.Replace(' | total elapsed ','')}).")
+                $script:RefineStartedAt = $null
                 $script:RefineTotal = 0
             }
             return
         }
         $item = $script:RefineQueue[0]
         $script:RefineQueue.RemoveAt(0)
+        # Queue total wall time: stamped when the FIRST item starts.
+        if (-not $script:RefineStartedAt) { $script:RefineStartedAt = Get-Date }
         $refineEngine = Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)
         $refinePaths = @($refineEngine,
             (Get-AbsoluteAppPath ([string]$script:Settings.DiffusionModelPath)),
@@ -3111,6 +3151,7 @@ try {
             $cancel.Enabled = $false
             $elapsedText = if ($script:GenState.JobStartedAt) { Format-MossDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds } else { '0:00' }
             $status.Text = "Generation cancelled | total elapsed $elapsedText"
+            $prog.Visible = $false
             $log.AppendText("`r`nGeneration cancelled. No further images will be started.")
         }
     })
