@@ -5,7 +5,11 @@ param([switch]$SetupOnly,[switch]$ReturnToGenerator)
 
 $ErrorActionPreference = 'Stop'
 $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$script:AppVersion = '0.1.17'
+# The launcher console is hidden at the end of the definitions (just before
+# any UI appears), so the password prompt and every window run without a
+# visible console. Startup problems still surface: a top-level try/catch
+# shows a message box and writes a log file.
+$script:AppVersion = '0.1.18'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -44,6 +48,8 @@ function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history') {
     if ($Create) { $confirmLabel=New-Object System.Windows.Forms.Label; $confirmLabel.Text='Confirm password'; $confirmLabel.Location=New-Object System.Drawing.Point(18,91); $confirmLabel.Size=New-Object System.Drawing.Size(150,18); $dialog.Controls.Add($confirmLabel); $confirm = New-Object System.Windows.Forms.TextBox; $confirm.Location=New-Object System.Drawing.Point(18,111); $confirm.Size=New-Object System.Drawing.Size(385,25); $confirm.UseSystemPasswordChar=$true; $dialog.Controls.Add($confirm) }
     $ok=New-Object System.Windows.Forms.Button; $ok.Text='Continue'; $ok.Location=New-Object System.Drawing.Point(218,145); $ok.DialogResult=[System.Windows.Forms.DialogResult]::OK; $dialog.Controls.Add($ok)
     $cancel=New-Object System.Windows.Forms.Button; $cancel.Text='Cancel'; $cancel.Location=New-Object System.Drawing.Point(308,145); $cancel.DialogResult=[System.Windows.Forms.DialogResult]::Cancel; $dialog.Controls.Add($cancel); $dialog.AcceptButton=$ok; $dialog.CancelButton=$cancel
+    # The code field must be ready for typing the moment the dialog appears.
+    $dialog.Add_Shown({ $first.Focus() }.GetNewClosure())
     try {
         while ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             $maxLength = if ($Create) { 16 } else { 64 }
@@ -697,28 +703,95 @@ try {
     $historyPick.Add_SelectedIndexChanged({if($historyPick.SelectedIndex -ge 0){$prompt.Text=[string]$historyPick.SelectedItem}})
 
     Add-Label $left 'IMAGE SETTINGS' 18 202 160 | Out-Null
-    $negInitial=if([string]$script:Settings.NegativePrompt){('negative: set ('+$script:Settings.NegativePrompt.Length+' chars)')}else{'negative: not set'}
-    $negState=Add-Label $left $negInitial 358 202 240
-    function Show-MossNegativePromptDialog {
-        # Negative prompt (engine flag -n): what the image should NOT contain.
-        # Kept in a dialog so the compact main window stays uncluttered.
+    $negInitial=if([string]$script:Settings.NegativePrompt){'negative prompt: set'}else{'negative prompt: not set'}
+    $negState=Add-Label $left $negInitial 310 202 240
+    function Show-MossGenerationOptionsDialog {
+        # Advanced generation options in one dialog so the compact main window
+        # stays uncluttered: negative prompt (engine flag -n), sampler and
+        # scheduler. 'Default (model)' omits the flag so the engine keeps its
+        # model-specific choice (euler for Flux/SD3/Wan).
         $g=New-Object System.Windows.Forms.Form
-        $g.Text='Negative prompt'; $g.Size=New-Object System.Drawing.Size(560,320); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
+        $g.Text='Generation options'; $g.Size=New-Object System.Drawing.Size(560,430); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
         $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
-        $hint=New-Object System.Windows.Forms.Label; $hint.Text='What the image should NOT contain, e.g. blurry, extra fingers, watermark. Left empty = no negative prompt.'; $hint.Location=New-Object System.Drawing.Point(12,10); $hint.Size=New-Object System.Drawing.Size(520,20); $hint.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($hint)
-        $box=New-Object System.Windows.Forms.TextBox; $box.Multiline=$true; $box.ScrollBars='Vertical'; $box.Text=[string]$script:Settings.NegativePrompt; $box.Location=New-Object System.Drawing.Point(12,36); $box.Size=New-Object System.Drawing.Size(520,184); $box.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $box.ForeColor=$cText; $box.BorderStyle='FixedSingle'; $g.Controls.Add($box)
-        $negOk=Add-Button $g 'Save' 350 240 80 30
-        $negCancel=Add-Button $g 'Cancel' 440 240 90 30
+        $hint=New-Object System.Windows.Forms.Label; $hint.Text='Negative prompt - what the image should NOT contain, e.g. blurry, extra fingers, watermark. Left empty = none.'; $hint.Location=New-Object System.Drawing.Point(12,10); $hint.Size=New-Object System.Drawing.Size(520,20); $hint.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($hint)
+        $box=New-Object System.Windows.Forms.TextBox; $box.Multiline=$true; $box.ScrollBars='Vertical'; $box.Text=[string]$script:Settings.NegativePrompt; $box.Location=New-Object System.Drawing.Point(12,34); $box.Size=New-Object System.Drawing.Size(520,120); $box.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $box.ForeColor=$cText; $box.BorderStyle='FixedSingle'; $g.Controls.Add($box)
+        Add-Label $g 'Sampler' 12 170 100 | Out-Null
+        $optSampler=New-Object System.Windows.Forms.ComboBox; $optSampler.DropDownStyle='DropDownList'; $optSampler.Location=New-Object System.Drawing.Point(12,192); $optSampler.Size=New-Object System.Drawing.Size(250,26); $optSampler.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSampler.ForeColor=$cText
+        foreach($s in @('Default (model)','euler','euler_a','heun','dpm2','dpm++2s_a','dpm++2m','dpm++2mv2','ipndm','ipndm_v','lcm','ddim_trailing','tcd','res_multistep','res_2s','er_sde','euler_cfg_pp','euler_a_cfg_pp','euler_ge','dpm++2m_sde','dpm++2m_sde_bt','lms')){[void]$optSampler.Items.Add($s)}
+        $optSampler.SelectedItem=[string]$script:Settings.SamplingMethod; if($optSampler.SelectedIndex -lt 0){$optSampler.SelectedIndex=0}; $g.Controls.Add($optSampler)
+        Add-Label $g 'Scheduler' 280 170 100 | Out-Null
+        $optSched=New-Object System.Windows.Forms.ComboBox; $optSched.DropDownStyle='DropDownList'; $optSched.Location=New-Object System.Drawing.Point(280,192); $optSched.Size=New-Object System.Drawing.Size(250,26); $optSched.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSched.ForeColor=$cText
+        foreach($s in @('Default (model)','discrete','karras','exponential','ays','gits','sgm_uniform','simple','smoothstep','kl_optimal','lcm','bong_tangent','ltx2','logit_normal','flux2','flux','beta','llada_image')){[void]$optSched.Items.Add($s)}
+        $optSched.SelectedItem=[string]$script:Settings.Scheduler; if($optSched.SelectedIndex -lt 0){$optSched.SelectedIndex=0}; $g.Controls.Add($optSched)
+        # Plain-language descriptions: shown inline below each dropdown and on
+        # hover, updated as the user browses the lists.
+        $samplerDescriptions=@{
+          'Default (model)'="Uses the engine's default for this model: euler. Recommended."
+          'euler'='Simple, reliable all-rounder; good at any step count.'
+          'euler_a'='Ancestral euler: adds randomness each step - more variety, but the same seed can give slightly different images.'
+          'heun'='More accurate per step, but roughly twice the work per step.'
+          'dpm2'='Deterministic second-order solver: crisp, sensitive to step count.'
+          'dpm++2s_a'='Ancestral second-order solver: sharp detail with some randomness.'
+          'dpm++2m'='Fast, converging solver; very good quality at moderate steps.'
+          'dpm++2mv2'='Improved variant of dpm++2m, often a little more detail.'
+          'ipndm'='Improved pseudo-numerical method: smooth and conservative.'
+          'ipndm_v'='Variant of ipndm with a different update schedule.'
+          'lcm'='Latent Consistency sampling: tuned for very few steps (4-8) on distilled models.'
+          'ddim_trailing'='DDIM sampled from the end of the schedule; useful for some distilled models.'
+          'tcd'='Trajectory Consistency Distillation: few-step friendly.'
+          'res_multistep'='Resolution multistep solver: detailed but slower.'
+          'res_2s'='Two-step variant of the resolution multistep solver.'
+          'er_sde'='Extended reverse-time SDE: often good texture and detail.'
+          'euler_cfg_pp'='Euler with CFG++ guidance handling; can reduce burning at high CFG.'
+          'euler_a_cfg_pp'='Ancestral euler with CFG++ guidance handling.'
+          'euler_ge'='Euler with geometric extrapolation.'
+          'dpm++2m_sde'='dpm++2m in stochastic form: often softer, painterly detail.'
+          'dpm++2m_sde_bt'='Stochastic dpm++2m with Brownian-tree noise.'
+          'lms'='Linear multistep: classic, conservative solver.'
+        }
+        $schedulerDescriptions=@{
+          'Default (model)'="Uses the engine's default for this model: a Flux-family sigma schedule, chosen automatically. Recommended."
+          'discrete'='Classic discrete sigma schedule (the traditional default).'
+          'karras'='Karras schedule: more steps on fine detail near the end; often sharper texture.'
+          'exponential'='Exponential sigma spacing: smooth, even denoising.'
+          'ays'='Align Your Steps: optimized step placement, good with fewer steps.'
+          'gits'='GITS: trained step distribution, good quality at low step counts.'
+          'sgm_uniform'='Uniform schedule from the SGM paper: even coverage of the range.'
+          'simple'='Plain uniform sigma spacing.'
+          'smoothstep'='Smoothstep spacing: gentler start and finish.'
+          'kl_optimal'='Schedule from KL-diffusion optimization research.'
+          'lcm'='Schedule matched to LCM (few-step distilled) sampling.'
+          'bong_tangent'='Aggressive experimental schedule: can be very fast or unstable.'
+          'ltx2'='Schedule tuned for LTX video models.'
+          'logit_normal'='Sigmas from a logit-normal distribution: modern Flux-family schedule.'
+          'flux2'='Schedule tuned for the newer Flux models; a good fit for this engine.'
+          'flux'='Original Flux schedule.'
+          'beta'='Beta-distribution spacing: modern alternative, often good detail.'
+          'llada_image'='Schedule tuned for the LLaDA image model.'
+        }
+        $dlgTip=New-Object System.Windows.Forms.ToolTip; $dlgTip.InitialDelay=200
+        $samplerDesc=New-Object System.Windows.Forms.Label; $samplerDesc.Location=New-Object System.Drawing.Point(12,222); $samplerDesc.Size=New-Object System.Drawing.Size(250,64); $samplerDesc.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($samplerDesc)
+        $schedDesc=New-Object System.Windows.Forms.Label; $schedDesc.Location=New-Object System.Drawing.Point(280,222); $schedDesc.Size=New-Object System.Drawing.Size(250,64); $schedDesc.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($schedDesc)
+        $samplerDesc.Text=[string]$samplerDescriptions[[string]$optSampler.SelectedItem]
+        $schedDesc.Text=[string]$schedulerDescriptions[[string]$optSched.SelectedItem]
+        $dlgTip.SetToolTip($optSampler,$samplerDesc.Text); $dlgTip.SetToolTip($optSched,$schedDesc.Text)
+        $optSampler.Add_SelectedIndexChanged({ $samplerDesc.Text=[string]$samplerDescriptions[[string]$optSampler.SelectedItem]; $dlgTip.SetToolTip($optSampler,$samplerDesc.Text) })
+        $optSched.Add_SelectedIndexChanged({ $schedDesc.Text=[string]$schedulerDescriptions[[string]$optSched.SelectedItem]; $dlgTip.SetToolTip($optSched,$schedDesc.Text) })
+        $note=New-Object System.Windows.Forms.Label; $note.Text="'Default (model)' uses the engine's own choice - recommended unless you want to experiment. These settings apply to new renders; improving an image reuses that image's own settings."; $note.Location=New-Object System.Drawing.Point(12,292); $note.Size=New-Object System.Drawing.Size(520,44); $note.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($note)
+        $negOk=Add-Button $g 'Save' 350 340 80 30
+        $negCancel=Add-Button $g 'Cancel' 440 340 90 30
         $negOk.Add_Click({
             $script:Settings.NegativePrompt=($box.Text -replace "(\r?\n)+",' ').Trim()
-            $negState.Text=if($script:Settings.NegativePrompt){('negative: set ('+$script:Settings.NegativePrompt.Length+' chars)')}else{'negative: not set'}
+            $script:Settings.SamplingMethod=[string]$optSampler.SelectedItem
+            $script:Settings.Scheduler=[string]$optSched.SelectedItem
+            $negState.Text=if($script:Settings.NegativePrompt){('negative prompt: set ('+$script:Settings.NegativePrompt.Length+' chars)')}else{'negative prompt: not set'}
             $g.Close()
         })
         $negCancel.Add_Click({$g.Close()})
         [void]$g.ShowDialog($f)
     }
-    $negBtn=Add-Button $left 'Negative prompt...' 200 199 150 27
-    $negBtn.Add_Click({ Show-MossNegativePromptDialog })
+    $negBtn=Add-Button $left 'Options...' 200 199 100 27
+    $negBtn.Add_Click({ Show-MossGenerationOptionsDialog })
     Add-Label $left 'VISUAL STYLE' 18 231 130 | Out-Null
     $style=New-Object System.Windows.Forms.ComboBox; $style.DropDownStyle='DropDownList'; $style.Location=New-Object System.Drawing.Point(18,254); $style.Size=New-Object System.Drawing.Size(250,28); $style.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $style.ForeColor=$cText; foreach($item in @('Photorealistic','Anime','Digital illustration','Oil painting','Watercolor','3D render','Comic book','Cinematic')){[void]$style.Items.Add($item)}; $style.SelectedItem=[string]$script:Settings.ImageStyle; if($style.SelectedIndex -lt 0){$style.SelectedIndex=0}; $left.Controls.Add($style)
     Add-Label $left 'Resolution' 300 231 90 | Out-Null
@@ -734,18 +807,8 @@ try {
     Add-Label $left 'CFG scale' 110 354 90 | Out-Null; $cfg=Add-TextBox $left ([string]$script:Settings.CfgScale) 110 377 75
     Add-Label $left 'Images' 202 354 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDown'; $count.Location=New-Object System.Drawing.Point(202,377); $count.Size=New-Object System.Drawing.Size(75,26); foreach($n in @(1,2,4,8,16,32,64,128,256,512,1000)){[void]$count.Items.Add([string]$n)}; $count.Text=[string]$script:Settings.ImageCount; $left.Controls.Add($count)
     Add-Label $left 'Seed (-1 = random)' 300 354 150 | Out-Null; $seed=Add-TextBox $left ([string]$script:Settings.Seed) 300 377 90
-    # Sampler and scheduler are optional: 'Default (model)' omits the flag so
-    # the engine keeps its model-specific choice (euler for Flux/SD3/Wan).
-    Add-Label $left 'Sampler' 420 354 80 | Out-Null
-    $samplerCombo=New-Object System.Windows.Forms.ComboBox; $samplerCombo.DropDownStyle='DropDownList'; $samplerCombo.Location=New-Object System.Drawing.Point(420,377); $samplerCombo.Size=New-Object System.Drawing.Size(115,26); $samplerCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $samplerCombo.ForeColor=$cText
-    foreach($s in @('Default (model)','euler','euler_a','heun','dpm2','dpm++2s_a','dpm++2m','dpm++2mv2','ipndm','ipndm_v','lcm','ddim_trailing','tcd','res_multistep','res_2s','er_sde','euler_cfg_pp','euler_a_cfg_pp','euler_ge','dpm++2m_sde','dpm++2m_sde_bt','lms')){[void]$samplerCombo.Items.Add($s)}
-    $samplerCombo.SelectedItem=[string]$script:Settings.SamplingMethod; if($samplerCombo.SelectedIndex -lt 0){$samplerCombo.SelectedIndex=0}; $left.Controls.Add($samplerCombo)
-    Add-Label $left 'Scheduler' 550 354 100 | Out-Null
-    $schedCombo=New-Object System.Windows.Forms.ComboBox; $schedCombo.DropDownStyle='DropDownList'; $schedCombo.Location=New-Object System.Drawing.Point(550,377); $schedCombo.Size=New-Object System.Drawing.Size(130,26); $schedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $schedCombo.ForeColor=$cText
-    foreach($s in @('Default (model)','discrete','karras','exponential','ays','gits','sgm_uniform','simple','smoothstep','kl_optimal','lcm','bong_tangent','ltx2','logit_normal','flux2','flux','beta','llada_image')){[void]$schedCombo.Items.Add($s)}
-    $schedCombo.SelectedItem=[string]$script:Settings.Scheduler; if($schedCombo.SelectedIndex -lt 0){$schedCombo.SelectedIndex=0}; $left.Controls.Add($schedCombo)
-    $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(410,377); $speedCombo.Size=New-Object System.Drawing.Size(270,24); $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (native render)','~2x faster (upscale from 70%)','~4x faster (upscale from 50%)','~8x faster (upscale from 35%)','Fastest (upscale from smallest)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo)
-    $speedHint=New-Object System.Windows.Forms.Label; $speedHint.Text='Faster settings render small, then upscale and refine at the chosen size. Exact renders natively at full size and steps. ~7x is the maximum that keeps the picture recognizable; multipliers are approximate.'; $speedHint.Location=New-Object System.Drawing.Point(410,402); $speedHint.Size=New-Object System.Drawing.Size(270,30); $speedHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $left.Controls.Add($speedHint)
+    $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(410,377); $speedCombo.Size=New-Object System.Drawing.Size(270,24); $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (full quality)','~2x faster (upscale from 70%)','~4x faster (upscale from 50%)','~8x faster (upscale from 35%)','Fastest (upscale from smallest)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo)
+    $speedHint=New-Object System.Windows.Forms.Label; $speedHint.Text='Faster settings render the image small and enlarge it - quick drafts, never distorted. Exact = full quality at full size and full steps.'; $speedHint.Location=New-Object System.Drawing.Point(410,402); $speedHint.Size=New-Object System.Drawing.Size(270,30); $speedHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $left.Controls.Add($speedHint)
     Add-Label $left 'OUTPUT FOLDER' 18 414 190 | Out-Null
     $out=Add-TextBox $left ([string]$script:Settings.OutputPath) 18 439 540; $out.Anchor='Top,Left,Right'; $out.ReadOnly=$true; $outBrowse=Add-Button $left 'Browse...' 570 438 110; $outBrowse.Anchor='Top,Right'; $outBrowse.Enabled=$true
     $outBrowse.Add_Click({
@@ -762,7 +825,12 @@ try {
         $dlg.Dispose()
     }.GetNewClosure())
 
-    Add-Label $left 'MODEL FILES  (defaults use the portable models folder)' 18 472 500 | Out-Null
+    # Model files live in a collapsible section: hidden by default, with a
+    # one-line health summary. Auto-expands only when a file is missing.
+    $modelToggle=Add-Button $left 'Model files' 18 472 110 27
+    $modelSummary=Add-Label $left '' 134 476 546
+    $script:ModelFilesExpanded=$false
+    $modelRowControls=New-Object System.Collections.ArrayList
     $modelRows=@(
       @('Diffusion model','DiffusionModelPath','moss_image_sft_int8_convrot.safetensors'),
       @('LLM','LlmPath','Qwen3.5-9B-Q4_K_M.gguf'),
@@ -772,56 +840,72 @@ try {
     $modelControls=@{}
     $yy=498
     foreach($mr in $modelRows){
-        Add-Label $left $mr[0] 18 ($yy+3) 105 | Out-Null
+        $mrLabel=Add-Label $left $mr[0] 18 ($yy+3) 105; [void]$modelRowControls.Add($mrLabel)
         $val=[string]$script:Settings[$mr[1]]; if([string]::IsNullOrWhiteSpace($val)){$val=Join-Path $script:AppRoot ('models\'+$mr[2])} else {$val=Get-AbsoluteAppPath $val}
-        $tb=Add-TextBox $left $val 125 $yy 445; $tb.Anchor='Top,Left,Right'
-        $br=Add-Button $left '...' 580 ($yy-1) 100 27; $br.Anchor='Top,Right'
+        $tb=Add-TextBox $left $val 125 $yy 445; $tb.Anchor='Top,Left,Right'; [void]$modelRowControls.Add($tb)
+        $br=Add-Button $left '...' 580 ($yy-1) 100 27; $br.Anchor='Top,Right'; [void]$modelRowControls.Add($br)
         $key=$mr[1]; $br.Add_Click({$dlg=New-Object System.Windows.Forms.OpenFileDialog;$dlg.Title="Select $($mr[0]) file";$dlg.Filter='Model and data files|*.safetensors;*.gguf;*.json|All files (*.*)|*.*';$dlg.CheckFileExists=$true;$cur=Get-AbsoluteAppPath $tb.Text;if(Test-Path -LiteralPath $cur -PathType Leaf){$dlg.InitialDirectory=Split-Path -Parent $cur;$dlg.FileName=Split-Path -Leaf $cur}else{$modelsDir=Join-Path $script:AppRoot 'models';if(Test-Path -LiteralPath $modelsDir -PathType Container){$dlg.InitialDirectory=$modelsDir}};if($dlg.ShowDialog($f) -eq 'OK'){$tb.Text=$dlg.FileName};$dlg.Dispose()}.GetNewClosure())
         $modelControls[$key]=$tb; $yy+=29
     }
+    function Update-MossModelSummary {
+        $check=@((Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)))
+        foreach($k in @('DiffusionModelPath','LlmPath','VaePath','TokenizerPath')){ $check+=(Get-AbsoluteAppPath $modelControls[$k].Text) }
+        $missingModels=@($check | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
+        if($missingModels.Count -eq 0){ $modelSummary.Text='All 5 engine/model files found.'; $modelSummary.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164) }
+        else { $modelSummary.Text=('{0} of 5 engine/model file(s) not found - click Model files to check the paths.' -f $missingModels.Count); $modelSummary.ForeColor=[System.Drawing.Color]::FromArgb(224,138,138) }
+        return $missingModels.Count
+    }
+    if((Update-MossModelSummary) -gt 0){ $script:ModelFilesExpanded=$true } else { $script:ModelFilesExpanded=$false }
+    foreach($c in $modelRowControls){ $c.Visible=$script:ModelFilesExpanded }
+    $modelToggle.Text=if($script:ModelFilesExpanded){'Model files  [-]'}else{'Model files  [+]'}
+    $modelToggle.Add_Click({
+        $script:ModelFilesExpanded=-not $script:ModelFilesExpanded
+        foreach($c in $modelRowControls){ $c.Visible=$script:ModelFilesExpanded }
+        $modelToggle.Text=if($script:ModelFilesExpanded){'Model files  [-]'}else{'Model files  [+]'}
+        [void](Update-MossModelSummary)
+    })
 
     $generate=Add-Button $left 'GENERATE' 18 615 145 42; $generate.BackColor=$cAccent; $generate.ForeColor=[System.Drawing.Color]::White; $generate.Font=New-Object System.Drawing.Font('Segoe UI Semibold',10,[System.Drawing.FontStyle]::Bold)
-    $cancel=Add-Button $left 'Cancel' 167 615 70 42; $cancel.Enabled=$false
-    $openOut=Add-Button $left 'Open output' 241 615 105 42
-    $btnReport=Add-Button $left 'Error report' 350 615 105 42
-    $renderNative=Add-Button $left 'Render natively' 459 615 112 42; $renderNative.ForeColor=$cMuted
-    $renderNative.Add_Click({
-        # One-click way to re-render the current prompt at full size and full
-        # steps, whatever speed mode the selector currently shows.
-        if ($script:GenState.IsRunning) { return }
-        $script:PendingInitImage = $null
-        $speedCombo.SelectedItem='Exact (native render)'
-        $generate.PerformClick()
-    })
-    $refineNative=Add-Button $left 'Refine natively' 575 615 112 42; $refineNative.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164)
+    $cancel=Add-Button $left 'Cancel' 189 615 70 42; $cancel.Enabled=$false
+    $openOut=Add-Button $left 'Open output' 285 615 105 42
+    $btnReport=Add-Button $left 'Error report' 416 615 105 42
+    $refineNative=Add-Button $left 'Improve last image' 547 615 140 42; $refineNative.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164)
     $refineNative.Add_Click({
-        # Take the most recent generated image (e.g. a fast upscaled preview) and
-        # re-synthesize it at full size with full detail: image-to-image keeps the
-        # composition (same apple, same table) while replacing the low-res detail.
+        # Same sidecar-aware path as the right-click menu: seed, prompt, sampler,
+        # scheduler and negative prompt are reused from the image itself, the
+        # output gets the _hq tag, and the strength adapts to the source.
         if ($script:GenState.IsRunning) { return }
-        $srcImg = $null
-        if ($script:GeneratedFiles -and $script:GeneratedFiles.Count -gt 0) { $srcImg = [string]$script:GeneratedFiles[$script:GeneratedFiles.Count - 1] }
-        if (-not $srcImg -or -not (Test-Path -LiteralPath $srcImg -PathType Leaf)) {
-            [System.Windows.Forms.MessageBox]::Show('Generate an image first - the most recent one is used as the starting picture for native refinement.','Nothing to refine')|Out-Null;return
+        if ($script:GeneratedFiles -and $script:GeneratedFiles.Count -gt 0) {
+            $script:SelectedFile = [string]$script:GeneratedFiles[$script:GeneratedFiles.Count - 1]
+            Start-MossRefineSelected 1
+        } else {
+            [System.Windows.Forms.MessageBox]::Show('Generate an image first - the most recent one is then used as the starting picture for the improvement.','Nothing to improve')|Out-Null
         }
-        $script:PendingInitImage = $srcImg
-        $speedCombo.SelectedItem='Exact (native render)'
-        $generate.PerformClick()
     })
     $btnReport.Add_Click({ Copy-MossErrorReport })
+    # Hover explanations for every control, so nothing is guesswork.
+    $tip=New-Object System.Windows.Forms.ToolTip; $tip.InitialDelay=300; $tip.ReshowDelay=300
+    $tip.SetToolTip($generate,'Renders your prompt. Quality follows the selector above: Exact (full quality) renders at full size and full steps; faster modes render small and enlarge - quick drafts, never distorted.')
+    $tip.SetToolTip($cancel,'Stops the current generation and its engine processes.')
+    $tip.SetToolTip($openOut,'Opens the output folder in Explorer.')
+    $tip.SetToolTip($btnReport,'Copies an anonymised technical error report to the clipboard (and saves it under logs).')
+    $tip.SetToolTip($refineNative,'Takes your most recent image and re-renders it at full quality: same composition, same seed and prompt, more detail. Right-click any file in Generated files to improve that one instead.')
+    $tip.SetToolTip($speedCombo,'How new images are rendered: Exact (full quality), or a faster draft mode that renders small and enlarges.')
+    $tip.SetToolTip($negBtn,'Generation options: negative prompt, sampler and scheduler.')
+    $tip.SetToolTip($modelToggle,'Show or hide the engine and model file paths.')
     $status=New-Object System.Windows.Forms.Label; $status.Text='Ready'; $status.Location=New-Object System.Drawing.Point(18,670); $status.Size=New-Object System.Drawing.Size(660,24); $status.ForeColor=$cMuted; $left.Controls.Add($status)
 
     Add-Label $right 'OUTPUT PREVIEW' 16 14 200 | Out-Null
     $preview=New-Object System.Windows.Forms.PictureBox; $preview.Location=New-Object System.Drawing.Point(16,42); $preview.Size=New-Object System.Drawing.Size(383,285); $preview.Anchor='Top,Left,Right'; $preview.SizeMode='Zoom'; $preview.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $right.Controls.Add($preview)
-    $filesTitle=Add-Label $right 'GENERATED FILES  (right-click = native quality)' 16 342 340
+    $filesTitle=Add-Label $right 'GENERATED FILES  (right-click a file to improve it)' 16 342 340
     $fileList=New-Object System.Windows.Forms.ListBox; $fileList.Location=New-Object System.Drawing.Point(16,368); $fileList.Size=New-Object System.Drawing.Size(383,150); $fileList.Anchor='Top,Left,Right'; $fileList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $fileList.ForeColor=$cText; $right.Controls.Add($fileList)
     $fileList.Add_SelectedIndexChanged({if($fileList.SelectedItem){$p=[string]$fileList.SelectedItem;$script:SelectedFile=$p;if(Test-Path -LiteralPath $p){try{$old=$preview.Image;$preview.Image=[System.Drawing.Image]::FromFile($p);if($old){$old.Dispose()}}catch{}}}})
-    # Right-click a generated file to re-render exactly that picture natively:
-    # same seed and prompt (read from its sidecar), full steps, image-to-image
-    # at the chosen size. Grain stays, distortion does not come back.
+    # Right-click a generated file to re-render exactly that picture at full
+    # quality: same seed and prompt (read from its sidecar), full steps,
+    # image-to-image at the chosen size. Grain stays, distortion does not come back.
     $refineMenu=New-Object System.Windows.Forms.ContextMenuStrip
-    $miSame=$refineMenu.Items.Add('Refine natively (same size)')
-    $miBig=$refineMenu.Items.Add('Refine natively (2x bigger)')
+    $miSame=$refineMenu.Items.Add('Improve this image (full quality)')
+    $miBig=$refineMenu.Items.Add('Improve this image (2x bigger)')
     $fileList.ContextMenuStrip=$refineMenu
     $miSame.Add_Click({ Start-MossRefineSelected 1 })
     $miBig.Add_Click({ Start-MossRefineSelected 2 })
@@ -1226,7 +1310,12 @@ try {
     function Resize-MossImageTo([string]$Path,[int]$TargetW,[int]$TargetH) {
         # Faithful pixel-space enlargement (high-quality bicubic): geometry is
         # preserved exactly; grain may show but features never warp.
-        $img=[System.Drawing.Image]::FromFile($Path)
+        # Read the file bytes first: Image.FromFile keeps a lock on the file and
+        # saving over that same locked file fails with a generic GDI+ error -
+        # which silently kept every fast-mode render at its small size.
+        $srcBytes=[System.IO.File]::ReadAllBytes($Path)
+        $ms=New-Object System.IO.MemoryStream (,$srcBytes)
+        $img=[System.Drawing.Image]::FromStream($ms)
         try {
             $bmp=New-Object System.Drawing.Bitmap($TargetW,$TargetH)
             try {
@@ -1240,7 +1329,7 @@ try {
                 } finally { $g.Dispose() }
                 $bmp.Save($Path,[System.Drawing.Imaging.ImageFormat]::Png)
             } finally { $bmp.Dispose() }
-        } finally { $img.Dispose() }
+        } finally { $img.Dispose(); $ms.Dispose() }
     }
 
     function On-MossGenTimerTick {
@@ -1394,13 +1483,14 @@ try {
     }
 
     function Start-MossRefineSelected([double]$sizeFactor) {
-        # Re-render the file selected in Generated Files natively: image-to-image
-        # at the chosen size, full steps, starting from that exact picture. Seed
-        # and prompt come from the file's sidecar so the composition is kept.
+        # Re-render the file selected in Generated Files at full quality:
+        # image-to-image at the chosen size, full steps, starting from that
+        # exact picture. Seed and prompt come from the file's sidecar so the
+        # composition is kept.
         if ($script:GenState.IsRunning) { return }
         $selFile = [string]$script:SelectedFile
         if (-not $selFile -or -not (Test-Path -LiteralPath $selFile -PathType Leaf)) {
-            [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (left-click it), then right-click for native quality.','No file selected')|Out-Null;return
+            [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (left-click it), then right-click to improve it.','Improve image')|Out-Null;return
         }
         # Target size: the file's own dimensions (sidecar first, image file as fallback), times the factor.
         $tw=0; $th=0
@@ -1411,9 +1501,9 @@ try {
         if ($tw -le 0 -or $th -le 0) {
             try { $img=[System.Drawing.Image]::FromFile($selFile); $tw=$img.Width; $th=$img.Height; $img.Dispose() } catch { $tw=0; $th=0 }
         }
-        if ($tw -le 0 -or $th -le 0) { [System.Windows.Forms.MessageBox]::Show('Could not determine the image size.','Refine natively')|Out-Null;return }
+        if ($tw -le 0 -or $th -le 0) { [System.Windows.Forms.MessageBox]::Show('Could not determine the image size.','Improve image')|Out-Null;return }
         $tw=[int][Math]::Min(8192,[Math]::Ceiling($tw*$sizeFactor)); $th=[int][Math]::Min(8192,[Math]::Ceiling($th*$sizeFactor))
-        if (($tw -ge 2560 -or $th -ge 2560) -and [System.Windows.Forms.MessageBox]::Show(("Native refinement will render at {0} x {1}. Large renders use substantial VRAM/RAM and take a long time. Continue?" -f $tw,$th),'Large refinement',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne [System.Windows.Forms.DialogResult]::Yes){return}
+        if (($tw -ge 2560 -or $th -ge 2560) -and [System.Windows.Forms.MessageBox]::Show(("Improving will render at {0} x {1}. Large renders use substantial VRAM/RAM and take a long time. Continue?" -f $tw,$th),'Large image improvement',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne [System.Windows.Forms.DialogResult]::Yes){return}
         # Seed and prompt from the sidecar (prompt is decrypted only if the
         # history code was already entered this session). Sampler, scheduler and
         # negative prompt are also reused from the image's own settings.
@@ -1431,22 +1521,32 @@ try {
                 }
             } catch {}
         }
-        if (-not $refineSampler -and [string]$samplerCombo.SelectedItem -ne 'Default (model)') { $refineSampler = [string]$samplerCombo.SelectedItem }
-        if (-not $refineSched -and [string]$schedCombo.SelectedItem -ne 'Default (model)') { $refineSched = [string]$schedCombo.SelectedItem }
+        if (-not $refineSampler -and [string]$script:Settings.SamplingMethod -ne 'Default (model)') { $refineSampler = [string]$script:Settings.SamplingMethod }
+        if (-not $refineSched -and [string]$script:Settings.Scheduler -ne 'Default (model)') { $refineSched = [string]$script:Settings.Scheduler }
         if ($refineSeed -lt 0) { $refineSeed = Get-Random -Minimum 1 -Maximum 2147483000 }
-        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$tw; H=$th; Seed=$refineSeed; Prompt=[string]$refinePrompt; NegativePrompt=$refineNeg; SamplingMethod=$refineSampler; Scheduler=$refineSched; Tag=$(if($sizeFactor -gt 1){'hq2x'}else{'hq'}) })
+        # Strength adapts to the source: an upscaled fast preview is soft, so it
+        # needs stronger re-synthesis (0.6) than an already-native render (0.45).
+        $refineStrength = 0.45
+        $realW=0; $realH=0
+        try { $rimg=[System.Drawing.Image]::FromFile($selFile); $realW=$rimg.Width; $realH=$rimg.Height; $rimg.Dispose() } catch {}
+        $wasUpscaled = $false
+        if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
+            try { $scx = Get-Content -LiteralPath $sidecar -Raw | ConvertFrom-Json; if ($scx.UpscaledFrom) { $wasUpscaled = $true } } catch {}
+        }
+        if ($wasUpscaled -or ($realW -gt 0 -and $tw -gt $realW)) { $refineStrength = 0.6 }
+        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$tw; H=$th; Seed=$refineSeed; Prompt=[string]$refinePrompt; NegativePrompt=$refineNeg; SamplingMethod=$refineSampler; Scheduler=$refineSched; Strength=$refineStrength; Tag=$(if($sizeFactor -gt 1){'hq2x'}else{'hq'}) })
         $script:RefineTotal = $script:RefineQueue.Count
         Start-MossNextRefine
     }
 
     function Start-MossNextRefine {
-        # Sequentially processes the refinement queue (one engine run per image).
+        # Sequentially processes the improvement queue (one engine run per image).
         if ($script:GenState.IsRunning) { return }
         if ($script:GenState.CancelRequested) { $script:RefineQueue.Clear(); $script:RefineTotal = 0; return }
         if ($script:RefineQueue.Count -eq 0) {
             if ($script:RefineTotal -gt 0) {
-                $status.Text = "Native refinement finished - $script:RefineTotal image(s) processed"
-                $log.AppendText("`r`nNative refinement finished - $script:RefineTotal image(s) processed.")
+                $status.Text = "Improvement finished - $script:RefineTotal image(s) processed"
+                $log.AppendText("`r`nImprovement finished - $script:RefineTotal image(s) processed.")
                 $script:RefineTotal = 0
             }
             return
@@ -1461,15 +1561,15 @@ try {
             (Get-AbsoluteAppPath ([string]$script:Settings.TokenizerPath)))
         $missingRefine = @($refinePaths | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
         if ($missingRefine.Count -gt 0) {
-            $log.AppendText("`r`nNative refinement stopped - required file(s) not found: $($missingRefine -join ', ')")
+            $log.AppendText("`r`nImprovement stopped - required file(s) not found: $($missingRefine -join ', ')")
             $script:RefineQueue.Clear(); $script:RefineTotal = 0
-            $status.Text = 'Refinement stopped - missing model files (check Hardware / Setup)'
+            $status.Text = 'Improvement stopped - missing model files (click Model files to check the paths)'
             return
         }
         $gpuIdx=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIdx=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIdx=-1 } }
-        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=[int]$script:Settings.Steps;Cfg=[double]$script:Settings.CfgScale;Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode='Exact';InitImage=[string]$item.File;InitStrength=0.45;RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler}
-        $status.Text = ("Refining natively {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
-        $log.AppendText(("`r`nNative refinement: same seed {0}, same prompt, image-to-image from {1}" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File)))
+        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=[int]$script:Settings.Steps;Cfg=[double]$script:Settings.CfgScale;Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode='Exact';InitImage=[string]$item.File;InitStrength=[double]$item.Strength;RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler}
+        $status.Text = ("Improving image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
+        $log.AppendText(("`r`nImproving: same seed {0}, same prompt, image-to-image from {1} (strength {2})" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $item.Strength))
         Start-MossGeneration -Job $job -ForRefine
     }
 
@@ -1505,9 +1605,8 @@ try {
         $gpuIndex=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIndex=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIndex=-1 } }
         $speedMode=switch([string]$speedCombo.SelectedItem){'~2x faster (upscale from 70%)'{'2x'}'~4x faster (upscale from 50%)'{'4x'}'~8x faster (upscale from 35%)'{'8x'}'Fastest (upscale from smallest)'{'Fast'}default{'Exact'}}
         $negPrompt=[string]$script:Settings.NegativePrompt
-        $samplingMethod=$null; if([string]$samplerCombo.SelectedItem -and [string]$samplerCombo.SelectedItem -ne 'Default (model)'){ $samplingMethod=[string]$samplerCombo.SelectedItem }
-        $scheduler=$null; if([string]$schedCombo.SelectedItem -and [string]$schedCombo.SelectedItem -ne 'Default (model)'){ $scheduler=[string]$schedCombo.SelectedItem }
-        $script:Settings.SamplingMethod=[string]$samplerCombo.SelectedItem; $script:Settings.Scheduler=[string]$schedCombo.SelectedItem
+        $samplingMethod=$null; if([string]$script:Settings.SamplingMethod -and [string]$script:Settings.SamplingMethod -ne 'Default (model)'){ $samplingMethod=[string]$script:Settings.SamplingMethod }
+        $scheduler=$null; if([string]$script:Settings.Scheduler -and [string]$script:Settings.Scheduler -ne 'Default (model)'){ $scheduler=[string]$script:Settings.Scheduler }
         $initImg=$null; if($script:PendingInitImage){ $initImg=[string]$script:PendingInitImage; $script:PendingInitImage=$null }
         $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Prompt=$generationPrompt;GpuIndex=$gpuIndex;SpeedMode=$speedMode;InitImage=$initImg;InitStrength=0.45;NegativePrompt=$negPrompt;SamplingMethod=$samplingMethod;Scheduler=$scheduler}
         $generate.Enabled=$false;$cancel.Enabled=$true;$log.Clear();$fileList.Items.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
@@ -1539,6 +1638,8 @@ try {
 }
 
 # Show setup on first run or when explicitly requested. Otherwise open the generator directly.
+# Hide the launcher console before ANY window appears (password prompt included).
+try { Hide-MossConsoleWindow } catch {}
 try {
     if ($SetupOnly -or -not [bool]$script:Settings.HardwareSetupComplete) {
         $form.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())

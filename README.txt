@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.17)
+MOSS Image Studio - portable build (v0.1.18)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -6,8 +6,9 @@ drive or computer at any time.
 Start MOSS with MOSS-Image-Studio.bat (or MOSS-Image-Studio.vbs).
 The launcher locates Windows PowerShell 5.1 directly in its standard Windows
 installation location, even when PowerShell is not on the PATH.
-After the MOSS form appears, it hides the PowerShell console; the MOSS
-application stays visible and shows its current version in the title and header.
+The PowerShell console is hidden as soon as MOSS starts (password prompt
+included); the MOSS application stays visible and shows its current version
+in the title and header.
 Closing MOSS ends its launcher and PowerShell host, and stops active image-engine
 processes. Temporary update files are removed after installation or download failure.
 
@@ -37,7 +38,7 @@ Image generation
   and the prompt conditioning is reused for every image in the batch, which is
   noticeably faster than restarting the engine for each image. Seeds increment
   automatically (base seed, base+1, ...) exactly as before.
-- Render speed selector (next to the image settings): Exact (native render),
+- Render speed selector (next to the image settings): Exact (full quality),
   or faster modes that render at a reduced size with the FULL step count and
   then upscale the finished image in pixel space (high-quality bicubic).
   No second sampling pass runs, so results are faithful - possibly grainy or
@@ -57,36 +58,64 @@ Image generation
   Installs that still point at the old outputs\admin default are moved to
   outputs\ automatically; folders you chose yourself are never changed.
 
-Native refinement of generated files (right-click)
----------------------------------------------------
-- In the "Generated files" list, right-click any image to refine it natively:
+Improving generated images (right-click)
+----------------------------------------
+- In the "Generated files" list, right-click any image to improve it:
   MOSS re-renders exactly that picture (same seed and prompt, read from the
   image's sidecar) at full quality using image-to-image - the composition
   (same apple, same table) stays, the detail becomes genuinely native.
-- "Refine natively (same size)" keeps the image's size; "Refine natively
-  (2x bigger)" doubles it (large sizes ask for confirmation first).
-- The strength (0.45) keeps most of the composition while replacing the
-  low-resolution detail; the full step count applies.
-- Refined files are easy to spot in the output folder: ..._hq_01.png for
-  same-size refinement, ..._hq2x_01.png for the 2x version.
+- "Improve this image (full quality)" keeps the image's size; "Improve this
+  image (2x bigger)" doubles it (large sizes ask for confirmation first).
+- The strength adapts to the source: 0.6 for upscaled previews (they are
+  soft and need stronger re-synthesis), 0.45 for already-native renders.
+  The full step count applies.
+- Improved files are easy to spot in the output folder: ..._hq_01.png for
+  same-size improvement, ..._hq2x_01.png for the 2x version.
+- The "Improve last image" button does the same for the most recent image.
 - A typical workflow: render a fast preview batch with the speed selector,
-  pick the previews you like, right-click each winner and refine it natively
-  while you look at something else.
+  pick the previews you like, right-click each winner and improve it while
+  you look at something else.
 - If you know the prompt-history code, MOSS reuses the exact prompt of the
-  refined image; otherwise it uses the text currently in the prompt box.
+  improved image; otherwise it uses the text currently in the prompt box.
 
-Sampler, scheduler and negative prompt
---------------------------------------
-- Next to Steps/CFG there are optional Sampler and Scheduler dropdowns.
-  "Default (model)" omits the flag, so the engine keeps its model-specific
-  choice. Power users can experiment (euler, dpm++2m, karras, gits, ...) -
-  the lists are the exact values supported by the bundled engine.
-- "Negative prompt..." (next to Image settings) opens a dialog for what the
-  image should NOT contain (e.g. blurry, extra fingers, watermark). Empty
-  means no negative prompt is sent. The negative prompt is stored in the
-  config and, like the positive prompt, encrypted in the image sidecars.
-- Native refinement reuses the refined image's own sampler, scheduler and
-  negative prompt when they are recorded in its sidecar.
+Generation options (Options...)
+-------------------------------
+- The "Options..." button next to Image settings opens one dialog with the
+  negative prompt, sampler and scheduler.
+- Negative prompt: what the image should NOT contain (e.g. blurry, extra
+  fingers, watermark). Empty means no negative prompt is sent. It is stored
+  in the config and, like the positive prompt, encrypted in the image
+  sidecars.
+- Sampler and scheduler: "Default (model)" omits the flag, so the engine
+  keeps its model-specific choice (recommended). The lists are the exact
+  values supported by the bundled engine for experimenting.
+- Improving an image reuses that image's own sampler, scheduler and negative
+  prompt when they are recorded in its sidecar.
+
+What is new in v0.1.18
+----------------------
+- Fixed: fast render modes (Fastest / ~2x / ~4x / ~8x) kept their images at
+  the small render size because the pixel-space enlargement failed with a
+  generic GDI+ error (the file was still open while MOSS tried to save over
+  it). The enlargement now reads the file into memory first and works.
+- Fixed: "Improve last image" now uses the same sidecar-aware path as the
+  right-click menu (seed, prompt, sampler, scheduler, negative prompt are
+  reused; output gets the _hq tag in the filename).
+- Improvement strength now adapts to the source: 0.6 for upscaled previews
+  (they are soft and need stronger re-synthesis), 0.45 for already-native
+  renders. The used strength is shown in the log.
+- Clearer controls: the two confusing buttons are now one "Improve last
+  image" button (the old "Render natively" is covered by the speed selector:
+  set Exact and press GENERATE). Right-click items read "Improve this image".
+- "Options..." dialog holds the negative prompt, sampler and scheduler; every
+  sampler and scheduler option shows a plain-language description inline and
+  on hover, and "Default (model)" states what the engine actually uses
+  (euler; Flux-family schedule).
+- Model file paths are collapsed by default behind a "Model files" toggle
+  with a health summary; it opens automatically only when a file is missing.
+- Every main button explains itself on hover.
+- The PowerShell console is hidden from the start (password prompt included)
+  and the history code field is focused immediately.
 
 Hardware and setup
 ------------------
