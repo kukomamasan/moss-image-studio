@@ -963,12 +963,14 @@ try {
     $miBig=$refineMenu.Items.Add('Improve this image (2x bigger)')
     $miCustom=$refineMenu.Items.Add('Improve using the settings in the main window...')
     $miAll=$refineMenu.Items.Add('Improve ALL files that can be improved...')
+    $miInfo=$refineMenu.Items.Add('Show image info (prompt, seed, settings)...')
     $miDelete=$refineMenu.Items.Add('Delete this file')
     $fileList.ContextMenuStrip=$refineMenu
     $miSame.Add_Click({ Start-MossRefineSelected 1 })
     $miBig.Add_Click({ Start-MossRefineSelected 2 })
     $miCustom.Add_Click({ Start-MossRefineWithCurrentSettings })
     $miAll.Add_Click({ Start-MossRefineAll })
+    $miInfo.Add_Click({ Show-MossImageInfo })
     $miDelete.Add_Click({ Remove-MossSelectedFile })
     $refineMenu.ShowItemToolTips=$true
     $miSame.ToolTipText='Re-render this image at its current size with full detail - same seed and prompt, more detail. Upscaled fast previews are re-rendered from scratch (not from the blurry preview pixels).'
@@ -976,6 +978,7 @@ try {
     $miCustom.ToolTipText='Improve this image using the size, steps, CFG, seed and prompt currently shown in the main window. Upscaled fast previews are re-rendered from scratch.'
     $miAll.ToolTipText='Queue every generated image that still has quality headroom (soft previews, fewer steps, smaller than the current size).'
     $miDelete.ToolTipText='Delete this image and its sidecar from disk (asks first).'
+    $miInfo.ToolTipText='Shows what is stored for this image: prompt, negative prompt, seed, size, steps, CFG, speed mode, sampler and scheduler. The prompt is decrypted only if the history code was entered. Copy the prompt with one click.'
     # Show ALL previously generated images at startup, not just this session's:
     # scan the output folder and list everything (oldest first, newest selected).
     try {
@@ -1775,6 +1778,79 @@ try {
         try { $old=$preview.Image; $preview.Image=$null; if($old){ $old.Dispose() } } catch {}
         if($fileList.Items.Count -gt 0){ $fileList.SelectedIndex=$fileList.Items.Count-1 }
         $status.Text='File deleted.'
+    }
+
+    function Show-MossImageInfo {
+        # Shows what is stored for the selected image: prompt (decrypted only
+        # when the history code was entered), negative prompt, seed, size,
+        # steps, CFG, speed mode, sampler, scheduler and origin. Read-only.
+        $selFile = [string]$script:SelectedFile
+        if (-not $selFile -or -not (Test-Path -LiteralPath $selFile -PathType Leaf)) {
+            [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (left-click it), then right-click again.','Image info')|Out-Null;return
+        }
+        $imgW=0; $imgH=0
+        try { $img=[System.Drawing.Image]::FromFile($selFile); $imgW=$img.Width; $imgH=$img.Height; $img.Dispose() } catch {}
+        $prompt=''; $promptLockedNote=''; $neg=''
+        $lines=New-Object System.Collections.Generic.List[string]
+        $lines.Add(('File: ' + [System.IO.Path]::GetFileName($selFile)))
+        if($imgW -gt 0){ $lines.Add(('Size: ' + $imgW + ' x ' + $imgH)) }
+        $side=[System.IO.Path]::ChangeExtension($selFile,'.json')
+        if (Test-Path -LiteralPath $side -PathType Leaf) {
+            try {
+                $sc = Get-Content -LiteralPath $side -Raw | ConvertFrom-Json
+                if ($sc.Seed) { $lines.Add(('Seed: ' + [string]$sc.Seed)) }
+                $setLine=''
+                if ($sc.Steps) { $setLine=('steps ' + [string]$sc.Steps) }
+                if ($sc.CfgScale) { if($setLine){$setLine+=', '}; $setLine+=('CFG ' + [string]$sc.CfgScale) }
+                if ($sc.Sampler) { $setLine+=(', sampler ' + [string]$sc.Sampler) }
+                if ($sc.Scheduler) { $setLine+=(', scheduler ' + [string]$sc.Scheduler) }
+                if ($setLine) { $lines.Add(('Settings: ' + $setLine)) }
+                $speedLine=''
+                if ($sc.SpeedMode) { $speedLine=('Speed mode: ' + [string]$sc.SpeedMode) }
+                if ($sc.UpscaledFrom) { $speedLine+=(' (rendered small, enlarged: ' + [string]$sc.UpscaledFrom + ')') }
+                if ($speedLine) { $lines.Add($speedLine) }
+                if ($sc.InitImage) {
+                    $lines.Add(('Origin: improved copy of ' + [string]$sc.InitImage + $(if($sc.InitStrength){' (image-to-image strength ' + [string]$sc.InitStrength + ')'}else{''})))
+                } else {
+                    $lines.Add('Origin: original generation')
+                }
+                if ($sc.GeneratedAt) { $lines.Add(('Created: ' + [string]$sc.GeneratedAt)) }
+                if ($sc.PromptProtected) {
+                    if (-not $script:HistoryLocked -and $script:HistoryPassphrase) {
+                        try { $p = Unprotect-MossPayload ([string]$sc.PromptProtected) $script:HistoryPassphrase; if ($p) { $prompt=[string]$p } else { $promptLockedNote='(encrypted - the history code did not unlock it)' } } catch { $promptLockedNote='(encrypted - enter your history code in MOSS to see the prompt)' }
+                    } else {
+                        $promptLockedNote='(encrypted - enter your history code in MOSS to see the prompt)'
+                    }
+                } else {
+                    $promptLockedNote='(not saved - no history code was active when this image was created)'
+                }
+                if ($sc.NegativePromptProtected) {
+                    if (-not $script:HistoryLocked -and $script:HistoryPassphrase) {
+                        try { $np = Unprotect-MossPayload ([string]$sc.NegativePromptProtected) $script:HistoryPassphrase; if ($np) { $neg=[string]$np } } catch {}
+                    }
+                }
+            } catch {
+                $lines.Add('Info file could not be read: ' + $_.Exception.Message)
+            }
+        } else {
+            $lines.Add('No info file (.json) was found next to this image.')
+        }
+        $g=New-Object System.Windows.Forms.Form
+        $g.Text='Image info'; $g.Size=New-Object System.Drawing.Size(660,540); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false; $g.MinimizeBox=$false
+        $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
+        $lp=New-Object System.Windows.Forms.Label; $lp.Text='Prompt used for this image'; $lp.Location=New-Object System.Drawing.Point(12,10); $lp.Size=New-Object System.Drawing.Size(400,18); $lp.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($lp)
+        $pBox=New-Object System.Windows.Forms.TextBox; $pBox.Multiline=$true; $pBox.ReadOnly=$true; $pBox.ScrollBars='Vertical'; $pBox.WordWrap=$true; $pBox.Text=$(if($prompt){$prompt}else{$promptLockedNote}); $pBox.Location=New-Object System.Drawing.Point(12,30); $pBox.Size=New-Object System.Drawing.Size(620,120); $pBox.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $pBox.ForeColor=$cText; $pBox.BorderStyle='FixedSingle'; $g.Controls.Add($pBox)
+        $ln=New-Object System.Windows.Forms.Label; $ln.Text='Negative prompt'; $ln.Location=New-Object System.Drawing.Point(12,158); $ln.Size=New-Object System.Drawing.Size(400,18); $ln.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($ln)
+        $nBox=New-Object System.Windows.Forms.TextBox; $nBox.Multiline=$true; $nBox.ReadOnly=$true; $nBox.ScrollBars='Vertical'; $nBox.WordWrap=$true; $nBox.Text=$(if($neg){$neg}else{'(none)'}); $nBox.Location=New-Object System.Drawing.Point(12,178); $nBox.Size=New-Object System.Drawing.Size(620,48); $nBox.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $nBox.ForeColor=$cText; $nBox.BorderStyle='FixedSingle'; $g.Controls.Add($nBox)
+        $ls=New-Object System.Windows.Forms.Label; $ls.Text='Settings and origin (also stored in the .json file next to the image)'; $ls.Location=New-Object System.Drawing.Point(12,234); $ls.Size=New-Object System.Drawing.Size(560,18); $ls.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($ls)
+        $sBox=New-Object System.Windows.Forms.TextBox; $sBox.Multiline=$true; $sBox.ReadOnly=$true; $sBox.ScrollBars='Vertical'; $sBox.Text=($lines -join "`r`n"); $sBox.Location=New-Object System.Drawing.Point(12,254); $sBox.Size=New-Object System.Drawing.Size(620,190); $sBox.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $sBox.ForeColor=$cText; $sBox.BorderStyle='FixedSingle'; $g.Controls.Add($sBox)
+        $copyBtn=New-Object System.Windows.Forms.Button; $copyBtn.Text='Copy prompt'; $copyBtn.Location=New-Object System.Drawing.Point(400,456); $copyBtn.Size=New-Object System.Drawing.Size(110,30); $copyBtn.Enabled=[bool]$prompt; $g.Controls.Add($copyBtn)
+        $closeBtn=New-Object System.Windows.Forms.Button; $closeBtn.Text='Close'; $closeBtn.Location=New-Object System.Drawing.Point(522,456); $closeBtn.Size=New-Object System.Drawing.Size(110,30); $g.Controls.Add($closeBtn)
+        $copyBtn.Add_Click({ if($prompt){ try { [System.Windows.Forms.Clipboard]::SetText($prompt) } catch {} } })
+        $closeBtn.Add_Click({ $g.Close() })
+        $g.AcceptButton=$closeBtn; $g.CancelButton=$closeBtn
+        $g.ShowDialog()|Out-Null
+        $g.Dispose()
     }
 
     function Start-MossNextRefine {
