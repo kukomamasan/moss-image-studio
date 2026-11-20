@@ -1,4 +1,4 @@
-﻿# MOSS Image Studio - portable hardware setup foundation
+# MOSS Image Studio - portable hardware setup foundation
 # Windows PowerShell 5.1 | All paths are resolved relative to this script.
 [CmdletBinding()]
 param([switch]$SetupOnly,[switch]$ReturnToGenerator)
@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.41'
+$script:AppVersion = '0.1.42'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -2689,7 +2689,22 @@ try {
         if(-not $cPrompt){[System.Windows.Forms.MessageBox]::Show('No prompt found. Enter one in the main window, or enter your history code so MOSS can read the prompt stored with this image.','Prompt required')|Out-Null;return}
         $cStrength=0.6; $t=0.0; if (ConvertTo-MossDouble ([string]$script:Settings.ImproveStrength) ([ref]$t)) { if($t -ge 0.05 -and $t -le 0.95){ $cStrength=$t } }
         $cStrength=Get-MossImproveStrength $selFile $cStrength
-        $useSeed=$csd; if($useSeed -lt 0){ $useSeed=Get-Random -Minimum 1 -Maximum 2147483000 }
+        $useSeed=$csd
+        $seedNote=''
+        if($useSeed -lt 0){
+            # Image-to-image with a FRESH random seed produced visibly worse
+            # results in practice: the noise pattern then does not align with
+            # the picture and the model fights the init image (verified with
+            # real runs - same-seed improves are sharp, random-seed improves
+            # muddy). Reuse the image's own recorded seed whenever it has one.
+            $sideSeed=[long]-1
+            $sideForSeed=[System.IO.Path]::ChangeExtension($selFile,'.json')
+            if (Test-Path -LiteralPath $sideForSeed -PathType Leaf) {
+                try { $scS = Get-Content -LiteralPath $sideForSeed -Raw | ConvertFrom-Json; if ($scS.Seed) { $sideSeed=[long]$scS.Seed } } catch {}
+            }
+            if($sideSeed -ge 0){ $useSeed=$sideSeed; $seedNote=' (from the image - keeps the noise pattern aligned with it)' }
+            else { $useSeed=Get-Random -Minimum 1 -Maximum 2147483000; $seedNote=' (random - the image has no stored seed)' }
+        }
         # Show the source image's real dimensions and the final size up front.
         $csW=0; $csH=0
         try { $img=[System.Drawing.Image]::FromFile($selFile); $csW=$img.Width; $csH=$img.Height; $img.Dispose() } catch {}
@@ -2697,14 +2712,19 @@ try {
         $sizeLine = ''
         if ($csW -gt 0) { $sizeLine = ("`r`nSource image: {0} x {1} ({2} MP)  ->  final: {3} x {4} ({5} MP)" -f $csW,$csH,[Math]::Round((([double]$csW * [double]$csH) / 1000000.0),1),$cw,$chh,$finalMP) }
         $bigNote = if ($finalMP -gt 4.5) { "`r`n`r`nAbove what most GPUs render natively - it will be rendered at HALF SIZE with all steps and enlarged automatically. Tip: for the best big-image quality, work natively up to 2048 x 2048 and improve THAT image 2x." } else { '' }
+        $aspectNote=''
+        if($csW -gt 0 -and $csH -gt 0){
+            $srcA=[double]$csW/[double]$csH; $tgtA=[double]$cw/[double]$chh
+            if($tgtA -gt 0 -and [Math]::Abs($srcA/$tgtA-1) -gt 0.02){ $aspectNote=("`r`n`r`nNote: the target size has a different aspect ratio than the source ({0} x {1} -> {2} x {3}) - the composition will be squashed or stretched and the result can look worse. Use matching proportions for the best quality." -f $csW,$csH,$cw,$chh) }
+        }
         $isPreview=Test-MossFastPreview $selFile
-        $settingsLine=("`r`n{0} x {1}, steps {2}, CFG {3}, seed {4}, strength {5}" -f $cw,$chh,$cst,$ccf,$useSeed,$cStrength)
+        $settingsLine=("`r`n{0} x {1}, steps {2}, CFG {3}, seed {4}{5}, strength {6}" -f $cw,$chh,$cst,$ccf,$useSeed,$seedNote,$cStrength)
         if($isPreview){
             $settingsLine+=("`r`n`r`nThis is an upscaled fast preview, so a raised strength is used automatically: detail is regenerated instead of inheriting the blurry enlargement, while the composition comes from your image. If the result still looks soft, raise 'Improve strength' in Options; if the scene starts to drift, lower it.")
         }else{
             $settingsLine+=("`r`n`r`nImage-to-image: the composition comes from the selected image.")
         }
-        $settingsLine+=$sizeLine+$bigNote
+        $settingsLine+=$sizeLine+$bigNote+$aspectNote
         $answer=[System.Windows.Forms.MessageBox]::Show(("Improving {0} using the settings currently in the main window:{1}`r`n`r`nThe prompt is the text in the prompt box. Start?" -f [System.IO.Path]::GetFileName($selFile),$settingsLine),'Improve with current settings',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
         if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
         $useSampler=$null; if([string]$script:Settings.SamplingMethod -ne 'Default (model)'){ $useSampler=[string]$script:Settings.SamplingMethod }
@@ -3019,6 +3039,7 @@ try {
     try { [System.Windows.Forms.MessageBox]::Show(("MOSS Image Studio could not start.`r`n`r`n"+$_.Exception.Message+"`r`n`r`nA technical report was saved to the logs folder."),'MOSS Image Studio',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null } catch {}
     exit 1
 }
+
 
 
 
