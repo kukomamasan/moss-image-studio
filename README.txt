@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.50)
+MOSS Image Studio - portable build (v0.1.51)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -120,6 +120,7 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
+What is new in v0.1.51----------------------- Trying to improve (or re-render) an image whose prompt is stored  ENCRYPTED while no history code is entered now shows a specific,  actionable error: what happened, and the two ways forward - enter  the code via 'History code...' so MOSS reads the stored prompt, or  type a new prompt in the main window and use that instead. Nothing  is generated and the image is never changed in this case.
 What is new in v0.1.50
 ----------------------
 - If you continue WITHOUT the password (history code) at startup, the
