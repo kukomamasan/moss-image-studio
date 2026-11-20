@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.23)
+MOSS Image Studio - portable build (v0.1.24)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -116,6 +116,12 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.24
+----------------------
+- Fixed: the CFG explanation popup (and the startup error popup) showed
+  strange letter sequences like `r`n instead of line breaks. They now show
+  real line breaks.
 
 What is new in v0.1.23
 ----------------------
