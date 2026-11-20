@@ -129,6 +129,12 @@ What is new in v0.1.22
   Native images are still improved with image-to-image as before, and the
   "Improve using the settings in the main window" confirmation tells you
   when a fresh render is used.
+- NEW: right-click an image in "Generated files" -> "Show image info
+  (prompt, seed, settings)..." - shows the prompt, negative prompt, seed,
+  size, steps, CFG, speed mode, sampler, scheduler and whether the image is
+  an original or an improved copy, with a "Copy prompt" button. Prompts are
+  decrypted only when the history code was entered; otherwise the dialog
+  says so (they are stored encrypted in the .json sidecar).
 
 What is new in v0.1.21
 ----------------------
