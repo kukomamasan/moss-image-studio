@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.30'
+$script:AppVersion = '0.1.31'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -38,7 +38,7 @@ public static class MossNativeWindow {
     if($consoleHandle -ne [IntPtr]::Zero){[void][MossNativeWindow]::ShowWindow($consoleHandle,0)}
 }
 
-function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history') {
+function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history',[System.Windows.Forms.Form]$Owner=$null) {
     $dialog = New-Object System.Windows.Forms.Form
     $dialog.Text = if ($Create) { "Set $Purpose code" } else { "Enter $Purpose code" }
     $dialog.Size = New-Object System.Drawing.Size(440,220); $dialog.StartPosition='CenterParent'; $dialog.FormBorderStyle='FixedDialog'; $dialog.MaximizeBox=$false; $dialog.MinimizeBox=$false; $dialog.Topmost=$true
@@ -58,7 +58,7 @@ function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history') {
     $focusTimer.Add_Tick({ [void]$first.Focus(); $first.Select(); $focusTimer.Stop() }.GetNewClosure())
     $focusTimer.Start()
     try {
-        while ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        while ($dialog.ShowDialog($Owner) -eq [System.Windows.Forms.DialogResult]::OK) {
             $maxLength = if ($Create) { 16 } else { 64 }
             if ($first.Text.Length -lt 4 -or $first.Text.Length -gt $maxLength) {
                 $limit = if ($Create) { '4 to 16' } else { '4 to 64 (older codes may be longer)' }
@@ -120,10 +120,10 @@ function Test-MossHistoryPassphrase([string]$Password,[string]$Verifier) {
     try { return ((Unprotect-MossPayload $Verifier $Password) -ceq 'MOSS-HISTORY-PASSWORD-CHECK-V1') } catch { return $false }
 }
 
-function Reset-MossHistoryPassword {
+function Reset-MossHistoryPassword([System.Windows.Forms.Form]$Owner=$null) {
     $answer=[System.Windows.Forms.MessageBox]::Show('This clears the saved prompt history and replaces its code. The old history cannot be recovered afterward. Continue?','Reset history code',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
     if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return $false}
-    $newPassword=Get-MossHistoryPassphrase $true
+    $newPassword=Get-MossHistoryPassphrase $true 'history' $Owner
     if(-not $newPassword){return $false}
     $script:HistoryPassphrase=$newPassword
     $script:HistoryPasswordVerifier=Protect-MossPayload 'MOSS-HISTORY-PASSWORD-CHECK-V1' $newPassword
@@ -409,7 +409,7 @@ $note.Text='Note: display enumeration cannot prove CUDA / ROCm / SYCL support. T
 
 $refresh=New-Object System.Windows.Forms.Button; $refresh.Text='Rescan hardware'; $refresh.Location=New-Object System.Drawing.Point(24,612); $refresh.Size=New-Object System.Drawing.Size(130,32); $refresh.Anchor='Bottom,Left'; $form.Controls.Add($refresh)
 $setupHistoryCode=New-Object System.Windows.Forms.Button; $setupHistoryCode.Text='Set / reset history code'; $setupHistoryCode.Location=New-Object System.Drawing.Point(350,612); $setupHistoryCode.Size=New-Object System.Drawing.Size(190,32); $setupHistoryCode.Anchor='Bottom,Left'; $form.Controls.Add($setupHistoryCode)
-$setupHistoryCode.Add_Click({ if(Reset-MossHistoryPassword){[System.Windows.Forms.MessageBox]::Show('New history code saved. No prompt history is stored yet.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
+$setupHistoryCode.Add_Click({ if(Reset-MossHistoryPassword $form){[System.Windows.Forms.MessageBox]::Show('New history code saved. No prompt history is stored yet.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
 $test=New-Object System.Windows.Forms.Button; $test.Text='Check backend support'; $test.Location=New-Object System.Drawing.Point(166,612); $test.Size=New-Object System.Drawing.Size(170,32); $test.Anchor='Bottom,Left'; $form.Controls.Add($test)
 $save=New-Object System.Windows.Forms.Button; $save.Text='Save setup'; $save.Location=New-Object System.Drawing.Point(720,612); $save.Size=New-Object System.Drawing.Size(140,32); $save.Anchor='Bottom,Right'; $save.BackColor=[System.Drawing.Color]::FromArgb(45,112,173); $save.ForeColor=[System.Drawing.Color]::White; $save.FlatStyle='Flat'; $form.Controls.Add($save)
 $refresh.Add_Click({ [System.Windows.Forms.MessageBox]::Show('Close and reopen MOSS Image Studio to perform a fresh hardware scan.','Hardware scan',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null; $form.Close() })
@@ -713,7 +713,7 @@ try {
     Add-Label $left 'PROMPT' 18 14 180 | Out-Null
     $historyPick=New-Object System.Windows.Forms.ComboBox; $historyPick.DropDownStyle='DropDownList'; $historyPick.Location=New-Object System.Drawing.Point(315,9); $historyPick.Size=New-Object System.Drawing.Size(150,27); $historyPick.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $historyPick.ForeColor=$cText; $left.Controls.Add($historyPick)
     $resetHistoryCode=Add-Button $left 'History code...' 471 8 90 28
-    $resetHistoryCode.Add_Click({ if(Reset-MossHistoryPassword){$history=@();$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('New history code saved. The old history was cleared.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
+    $resetHistoryCode.Add_Click({ if(Reset-MossHistoryPassword $f){$history=@();$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('New history code saved. The old history was cleared.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
     $resetHistoryCode.Enabled=$true
     foreach($oldPrompt in @($history | Select-Object -First 10)){[void]$historyPick.Items.Add([string]$oldPrompt)}
     $paste=Add-Button $left 'Paste' 567 8 95 28
@@ -727,7 +727,7 @@ try {
         # it opens in context over MOSS instead of floating alone at startup.
         if (-not $script:LockedHistoryEnvelope) { return }
         while ($true) {
-            $candidate = Get-MossHistoryPassphrase $false
+            $candidate = Get-MossHistoryPassphrase $false $null $f
             if ($candidate) {
                 try {
                     $plain = Unprotect-MossPayload ([string]$script:LockedHistoryEnvelope) $candidate
@@ -746,7 +746,7 @@ try {
             $choice = Show-MossHistoryRecoveryChoice
             if($choice -eq 'retry'){continue}
             if($choice -eq 'skip'){$script:HistoryLocked=$true;$script:Settings.PromptHistory=@();[System.Windows.Forms.MessageBox]::Show('MOSS will continue without prompt history. The encrypted history is preserved.','History locked')|Out-Null;return}
-            if($choice -eq 'reset'){if(Reset-MossHistoryPassword){$historyPick.Items.Clear();return};continue}
+            if($choice -eq 'reset'){if(Reset-MossHistoryPassword $f){$historyPick.Items.Clear();return};continue}
             if($choice -eq 'disable'){if(Disable-MossHistory){$historyPick.Items.Clear();return};continue}
         }
     }
