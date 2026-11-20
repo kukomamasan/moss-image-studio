@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.44'
+$script:AppVersion = '0.1.45'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
@@ -3049,8 +3049,21 @@ try {
     $f.Add_FormClosing({if($script:GenState.IsRunning){$script:GenState.CancelRequested=$true;Stop-MossGen}})
     $f.Add_Shown({
         Hide-MossConsoleWindow
-        Unlock-MossHistoryAfterShow
-        Test-MossOfferStartupDownload $f
+        # The history prompt and the startup download offer are opened from a
+        # short one-shot timer, NOT directly inside Shown: a modal opened
+        # while the main window is still in its first activation sequence
+        # gets buried once the owner finishes activating (the prompt was not
+        # staying on top after opening MOSS). 200 ms later the window is
+        # fully activated, so the owned modal sits on a stable foreground
+        # owner - on top of MOSS and focused, without pinning above other apps.
+        $startupDialogTimer=New-Object System.Windows.Forms.Timer
+        $startupDialogTimer.Interval=200
+        $startupDialogTimer.Add_Tick({
+            $startupDialogTimer.Stop()
+            Unlock-MossHistoryAfterShow
+            Test-MossOfferStartupDownload $f
+        })
+        $startupDialogTimer.Start()
     })
     [void]$f.ShowDialog()
     if($preview.Image){$preview.Image.Dispose()}
@@ -3081,6 +3094,7 @@ try {
     try { [System.Windows.Forms.MessageBox]::Show(("MOSS Image Studio could not start.`r`n`r`n"+$_.Exception.Message+"`r`n`r`nA technical report was saved to the logs folder."),'MOSS Image Studio',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null } catch {}
     exit 1
 }
+
 
 
 
