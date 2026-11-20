@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.16)
+MOSS Image Studio - portable build (v0.1.17)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -74,6 +74,19 @@ Native refinement of generated files (right-click)
   while you look at something else.
 - If you know the prompt-history code, MOSS reuses the exact prompt of the
   refined image; otherwise it uses the text currently in the prompt box.
+
+Sampler, scheduler and negative prompt
+--------------------------------------
+- Next to Steps/CFG there are optional Sampler and Scheduler dropdowns.
+  "Default (model)" omits the flag, so the engine keeps its model-specific
+  choice. Power users can experiment (euler, dpm++2m, karras, gits, ...) -
+  the lists are the exact values supported by the bundled engine.
+- "Negative prompt..." (next to Image settings) opens a dialog for what the
+  image should NOT contain (e.g. blurry, extra fingers, watermark). Empty
+  means no negative prompt is sent. The negative prompt is stored in the
+  config and, like the positive prompt, encrypted in the image sidecars.
+- Native refinement reuses the refined image's own sampler, scheduler and
+  negative prompt when they are recorded in its sidecar.
 
 Hardware and setup
 ------------------

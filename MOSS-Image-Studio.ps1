@@ -5,7 +5,7 @@ param([switch]$SetupOnly,[switch]$ReturnToGenerator)
 
 $ErrorActionPreference = 'Stop'
 $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$script:AppVersion = '0.1.16'
+$script:AppVersion = '0.1.17'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ErrorReportUrl = '' }
@@ -572,6 +572,7 @@ function Show-GeneratorWindow {
         TokenizerPath = (Join-Path $script:AppRoot 'models\tokenizer_qwen3.5.json')
         OutputPath = $script:Settings.OutputPath
         Steps = 25; CfgScale = 3.0; Width = 1360; Height = 768; ImageCount = 1; Seed = -1
+        NegativePrompt = ''; SamplingMethod = 'Default (model)'; Scheduler = 'Default (model)'
     }
     foreach ($key in $defaults.Keys) { if (-not $script:Settings.Contains($key) -or [string]::IsNullOrWhiteSpace([string]$script:Settings[$key])) { $script:Settings[$key] = $defaults[$key] } }
     # Resolve saved model paths against the portable app folder. If an old
@@ -696,6 +697,28 @@ try {
     $historyPick.Add_SelectedIndexChanged({if($historyPick.SelectedIndex -ge 0){$prompt.Text=[string]$historyPick.SelectedItem}})
 
     Add-Label $left 'IMAGE SETTINGS' 18 202 160 | Out-Null
+    $negInitial=if([string]$script:Settings.NegativePrompt){('negative: set ('+$script:Settings.NegativePrompt.Length+' chars)')}else{'negative: not set'}
+    $negState=Add-Label $left $negInitial 358 202 240
+    function Show-MossNegativePromptDialog {
+        # Negative prompt (engine flag -n): what the image should NOT contain.
+        # Kept in a dialog so the compact main window stays uncluttered.
+        $g=New-Object System.Windows.Forms.Form
+        $g.Text='Negative prompt'; $g.Size=New-Object System.Drawing.Size(560,320); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
+        $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
+        $hint=New-Object System.Windows.Forms.Label; $hint.Text='What the image should NOT contain, e.g. blurry, extra fingers, watermark. Left empty = no negative prompt.'; $hint.Location=New-Object System.Drawing.Point(12,10); $hint.Size=New-Object System.Drawing.Size(520,20); $hint.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($hint)
+        $box=New-Object System.Windows.Forms.TextBox; $box.Multiline=$true; $box.ScrollBars='Vertical'; $box.Text=[string]$script:Settings.NegativePrompt; $box.Location=New-Object System.Drawing.Point(12,36); $box.Size=New-Object System.Drawing.Size(520,184); $box.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $box.ForeColor=$cText; $box.BorderStyle='FixedSingle'; $g.Controls.Add($box)
+        $negOk=Add-Button $g 'Save' 350 240 80 30
+        $negCancel=Add-Button $g 'Cancel' 440 240 90 30
+        $negOk.Add_Click({
+            $script:Settings.NegativePrompt=($box.Text -replace "(\r?\n)+",' ').Trim()
+            $negState.Text=if($script:Settings.NegativePrompt){('negative: set ('+$script:Settings.NegativePrompt.Length+' chars)')}else{'negative: not set'}
+            $g.Close()
+        })
+        $negCancel.Add_Click({$g.Close()})
+        [void]$g.ShowDialog($f)
+    }
+    $negBtn=Add-Button $left 'Negative prompt...' 200 199 150 27
+    $negBtn.Add_Click({ Show-MossNegativePromptDialog })
     Add-Label $left 'VISUAL STYLE' 18 231 130 | Out-Null
     $style=New-Object System.Windows.Forms.ComboBox; $style.DropDownStyle='DropDownList'; $style.Location=New-Object System.Drawing.Point(18,254); $style.Size=New-Object System.Drawing.Size(250,28); $style.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $style.ForeColor=$cText; foreach($item in @('Photorealistic','Anime','Digital illustration','Oil painting','Watercolor','3D render','Comic book','Cinematic')){[void]$style.Items.Add($item)}; $style.SelectedItem=[string]$script:Settings.ImageStyle; if($style.SelectedIndex -lt 0){$style.SelectedIndex=0}; $left.Controls.Add($style)
     Add-Label $left 'Resolution' 300 231 90 | Out-Null
@@ -711,6 +734,16 @@ try {
     Add-Label $left 'CFG scale' 110 354 90 | Out-Null; $cfg=Add-TextBox $left ([string]$script:Settings.CfgScale) 110 377 75
     Add-Label $left 'Images' 202 354 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDown'; $count.Location=New-Object System.Drawing.Point(202,377); $count.Size=New-Object System.Drawing.Size(75,26); foreach($n in @(1,2,4,8,16,32,64,128,256,512,1000)){[void]$count.Items.Add([string]$n)}; $count.Text=[string]$script:Settings.ImageCount; $left.Controls.Add($count)
     Add-Label $left 'Seed (-1 = random)' 300 354 150 | Out-Null; $seed=Add-TextBox $left ([string]$script:Settings.Seed) 300 377 90
+    # Sampler and scheduler are optional: 'Default (model)' omits the flag so
+    # the engine keeps its model-specific choice (euler for Flux/SD3/Wan).
+    Add-Label $left 'Sampler' 420 354 80 | Out-Null
+    $samplerCombo=New-Object System.Windows.Forms.ComboBox; $samplerCombo.DropDownStyle='DropDownList'; $samplerCombo.Location=New-Object System.Drawing.Point(420,377); $samplerCombo.Size=New-Object System.Drawing.Size(115,26); $samplerCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $samplerCombo.ForeColor=$cText
+    foreach($s in @('Default (model)','euler','euler_a','heun','dpm2','dpm++2s_a','dpm++2m','dpm++2mv2','ipndm','ipndm_v','lcm','ddim_trailing','tcd','res_multistep','res_2s','er_sde','euler_cfg_pp','euler_a_cfg_pp','euler_ge','dpm++2m_sde','dpm++2m_sde_bt','lms')){[void]$samplerCombo.Items.Add($s)}
+    $samplerCombo.SelectedItem=[string]$script:Settings.SamplingMethod; if($samplerCombo.SelectedIndex -lt 0){$samplerCombo.SelectedIndex=0}; $left.Controls.Add($samplerCombo)
+    Add-Label $left 'Scheduler' 550 354 100 | Out-Null
+    $schedCombo=New-Object System.Windows.Forms.ComboBox; $schedCombo.DropDownStyle='DropDownList'; $schedCombo.Location=New-Object System.Drawing.Point(550,377); $schedCombo.Size=New-Object System.Drawing.Size(130,26); $schedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $schedCombo.ForeColor=$cText
+    foreach($s in @('Default (model)','discrete','karras','exponential','ays','gits','sgm_uniform','simple','smoothstep','kl_optimal','lcm','bong_tangent','ltx2','logit_normal','flux2','flux','beta','llada_image')){[void]$schedCombo.Items.Add($s)}
+    $schedCombo.SelectedItem=[string]$script:Settings.Scheduler; if($schedCombo.SelectedIndex -lt 0){$schedCombo.SelectedIndex=0}; $left.Controls.Add($schedCombo)
     $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(410,377); $speedCombo.Size=New-Object System.Drawing.Size(270,24); $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (native render)','~2x faster (upscale from 70%)','~4x faster (upscale from 50%)','~8x faster (upscale from 35%)','Fastest (upscale from smallest)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo)
     $speedHint=New-Object System.Windows.Forms.Label; $speedHint.Text='Faster settings render small, then upscale and refine at the chosen size. Exact renders natively at full size and steps. ~7x is the maximum that keeps the picture recognizable; multipliers are approximate.'; $speedHint.Location=New-Object System.Drawing.Point(410,402); $speedHint.Size=New-Object System.Drawing.Size(270,30); $speedHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $left.Controls.Add($speedHint)
     Add-Label $left 'OUTPUT FOLDER' 18 414 190 | Out-Null
@@ -1126,6 +1159,13 @@ try {
             $argsList.Add('-i'); $argsList.Add((Quote-ProcessArgument ([string]$job.InitImage)))
             $argsList.Add('--strength'); $argsList.Add([string]$job.InitStrength)
         }
+        # Optional sampler/scheduler: 'Default (model)' means the flag is omitted
+        # so the engine keeps its model-specific choice.
+        if ($job.SamplingMethod) { $argsList.Add('--sampling-method'); $argsList.Add([string]$job.SamplingMethod) }
+        if ($job.Scheduler) { $argsList.Add('--scheduler'); $argsList.Add([string]$job.Scheduler) }
+        # Negative prompt (engine flag -n), flattened to a single line like the
+        # positive prompt.
+        if ($job.NegativePrompt) { $argsList.Add('-n'); $argsList.Add((Quote-ProcessArgument ([string]$job.NegativePrompt))) }
 
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $job.Engine
@@ -1284,9 +1324,14 @@ try {
                         UpscaledFrom = $upscaledNote
                         InitImage = $(if($job.InitImage){ [System.IO.Path]::GetFileName([string]$job.InitImage) }else{ $null })
                         InitStrength = $(if($job.InitImage){ [double]$job.InitStrength }else{ $null })
+                        Sampler = $(if($job.SamplingMethod){ [string]$job.SamplingMethod }else{ $null })
+                        Scheduler = $(if($job.Scheduler){ [string]$job.Scheduler }else{ $null })
                         GeneratedAt = (Get-Date).ToString('o'); Engine = $job.Engine
                     }
-                    if (-not $script:HistoryLocked -and $script:HistoryPassphrase) { $meta.PromptProtected = Protect-MossPayload ([string]$job.Prompt) $script:HistoryPassphrase }
+                    if (-not $script:HistoryLocked -and $script:HistoryPassphrase) {
+                        $meta.PromptProtected = Protect-MossPayload ([string]$job.Prompt) $script:HistoryPassphrase
+                        if ($job.NegativePrompt) { $meta.NegativePromptProtected = Protect-MossPayload ([string]$job.NegativePrompt) $script:HistoryPassphrase }
+                    }
                     $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath ([System.IO.Path]::ChangeExtension($file, '.json')) -Encoding UTF8
                 } catch {}
                 [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = $exitCode; Seed = $thisSeed; Output = 'OK' })
@@ -1370,19 +1415,26 @@ try {
         $tw=[int][Math]::Min(8192,[Math]::Ceiling($tw*$sizeFactor)); $th=[int][Math]::Min(8192,[Math]::Ceiling($th*$sizeFactor))
         if (($tw -ge 2560 -or $th -ge 2560) -and [System.Windows.Forms.MessageBox]::Show(("Native refinement will render at {0} x {1}. Large renders use substantial VRAM/RAM and take a long time. Continue?" -f $tw,$th),'Large refinement',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne [System.Windows.Forms.DialogResult]::Yes){return}
         # Seed and prompt from the sidecar (prompt is decrypted only if the
-        # history code was already entered this session).
+        # history code was already entered this session). Sampler, scheduler and
+        # negative prompt are also reused from the image's own settings.
         $refineSeed = [long]-1; $refinePrompt = $prompt.Text
+        $refineSampler = $null; $refineSched = $null; $refineNeg = [string]$script:Settings.NegativePrompt
         if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
             try {
                 $sc = Get-Content -LiteralPath $sidecar -Raw | ConvertFrom-Json
                 if ($sc.Seed) { $refineSeed = [long]$sc.Seed }
+                if ($sc.Sampler) { $refineSampler = [string]$sc.Sampler }
+                if ($sc.Scheduler) { $refineSched = [string]$sc.Scheduler }
                 if (-not $script:HistoryLocked -and $script:HistoryPassphrase -and $sc.PromptProtected) {
                     try { $p = Unprotect-MossPayload ([string]$sc.PromptProtected) $script:HistoryPassphrase; if ($p) { $refinePrompt = [string]$p } } catch {}
+                    if ($sc.NegativePromptProtected) { try { $np = Unprotect-MossPayload ([string]$sc.NegativePromptProtected) $script:HistoryPassphrase; if ($null -ne $np) { $refineNeg = [string]$np } } catch {} }
                 }
             } catch {}
         }
+        if (-not $refineSampler -and [string]$samplerCombo.SelectedItem -ne 'Default (model)') { $refineSampler = [string]$samplerCombo.SelectedItem }
+        if (-not $refineSched -and [string]$schedCombo.SelectedItem -ne 'Default (model)') { $refineSched = [string]$schedCombo.SelectedItem }
         if ($refineSeed -lt 0) { $refineSeed = Get-Random -Minimum 1 -Maximum 2147483000 }
-        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$tw; H=$th; Seed=$refineSeed; Prompt=[string]$refinePrompt; Tag=$(if($sizeFactor -gt 1){'hq2x'}else{'hq'}) })
+        [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$tw; H=$th; Seed=$refineSeed; Prompt=[string]$refinePrompt; NegativePrompt=$refineNeg; SamplingMethod=$refineSampler; Scheduler=$refineSched; Tag=$(if($sizeFactor -gt 1){'hq2x'}else{'hq'}) })
         $script:RefineTotal = $script:RefineQueue.Count
         Start-MossNextRefine
     }
@@ -1415,7 +1467,7 @@ try {
             return
         }
         $gpuIdx=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIdx=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIdx=-1 } }
-        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=[int]$script:Settings.Steps;Cfg=[double]$script:Settings.CfgScale;Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode='Exact';InitImage=[string]$item.File;InitStrength=0.45;RefineTag=[string]$item.Tag}
+        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=[int]$script:Settings.Steps;Cfg=[double]$script:Settings.CfgScale;Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode='Exact';InitImage=[string]$item.File;InitStrength=0.45;RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler}
         $status.Text = ("Refining natively {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
         $log.AppendText(("`r`nNative refinement: same seed {0}, same prompt, image-to-image from {1}" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File)))
         Start-MossGeneration -Job $job -ForRefine
@@ -1452,8 +1504,12 @@ try {
         $generationPrompt=if($stylePrefix){"$stylePrefix, $p"}else{$p}
         $gpuIndex=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIndex=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIndex=-1 } }
         $speedMode=switch([string]$speedCombo.SelectedItem){'~2x faster (upscale from 70%)'{'2x'}'~4x faster (upscale from 50%)'{'4x'}'~8x faster (upscale from 35%)'{'8x'}'Fastest (upscale from smallest)'{'Fast'}default{'Exact'}}
+        $negPrompt=[string]$script:Settings.NegativePrompt
+        $samplingMethod=$null; if([string]$samplerCombo.SelectedItem -and [string]$samplerCombo.SelectedItem -ne 'Default (model)'){ $samplingMethod=[string]$samplerCombo.SelectedItem }
+        $scheduler=$null; if([string]$schedCombo.SelectedItem -and [string]$schedCombo.SelectedItem -ne 'Default (model)'){ $scheduler=[string]$schedCombo.SelectedItem }
+        $script:Settings.SamplingMethod=[string]$samplerCombo.SelectedItem; $script:Settings.Scheduler=[string]$schedCombo.SelectedItem
         $initImg=$null; if($script:PendingInitImage){ $initImg=[string]$script:PendingInitImage; $script:PendingInitImage=$null }
-        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Prompt=$generationPrompt;GpuIndex=$gpuIndex;SpeedMode=$speedMode;InitImage=$initImg;InitStrength=0.45}
+        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Prompt=$generationPrompt;GpuIndex=$gpuIndex;SpeedMode=$speedMode;InitImage=$initImg;InitStrength=0.45;NegativePrompt=$negPrompt;SamplingMethod=$samplingMethod;Scheduler=$scheduler}
         $generate.Enabled=$false;$cancel.Enabled=$true;$log.Clear();$fileList.Items.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
     })
     $cancel.Add_Click({
