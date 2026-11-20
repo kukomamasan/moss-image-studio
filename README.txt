@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.18)
+MOSS Image Studio - portable build (v0.1.19)
 ============================================
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
@@ -64,19 +64,42 @@ Improving generated images (right-click)
   MOSS re-renders exactly that picture (same seed and prompt, read from the
   image's sidecar) at full quality using image-to-image - the composition
   (same apple, same table) stays, the detail becomes genuinely native.
-- "Improve this image (full quality)" keeps the image's size; "Improve this
-  image (2x bigger)" doubles it (large sizes ask for confirmation first).
-- The strength adapts to the source: 0.6 for upscaled previews (they are
-  soft and need stronger re-synthesis), 0.45 for already-native renders.
-  The full step count applies.
+- "Improve this image (full quality)" re-renders at the image's current size
+  with full detail (about as long as a native render of that size).
+  "Improve this image (2x bigger)" doubles width and height (e.g. 768x1024
+  becomes 1536x2048): more resolution to work with, but it takes about four
+  times as long because the pixel count quadruples.
+- "Improve using the settings in the main window..." renders the selected
+  file with the values you currently see (size, steps, CFG, seed, prompt
+  box, Options values). A confirmation shows exactly which settings apply
+  to that file before anything starts.
+- "Improve ALL files that can be improved..." queues every generated image
+  that still has quality headroom: soft fast-mode previews, renders with
+  fewer steps than the current setting, or images smaller than the current
+  size (scaled up with the aspect preserved). Files already at full quality
+  or with an improved copy are skipped and reported in the confirmation.
+- The improve strength is set in Options ("Improve strength"): 0.45 keeps
+  the look, 0.6 refreshes detail, 0.8 re-renders strongly.
 - Improved files are easy to spot in the output folder: ..._hq_01.png for
   same-size improvement, ..._hq2x_01.png for the 2x version.
 - The "Improve last image" button does the same for the most recent image.
 - A typical workflow: render a fast preview batch with the speed selector,
-  pick the previews you like, right-click each winner and improve it while
-  you look at something else.
+  right-click "Improve ALL files that can be improved" and let MOSS work
+  through the good ones while you look at something else.
 - If you know the prompt-history code, MOSS reuses the exact prompt of the
   improved image; otherwise it uses the text currently in the prompt box.
+
+- Right-clicking a file in the list selects it automatically, so Improve
+  always acts on the file you clicked.
+- "Delete this file" removes the image (and its sidecar) from disk and the
+  list after a confirmation.
+
+Generated files list
+--------------------
+- The list shows ALL images ever generated into the output folder, not just
+  the ones from this session. The newest is selected when MOSS starts.
+- Left-click shows the image in the preview pane; right-click offers the
+  improve and delete actions.
 
 Generation options (Options...)
 -------------------------------
@@ -91,6 +114,11 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.1.19
+----------------------
+- The history code prompt now appears after the main MOSS window is shown,
+  opening centered over the app instead of as a floating startup dialog.
 
 What is new in v0.1.18
 ----------------------
