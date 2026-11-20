@@ -9,7 +9,7 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'MOSS-Image-Studio.ps1').Path, [ref]$tokens, [ref]$errors)
 Test 'syntax parses clean' ($errors.Count -eq 0)
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ('  line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) } }
-Test 'version is 0.1.64' ($src.Contains("AppVersion = '0.1.64'"))
+Test 'version is 0.1.65' ($src.Contains("AppVersion = '0.1.65'"))
 Test 'vbs launches the ps1' ((Get-Content -Raw 'MOSS-Image-Studio.vbs').Contains('MOSS-Image-Studio.ps1'))
 Test 'no admin code functions remain' (-not ($src.Contains('Confirm-MossAdminAccess') -or $src.Contains('Show-MossAdminCode')))
 Test 'no forced CPU offload' (-not ($src.Contains('--offload-to-cpu') -or $src.Contains('--offload_max_tensor')))
@@ -341,6 +341,21 @@ Test 'refine job carries SrcW/SrcH through' ($src.Contains("SrcW=`$(if(`$item.PS
 try {
     Test 'runtime: compensation math (50 chosen, strength 0,6148 -> 80 engine steps)' ([Math]::Ceiling((50 - 1) / 0.6148) -eq 80)
 } catch { Test 'runtime: full-steps block ran without exception' $false }
+# v0.1.65: the header subtitle 'GPU: automatic' now names the detected GPU
+# the engine will use (user: 'it should instead show what gpu was chosen').
+Test 'automatic GPU subtitle names the detected adapter' ($src.Contains('''GPU: automatic ('' + [string]$gpusAuto[0].Name + '')''') -and $src.Contains('-not $_.IsVirtual -and $_.Vendor -ne ''Unknown'''))
+Test 'manual GPU selection still shows the chosen name' ($src.Contains('PreferredGpuName'))
+try {
+    $g = @(Get-CimInstance -ClassName Win32_VideoController | ForEach-Object {
+        $n = [string]$_.Name; $h = "$n $($_.Description) $($_.PNPDeviceID)"
+        $v = 'Unknown'
+        if ($h -match '(?i)VEN_10DE|NVIDIA|GeForce|Quadro|Tesla') { $v = 'NVIDIA' } elseif ($h -match '(?i)VEN_1002|VEN_1022|AMD|Radeon') { $v = 'AMD' } elseif ($h -match '(?i)VEN_8086|Intel') { $v = 'Intel' }
+        $virt = $h -match '(?i)virtual|indirect display|remote display|parsec|spacedesk|usb display|displaylink|mirage|idd'
+        [pscustomobject]@{ Name = $n; Vendor = $v; IsVirtual = $virt }
+    } | Where-Object { -not $_.IsVirtual -and $_.Vendor -ne 'Unknown' })
+    Test 'runtime: detected GPU on this machine is a known vendor' ($g.Count -ge 1)
+    Test 'runtime: subtitle would include the adapter name' (('GPU: automatic (' + $g[0].Name + ')') -like 'GPU: automatic (*)')
+} catch { Test 'runtime: GPU subtitle block ran without exception' $false }
 Write-Host ''
 if ($fail -gt 0) { Write-Host ($fail.ToString() + ' test(s) FAILED'); exit 1 }
 Write-Host 'ALL TESTS PASSED'
