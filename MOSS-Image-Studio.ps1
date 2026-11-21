@@ -9,19 +9,39 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.70'
+$script:AppVersion = '0.1.99'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
-$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1' }
+$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1'; SafeMode = $true }
 $script:HistoryPassphrase = $null
 $script:HistoryLocked = $false
 $script:LockedHistoryEnvelope = $null
-$script:HistoryStoredEnvelope = $null
 $script:HistoryPasswordVerifier = $null
+# Cache of derived key material (PBKDF2, 250000 iterations): one full
+# derivation takes a noticeable moment on the UI thread, and it used to run
+# AGAIN for every single encrypt/decrypt - saving settings, writing each
+# image sidecar, opening the improve dialog, every wrong code attempt.
+# Protected by a random IV per envelope, the cache only removes repeated
+# key derivation, not any security check.
+$script:MossKdfCache = @{}
 $script:HistoryEnabled = $true
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+# SINGLE INSTANCE: launching the .bat twice would run two complete MOSS apps
+# against the SAME settings.json and output folder - the instances overwrite
+# each other's settings and compete for the same GPU memory (renders fail
+# out-of-memory). A named mutex makes the second launch refuse politely.
+# Windows releases the mutex automatically when the process exits, even
+# after a crash, so a stuck MOSS can never lock the folder permanently.
+$script:InstanceMutex = New-Object System.Threading.Mutex($false, 'MOSS-Image-Studio-Instance')
+$instanceAcquired = $false
+try { $instanceAcquired = $script:InstanceMutex.WaitOne(0, $false) } catch [System.Threading.AbandonedMutexException] { $instanceAcquired = $true }
+if (-not $instanceAcquired) {
+    [System.Windows.Forms.MessageBox]::Show('MOSS is already running. Only one instance may use this folder at a time - two instances would overwrite each other''s settings and compete for the same GPU memory.','MOSS Image Studio',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+    exit 0
+}
 
 function Hide-MossConsoleWindow {
     if(-not ('MossNativeWindow' -as [type])) {
@@ -97,20 +117,25 @@ function Show-MossHistoryRecoveryChoice {
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
 }
 
-function Show-MossHistorySetupChoice {
-    $f=New-Object System.Windows.Forms.Form; $f.Text='Prompt history'; $f.Size=New-Object System.Drawing.Size(500,205); $f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'; $f.MaximizeBox=$false; $f.MinimizeBox=$false
-    $label=New-Object System.Windows.Forms.Label; $label.Text='Choose whether MOSS should save prompt history.'; $label.Location=New-Object System.Drawing.Point(18,18); $label.Size=New-Object System.Drawing.Size(455,30); $f.Controls.Add($label)
-    $items=@(@('Create a history code','create'),@('Continue without history','skip'),@('Turn off prompt history','disable'))
-    $positions=@(@(18,72),@(175,72),@(332,72))
-    for($i=0;$i -lt $items.Count;$i++) { $b=New-Object System.Windows.Forms.Button; $b.Text=$items[$i][0]; $b.Location=New-Object System.Drawing.Point($positions[$i][0],$positions[$i][1]); $b.Size=New-Object System.Drawing.Size(145,45); $choiceTag=[string]$items[$i][1]; $b.Add_Click({$f.Tag=$choiceTag;$f.Close()}.GetNewClosure()); $f.Controls.Add($b) }
-    try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
-}
-
 function Protect-MossPayload([string]$Text,[string]$Password) {
-    $salt=New-Object byte[] 16; $rng=[System.Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($salt)
-    $iv=New-Object byte[] 16; $rng.GetBytes($iv); $rng.Dispose(); $iterations=250000
-    $derive=[System.Security.Cryptography.Rfc2898DeriveBytes]::new($Password,$salt,$iterations)
-    try { $keys=$derive.GetBytes(64) } finally { $derive.Dispose() }
+    $iterations=250000
+    # Derive the key material ONCE per code (session cache) instead of on
+    # every call: sidecar writes for a 16-image batch used to run the full
+    # 250000-iteration derivation up to 32 times on the UI thread. The salt
+    # stays fixed per code for the session (standard practice - the key is
+    # derived once, every envelope still gets its own random IV, and the
+    # MAC covers salt, IV and ciphertext).
+    $cacheKey='protect|'+[string]$Password
+    $cached=$script:MossKdfCache[$cacheKey]
+    if ($null -eq $cached) {
+        $salt=New-Object byte[] 16; $rng=[System.Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($salt); $rng.Dispose()
+        $derive=[System.Security.Cryptography.Rfc2898DeriveBytes]::new($Password,$salt,$iterations)
+        try { $keys=$derive.GetBytes(64) } finally { $derive.Dispose() }
+        $cached=@{ Salt=$salt; Keys=$keys }
+        $script:MossKdfCache[$cacheKey]=$cached
+    }
+    $salt=[byte[]]$cached.Salt; $keys=[byte[]]$cached.Keys
+    $iv=New-Object byte[] 16; $rngIv=[System.Security.Cryptography.RandomNumberGenerator]::Create(); $rngIv.GetBytes($iv); $rngIv.Dispose()
     $aes=[System.Security.Cryptography.Aes]::Create(); $aes.KeySize=256; $aes.Mode=[System.Security.Cryptography.CipherMode]::CBC; $aes.Padding=[System.Security.Cryptography.PaddingMode]::PKCS7; $aes.Key=$keys[0..31]; $aes.IV=$iv
     try { $enc=$aes.CreateEncryptor(); try { $cipher=$enc.TransformFinalBlock([System.Text.Encoding]::UTF8.GetBytes($Text),0,[System.Text.Encoding]::UTF8.GetByteCount($Text)) } finally { $enc.Dispose() } } finally { $aes.Dispose() }
     $authData=New-Object byte[] ($salt.Length+$iv.Length+$cipher.Length); [System.Buffer]::BlockCopy($salt,0,$authData,0,$salt.Length); [System.Buffer]::BlockCopy($iv,0,$authData,$salt.Length,$iv.Length); [System.Buffer]::BlockCopy($cipher,0,$authData,$salt.Length+$iv.Length,$cipher.Length)
@@ -122,18 +147,25 @@ function Unprotect-MossPayload([string]$EnvelopeText,[string]$Password) {
     $envelope=$EnvelopeText | ConvertFrom-Json
     if ([int]$envelope.Version -ne 1 -or [int]$envelope.Iterations -lt 100000 -or [int]$envelope.Iterations -gt 1000000) { throw 'Unsupported encrypted history format.' }
     $salt=[Convert]::FromBase64String([string]$envelope.Salt); $iv=[Convert]::FromBase64String([string]$envelope.IV); $cipher=[Convert]::FromBase64String([string]$envelope.Ciphertext); $expected=[Convert]::FromBase64String([string]$envelope.MAC)
-    $derive=[System.Security.Cryptography.Rfc2898DeriveBytes]::new($Password,$salt,[int]$envelope.Iterations); try { $keys=$derive.GetBytes(64) } finally { $derive.Dispose() }
+    # Reuse derived key material per (code, salt, iteration count): the same
+    # sidecars get decrypted again and again (improve dialog, improve runs),
+    # and a wrong code attempt must not cost a second full derivation on the
+    # next try. The cache is keyed by the code itself, so a wrong attempt can
+    # never satisfy a later check with a different code.
+    $cacheKey='unprotect|'+[string]$Password+'|'+[string]$envelope.Salt+'|'+[int]$envelope.Iterations
+    $keys=$script:MossKdfCache[$cacheKey]
+    if ($null -eq $keys) {
+        $derive=[System.Security.Cryptography.Rfc2898DeriveBytes]::new($Password,$salt,[int]$envelope.Iterations)
+        try { $keys=$derive.GetBytes(64) } finally { $derive.Dispose() }
+        $script:MossKdfCache[$cacheKey]=[byte[]]$keys
+    }
+    $keys=[byte[]]$keys
     $authData=New-Object byte[] ($salt.Length+$iv.Length+$cipher.Length); [System.Buffer]::BlockCopy($salt,0,$authData,0,$salt.Length); [System.Buffer]::BlockCopy($iv,0,$authData,$salt.Length,$iv.Length); [System.Buffer]::BlockCopy($cipher,0,$authData,$salt.Length+$iv.Length,$cipher.Length)
     $hmac=[System.Security.Cryptography.HMACSHA256]::new([byte[]]$keys[32..63]); try { $actual=$hmac.ComputeHash($authData) } finally { $hmac.Dispose() }
     $diff=$actual.Length -bxor $expected.Length; for($i=0;$i -lt [Math]::Min($actual.Length,$expected.Length);$i++){ $diff=$diff -bor ($actual[$i] -bxor $expected[$i]) }; if($diff -ne 0){ throw 'Incorrect password or damaged encrypted history.' }
     $aes=[System.Security.Cryptography.Aes]::Create(); $aes.KeySize=256; $aes.Mode=[System.Security.Cryptography.CipherMode]::CBC; $aes.Padding=[System.Security.Cryptography.PaddingMode]::PKCS7; $aes.Key=$keys[0..31]; $aes.IV=$iv
     try { $dec=$aes.CreateDecryptor(); try { $plain=$dec.TransformFinalBlock($cipher,0,$cipher.Length) } finally { $dec.Dispose() } } finally { $aes.Dispose() }
     return [System.Text.Encoding]::UTF8.GetString($plain)
-}
-
-function Test-MossHistoryPassphrase([string]$Password,[string]$Verifier) {
-    if ([string]::IsNullOrWhiteSpace($Verifier)) { return $false }
-    try { return ((Unprotect-MossPayload $Verifier $Password) -ceq 'MOSS-HISTORY-PASSWORD-CHECK-V1') } catch { return $false }
 }
 
 function Reset-MossHistoryPassword([System.Windows.Forms.Form]$Owner=$null) {
@@ -143,6 +175,8 @@ function Reset-MossHistoryPassword([System.Windows.Forms.Form]$Owner=$null) {
     if(-not $newPassword){return $false}
     $script:HistoryPassphrase=$newPassword
     $script:HistoryPasswordVerifier=Protect-MossPayload 'MOSS-HISTORY-PASSWORD-CHECK-V1' $newPassword
+    # The old code's cached key material is dead weight after a reset.
+    $script:MossKdfCache.Clear()
     $script:HistoryLocked=$false
     $script:LockedHistoryEnvelope=$null
     $script:HistoryEnabled=$true
@@ -158,6 +192,7 @@ function Disable-MossHistory {
     $script:LockedHistoryEnvelope=$null
     $script:HistoryPassphrase=$null
     $script:HistoryPasswordVerifier=$null
+    $script:MossKdfCache.Clear()
     $script:Settings.PromptHistory=@()
     return (Save-Settings)
 }
@@ -171,7 +206,6 @@ function Load-Settings([switch]$UnlockHistory) {
             }
             if ($saved.HistoryPasswordVerifier) { $script:HistoryPasswordVerifier=[string]$saved.HistoryPasswordVerifier }
             if ($saved.PSObject.Properties.Name -contains 'PromptHistoryEnabled') { $script:HistoryEnabled=[bool]$saved.PromptHistoryEnabled }
-            $script:HistoryStoredEnvelope=[string]$saved.PromptHistoryProtected
             if ($script:HistoryEnabled -and $saved.PromptHistoryProtected) {
                 $script:LockedHistoryEnvelope = [string]$saved.PromptHistoryProtected
                 $script:HistoryLocked=$true
@@ -381,7 +415,10 @@ $browse.Add_Click({
 
     # Start browsing beside the currently suggested/selected engine path.
     # If that folder is unavailable, fall back to this portable install's bin folder.
+    # Relative stored paths are anchored to the MOSS folder, not to wherever
+    # the process happens to be running from.
     $suggestedPath = [Environment]::ExpandEnvironmentVariables(([string]$engine.Text).Trim().Trim('"'))
+    if ($suggestedPath -and -not [System.IO.Path]::IsPathRooted($suggestedPath)) { $suggestedPath = Get-AbsoluteAppPath $suggestedPath }
     $startFolder = $null
     $suggestedName = 'sd-cli.exe'
     if ($suggestedPath) {
@@ -433,7 +470,13 @@ $test.Add_Click({
             default { 'CPU only' }
         }
     }
-    $enginePath = $engine.Text.Trim()
+    # Relative engine paths must be anchored to the MOSS folder, NOT to the
+    # process working directory: MOSS can be started with any working
+    # directory (launcher chain, terminal, shortcut) - the generation paths
+    # are already anchored this way, and this check used to fail with
+    # 'engine executable was not found' purely because of WHERE MOSS was
+    # started from (live-reproduced).
+    $enginePath = Get-AbsoluteAppPath ($engine.Text.Trim())
     $storedBackend = [string]$script:Settings.Backend
     $mappedChoice = switch ($choice) { 'CUDA (NVIDIA)' {'CUDA'} 'HIP/ROCm (AMD)' {'HIP/ROCm'} 'SYCL (Intel)' {'SYCL'} 'CPU only' {'CPU'} 'Manual / virtual GPU' {'Manual'} default {$choice} }
     $lines = New-Object System.Collections.Generic.List[string]
@@ -529,14 +572,19 @@ $save.Add_Click({
     $gpuIdx=-1; if($gpuChoice -match '^(\d+)\s*:'){ $gpuIdx=[int]$Matches[1] }
     $script:Settings.PreferredGpuIndex=$gpuIdx
     $script:Settings.PreferredGpuName= if($gpuIdx -ge 0){ ([string]$gpuChoice) -replace '^\d+\s*:\s*','' } else { '' }
-    $script:Settings.EnginePath=$engine.Text.Trim()
+    # Anchor relative paths to the MOSS folder before checking/storage (same
+    # reason as the backend check above - the working directory must not
+    # matter), and store the engine path relative when it lives inside the
+    # MOSS folder so the install stays movable.
+    $engineAbs = Get-AbsoluteAppPath ($engine.Text.Trim())
+    $script:Settings.EnginePath=Get-RelativeAppPath $engineAbs
     $script:Settings.HardwareSetupComplete=$true
     Save-Settings
     $savedBackend = [string]$script:Settings.Backend
     $gpuSavedText = if([int]$script:Settings.PreferredGpuIndex -ge 0){ "  |  GPU: $($script:Settings.PreferredGpuName)" } else { '  |  GPU: automatic' }
     $backendDisplay = "Backend: $savedBackend$gpuSavedText"
     $msg="Settings saved to:`r`n$script:ConfigFile`r`n`r`n$backendDisplay`r`nEngine: $($script:Settings.EnginePath)"
-    if (-not (Test-Path -LiteralPath $script:Settings.EnginePath)) { $msg += "`r`n`r`nWARNING: Engine executable not found at this path. You can browse to it later." }
+    if (-not (Test-Path -LiteralPath $engineAbs -PathType Leaf)) { $msg += "`r`n`r`nWARNING: Engine executable not found at this path ($engineAbs). You can browse to it later." }
     [System.Windows.Forms.MessageBox]::Show($msg,'MOSS setup saved',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
     $form.Close()
 })
@@ -544,6 +592,459 @@ $save.Add_Click({
 $form.Add_Shown({ if (-not $script:Settings.HardwareSetupComplete) { [System.Windows.Forms.MessageBox]::Show('Welcome to MOSS Image Studio. Review the detected adapters and choose the backend that matches your engine build.','First-run setup',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null } })
 
 # ---------------- IMAGE GENERATOR ----------------
+function Test-MossPromptSafe([string]$Prompt) {
+    # Safe mode content check: returns $true when the prompt may run.
+    # Two separate layers:
+    #  1) ALWAYS on, regardless of the Safe mode toggle - narrowed to the
+    #     genuinely dangerous combinations so harmless prompts never hit it:
+    #       - a CHILD-age word (child, kid, preteen, schoolgirl...) with ANY
+    #         sexual term
+    #       - a TEEN/age-ambiguous word (teen, girl, boy, student...) with an
+    #         EXPLICIT sexual term (nude, naked, sex, porn...)
+    #       - the known minor-sexualization tags (loli, shota, jailbait...)
+    #         standalone
+    #     Soft pairings ('seductive girl', 'sexy teen') are allowed with the
+    #     toggle off - Safe mode OFF means full control over everything
+    #     except this floor.
+    #  2) Safe mode ON (opt-out): sexual content, graphic violence/gore and
+    #     self-harm/suicide terms.
+    # Deliberately NOT listed: battle/war/sword/knight/fighting, 'dead'
+    # alone (dead tree, dead sea), plain 'murder'/'killer' (murder-mystery
+    # art), 'hanging' alone (hanging laundry) - common art staples; the
+    # gate targets the GRAPHIC wording. Word-boundary matching so
+    # 'assassin'/'Essex'/'cocktail'/'analysis' do not trigger. Creative
+    # wording can still slip past - a keyword filter is a gate, not a
+    # trained classifier.
+    if ([string]::IsNullOrWhiteSpace($Prompt)) { return $true }
+    $sexualTerms = @('nsfw','nude','nudes','nudity','naked','porn','pornographic','xxx','erotic','sex','sexual','sexually','sexy','fuck','fucking','cum','cumming','penis','vagina','pussy','cock','tits','titties','boobs','breasts','nipples','areola','topless','bottomless','undressed','undressing','anal','blowjob','handjob','gangbang','bdsm','bondage','fetish','hentai','masturbat','orgasm','horny','aroused','explicit','lewd','suggestive','lingerie','seductive','striptease','stripping','g-string','buttocks','thong')
+    $sexualPattern = '(?i)\b(' + (($sexualTerms | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\b'
+    $explicitPattern = '(?i)\b(nudes?|nudity|naked|sex(?:ual|ually)?|porn(?:ographic)?|xxx|explicit|erotic|hentai|lewd|topless|bottomless|undressed|undressing)\b'
+    $strictMinorPattern = '(?i)\b(child|children|kid|kids|preteen|tween|schoolgirl|schoolboy|underage|loli|lolicon|shota|shotacon)\b'
+    # girl/boy/student are age-AMBIGUOUS (in image prompts they overwhelmingly
+    # mean adults) and are deliberately NOT in the minor lists - with the
+    # toggle off, 'naked girl' runs like 'naked woman'. The floor covers the
+    # unambiguous minor terms only.
+    $teenPattern = '(?i)\b(teen|teens|teenage|teenager)\b'
+    # Layer 1 - never allowed, toggle or not:
+    if ($Prompt -match $strictMinorPattern -and $Prompt -match $sexualPattern) { return $false }
+    if ($Prompt -match $teenPattern -and $Prompt -match $explicitPattern) { return $false }
+    # Known minor-sexualization tags are blocked on their own, with no
+    # second term needed:
+    if ($Prompt -match '(?i)\b(loli|lolicon|shota|shotacon|jailbait)\b') { return $false }
+    # Layer 2 - Safe mode:
+    if (-not [bool]$script:Settings.SafeMode) { return $true }
+    $terms = $sexualTerms + @(
+        # --- graphic violence / gore ---
+        'gore','gory','mutilated','mutilation','mutilate','dismembered','dismembering','dismemberment','decapitated','decapitation','beheaded','beheading','disemboweled','disembowelment','corpse','corpses','cadaver','massacre','massacring','torture','torturing','tortured','cannibal','cannibalism','snuff','mangled','impaled','impalement','necrophilia','autopsy','murdered','murdering','killings','bloodbath','butchering','butchered','maimed','eviscerated','strangled','strangling','strangulation',
+        # --- self-harm / suicide ---
+        'suicide','suicidal','self-harm','self harm','selfharm','noose','slit wrist','slit wrists','cutting wrists','dead girl','dead girls','dead boy','dead boys','dead child','dead children','dead kid','dead kids'
+    )
+    $pattern = '(?i)\b(' + (($terms | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\b'
+    return -not ($Prompt -match $pattern)
+}
+
+# ---------------- PERFORMANCE BENCHMARK STORE ----------------
+# Every completed batch records its actual render speed into
+# config\benchmarks.json. The Benchmarks dialog shows real averages per
+# resolution/steps/speed-mode, estimates untested combinations by scaling on
+# (render megapixels x engine steps), and feeds the live ETA so it is correct
+# from the first second instead of 'ETA calculating'.
+function Get-MossBenchmarkFile { Join-Path $script:AppRoot 'config\benchmarks.json' }
+
+function Load-MossBenchmarks {
+    $list = New-Object System.Collections.ArrayList
+    try {
+        $f = Get-MossBenchmarkFile
+        if (Test-Path -LiteralPath $f) {
+            $data = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
+            foreach ($e in @($data)) { [void]$list.Add($e) }
+        }
+    } catch {}
+    # The comma matters: an EMPTY ArrayList returned normally collapses to
+    # $null (classic PowerShell pipeline gotcha), and Add-MossBenchmarkEntry
+    # then crashes calling .Add on null. The unary comma keeps the list
+    # object intact even when empty.
+    return ,$list
+}
+
+function Save-MossBenchmarks($List) {
+    try {
+        $dir = Join-Path $script:AppRoot 'config'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        # An empty list piped through ConvertTo-Json produces NO output (the
+        # pipeline just does not run downstream) and the file would silently
+        # keep its old content - 'Clear recorded data' would never clear.
+        $json = if (@($List).Count -eq 0) { '[]' } else { (@($List) | ConvertTo-Json -Depth 5) }
+        Set-Content -LiteralPath (Get-MossBenchmarkFile) -Value $json -Encoding UTF8
+    } catch {}
+}
+
+# --- GPU power meter (v0.1.87) -----------------------------------------
+# During a render the app samples the GPU's power draw and integrates it
+# over time (Wh). MEASURED values come from nvidia-smi (NVIDIA driver
+# tool - used when present, never required). Without it the draw is
+# ESTIMATED from the GPU's rated board power (Get-MossGpuTdp, vendor
+# neutral) with a documented 0.75 utilization factor; unknown GPUs fall
+# back to a 250 W typical. Cumulative energy is kept per day and all
+# time in config\energy.json, the session total in memory.
+function New-MossEnergyBucket {
+    return [pscustomobject]@{ Seconds = 0.0; Wh = 0.0; MeasuredWh = 0.0; Runs = 0; Images = 0 }
+}
+function Add-MossEnergyToBucket($Bucket, [double]$Joules, [double]$MeasuredJoules, [double]$Seconds, [int]$Images) {
+    if ($null -eq $Bucket) { return }
+    $Bucket.Seconds = [Math]::Round([double]$Bucket.Seconds + $Seconds, 1)
+    $Bucket.Wh = [Math]::Round([double]$Bucket.Wh + ($Joules / 3600.0), 4)
+    $Bucket.MeasuredWh = [Math]::Round([double]$Bucket.MeasuredWh + ($MeasuredJoules / 3600.0), 4)
+    $Bucket.Runs = [int]$Bucket.Runs + 1
+    $Bucket.Images = [int]$Bucket.Images + [Math]::Max(0, $Images)
+}
+function Get-MossEnergyFile { return (Join-Path $script:AppRoot 'config\energy.json') }
+function Load-MossEnergy {
+    $ledger = [pscustomobject]@{ Days = New-Object System.Collections.ArrayList; AllTime = (New-MossEnergyBucket) }
+    try {
+        $f = Get-MossEnergyFile
+        if (Test-Path -LiteralPath $f) {
+            $data = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
+            if ($data) {
+                if ($data.Days) { foreach ($d in @($data.Days)) { [void]$ledger.Days.Add($d) } }
+                if ($data.AllTime) { $ledger.AllTime = $data.AllTime }
+            }
+        }
+    } catch {}
+    return ,$ledger
+}
+function Save-MossEnergy($Ledger) {
+    try {
+        $dir = Join-Path $script:AppRoot 'config'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        # Keep roughly two years of day buckets, prune the oldest.
+        while (@($Ledger.Days).Count -gt 730) { $Ledger.Days.RemoveAt(0) }
+        $Ledger | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Get-MossEnergyFile) -Encoding UTF8
+    } catch {}
+}
+function Add-MossEnergyUsage([double]$Joules, [double]$MeasuredJoules, [double]$Seconds, [int]$Images, [string]$Date = $null) {
+    # Records one finished engine run's energy into the day + all-time
+    # buckets (config\energy.json) and the in-memory session total.
+    # $Date override exists for tests; default is today.
+    if ($Seconds -le 0 -and $Joules -le 0) { return }
+    if (-not $Date) { $Date = (Get-Date).ToString('yyyy-MM-dd') }
+    $ledger = Load-MossEnergy
+    # NOTE: '@(... | Select-Object -First 1)' returns a 1-element ARRAY in
+    # this PS 5.1 - the bucket helper would then fail every property set.
+    # Pipe directly: the assignment yields the scalar object (or nothing).
+    $day = $ledger.Days | Where-Object { [string]$_.Date -eq $Date } | Select-Object -First 1
+    if (-not $day) { $day = [pscustomobject]@{ Date = $Date; Seconds = 0.0; Wh = 0.0; MeasuredWh = 0.0; Runs = 0; Images = 0 }; [void]$ledger.Days.Add($day) }
+    Add-MossEnergyToBucket $day $Joules $MeasuredJoules $Seconds $Images
+    Add-MossEnergyToBucket $ledger.AllTime $Joules $MeasuredJoules $Seconds $Images
+    Save-MossEnergy $ledger
+    if ($null -ne $script:SessionEnergy) {
+        Add-MossEnergyToBucket $script:SessionEnergy $Joules $MeasuredJoules $Seconds $Images
+    }
+}
+function Get-MossEnergySummary {
+    # Returns today's bucket, the all-time bucket and today's date.
+    $today = (Get-Date).ToString('yyyy-MM-dd')
+    $ledger = Load-MossEnergy
+    $day = $ledger.Days | Where-Object { [string]$_.Date -eq $today } | Select-Object -First 1
+    if (-not $day) { $day = New-MossEnergyBucket; $day | Add-Member -NotePropertyName Date -NotePropertyValue $today }
+    return [pscustomobject]@{ Date = $today; Day = $day; AllTime = $ledger.AllTime }
+}
+function Get-MossNvidiaSmiPath {
+    # Vendor-neutral: returns the nvidia-smi.exe path when the NVIDIA
+    # driver tool is present, otherwise $null (the TDP estimate is used).
+    $candidates = @(
+        (Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue).Source,
+        (Join-Path $env:WINDIR 'System32\nvidia-smi.exe'),
+        (Join-Path ${env:ProgramFiles} 'NVIDIA Corporation\NVSMI\nvidia-smi.exe')
+    )
+    foreach ($c in $candidates) { if ($c -and (Test-Path -LiteralPath $c -PathType Leaf)) { return $c } }
+    return $null
+}
+function Parse-MossPowerCsvLine([string]$Line) {
+    # nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits prints
+    # one line per GPU, e.g. '231.45' or ' N/A' (idle/no permission).
+    if (-not $Line) { return $null }
+    $t = ([string]$Line).Split(',')[0].Trim()
+    $v = 0.0
+    if ([double]::TryParse($t, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v) -and $v -ge 0 -and $v -lt 2000) { return $v }
+    return $null
+}
+function Get-MossPowerEstimateWatts([double]$Tdp) {
+    # Draw estimate without a measurement tool: 75% of the rated board
+    # power while sampling (rendering is GPU-heavy but not 100% TDP the
+    # whole time), 250 W typical when the model is not in the table.
+    if ($Tdp -gt 0) { return [Math]::Round($Tdp * 0.75, 1) }
+    return 250.0
+}
+
+function Get-MossRenderMP([int]$W,[int]$H,[string]$SpeedMode) {
+    # The size the ENGINE actually renders for the given speed mode.
+    $scale = switch ([string]$SpeedMode) {
+        '2x' { 0.7 }
+        '4x' { 0.5 }
+        '8x' { 0.35 }
+        'Fast' { [Math]::Min(0.35, 128.0 / [Math]::Min($W, $H)) }
+        default { 0 }
+    }
+    if ($scale -gt 0 -and $scale -lt 1) {
+        $rw = [int][Math]::Max(128, [Math]::Floor($W * $scale))
+        $rh = [int][Math]::Max(128, [Math]::Floor($H * $scale))
+        if ($rw -lt $W -and $rh -lt $H) { return (([double]$rw * [double]$rh) / 1000000.0) }
+    }
+    return (([double]$W * [double]$H) / 1000000.0)
+}
+
+function Add-MossBenchmarkEntry {
+    param($Job, [double]$SecondsPerImage, [int]$Images)
+    if ($SecondsPerImage -le 0.05 -or $Images -le 0) { return }
+    $list = Load-MossBenchmarks
+    $gpuName = ''
+    try { $g0 = @($script:Inventory | Where-Object { -not $_.IsVirtual } | Select-Object -First 1); if ($g0) { $gpuName = [string]$g0.Name } } catch {}
+    $rw = [int]$Job.Width; $rh = [int]$Job.Height
+    # Detail-regeneration (highres) runs: the job's own W/H is IGNORED by the
+    # args builder - the base pass renders at the SOURCE size and the highres
+    # second pass enlarges it. Record the source size so the entry matches
+    # what the engine actually rendered, plus the scale itself: a hires run
+    # costs far more than a plain run at the same size/steps (measured 853 s
+    # vs about 177 s at 1360 x 768 / 165 steps), so estimates must be able to
+    # tell them apart (0 = plain run).
+    $hiresScale = 0.0
+    if ($Job.PSObject.Properties['HiresScale']) { $hiresScale = [double]$Job.HiresScale }
+    if ($hiresScale -ge 1.5 -and $Job.PSObject.Properties['SrcW'] -and [int]$Job.SrcW -ge 64 -and $Job.PSObject.Properties['SrcH'] -and [int]$Job.SrcH -ge 64) {
+        $rw = [int]$Job.SrcW; $rh = [int]$Job.SrcH
+    }
+    $scale = switch ([string]$Job.SpeedMode) { '2x' { 0.7 } '4x' { 0.5 } '8x' { 0.35 } 'Fast' { [Math]::Min(0.35, 128.0 / [Math]::Min($Job.Width, $Job.Height)) } default { 0 } }
+    if ($scale -gt 0 -and $scale -lt 1) {
+        $rw2 = [int][Math]::Max(128, [Math]::Floor($Job.Width * $scale))
+        $rh2 = [int][Math]::Max(128, [Math]::Floor($Job.Height * $scale))
+        if ($rw2 -lt $rw -and $rh2 -lt $rh) { $rw = $rw2; $rh = $rh2 }
+    }
+    $entry = [ordered]@{
+        Date = (Get-Date).ToString('o'); Backend = [string]$Job.Backend; Gpu = $gpuName
+        W = [int]$rw; H = [int]$rh; RenderW = [int]$rw; RenderH = [int]$rh
+        SpeedMode = [string]$Job.SpeedMode; Steps = [int]$Job.Steps
+        Sampler = [string]$Job.SamplingMethod; Scheduler = [string]$Job.Scheduler
+        Img2Img = [bool]($null -ne $Job.InitImage)
+        HiresScale = [double]$hiresScale
+        SecondsPerImage = [Math]::Round([double]$SecondsPerImage, 2); Images = [int]$Images
+    }
+    [void]$list.Add($entry)
+    while ($list.Count -gt 400) { $list.RemoveAt(0) }
+    Save-MossBenchmarks $list
+}
+
+function Get-MossBenchmarkEstimate {
+    # Seconds-per-image extrapolated from the benchmark store. For a detail-
+    # regeneration (highres) job pass -HiresScale plus the SOURCE size: the
+    # estimate is then base img2img pass at the source size + engine highres
+    # second pass at HiresScale x, both from plain (non-hires) measurements.
+    param([int]$W, [int]$H, [string]$SpeedMode, [int]$Steps, [bool]$IsImg2Img, [double]$HiresScale = 0.0, [int]$SrcW = 0, [int]$SrcH = 0)
+    try {
+        $list = Load-MossBenchmarks
+        # Detail-regeneration runs are recorded with HiresScale >= 1.5: their
+        # measured time includes the enlarged second pass, so they must never
+        # be matched for a PLAIN estimate (the 853 s hires verify run would
+        # otherwise make every plain 1360 x 768 estimate ~5x too slow), and
+        # plain entries would grossly underestimate a hires run. Old entries
+        # have no HiresScale property: they count as plain.
+        $plain = @($list | Where-Object { -not ($_.PSObject.Properties['HiresScale'] -and [double]$_.HiresScale -ge 1.5) })
+        # Best matching recorded run for a target render size (MP x steps
+        # score, same rule as the live ETA), scaled to the target.
+        $bestMatch = {
+            param($targetMP, $isI2I)
+            $best = $null; $bestScore = [double]::MaxValue
+            foreach ($e in $plain) {
+                if ([bool]$e.Img2Img -ne $isI2I) { continue }
+                $recMP = (([double]$e.RenderW * [double]$e.RenderH) / 1000000.0)
+                if ($recMP -le 0) { continue }
+                $recSteps = [Math]::Max(1, [int]$e.Steps)
+                $score = [Math]::Abs([Math]::Log((($targetMP * [Math]::Max(1, $Steps)) + 1.0) / (($recMP * $recSteps) + 1.0)))
+                if ($score -lt $bestScore) { $bestScore = $score; $best = $e }
+            }
+            if (-not $best) { return $null }
+            $recMP = (([double]$best.RenderW * [double]$best.RenderH) / 1000000.0)
+            return @{ Sec = [double]$best.SecondsPerImage * ($targetMP / $recMP) * ([double]$Steps / [Math]::Max(1, [int]$best.Steps)); E = $best }
+        }
+        if ($HiresScale -ge 1.5 -and $SrcW -ge 64 -and $SrcH -ge 64) {
+            # Detail-regeneration run = base img2img pass at the SOURCE size
+            # (composition, all engine steps) + the engine highres second pass
+            # at HiresScale x with the full step count. Both parts are
+            # estimated from plain measurements - the recorded hires runs
+            # themselves are excluded above (they would double-count).
+            $mBase = & $bestMatch (([double]$SrcW * [double]$SrcH) / 1000000.0) $true
+            if (-not $mBase) { return $null }
+            $est = [double]$mBase.Sec
+            $hiW = [int][Math]::Round($SrcW * $HiresScale); $hiH = [int][Math]::Round($SrcH * $HiresScale)
+            $based = ('base pass from {0} x {1} img2img @ {2} steps' -f $mBase.E.W, $mBase.E.H, $mBase.E.Steps)
+            $mSecond = & $bestMatch (([double]$hiW * [double]$hiH) / 1000000.0) $false
+            if ($mSecond) {
+                $est += [double]$mSecond.Sec
+                $based += (' + highres pass from {0} x {1} fresh @ {2} steps' -f $mSecond.E.W, $mSecond.E.H, $mSecond.E.Steps)
+            } else {
+                $based += ' + highres pass (no fresh measurements yet - not included, the real time will be higher)'
+            }
+            return @{ Sec = [Math]::Max(1.0, [Math]::Round($est, 1)); BaseSec = [Math]::Max(1.0, [Math]::Round([double]$mBase.Sec, 1)); SecondSec = $(if ($mSecond) { [Math]::Max(1.0, [Math]::Round([double]$mSecond.Sec, 1)) } else { 0.0 }); Based = $based }
+        }
+        $targetMP = Get-MossRenderMP $W $H $SpeedMode
+        $m = & $bestMatch $targetMP $IsImg2Img
+        if (-not $m) { return $null }
+        return @{ Sec = [Math]::Max(1.0, [Math]::Round([double]$m.Sec, 1)); Based = ('{0} x {1} {2} @ {3} steps' -f $m.E.W, $m.E.H, $m.E.SpeedMode, $m.E.Steps) }
+    } catch { return $null }
+}
+
+function Get-MossGpuTdp([string]$GpuName) {
+    # Rated board power (watts) for common GPUs, used ONLY for the energy
+    # estimate in the Benchmarks dialog. Vendor-neutral: NVIDIA, AMD and
+    # Intel entries; returns $null when the GPU is not in the table so the
+    # app never invents a number. First match wins, so specific variants
+    # (e.g. '3080 ti') must be listed before their base model ('3080').
+    if (-not $GpuName) { return $null }
+    # Strip '(R)'/'(TM)' decorations (Intel names like 'Intel(R) Arc(TM) A770')
+    $n = (([string]$GpuName) -replace '\((r|tm)\)', '').ToLowerInvariant()
+    $table = @(
+        @('rtx 5090', 575), @('rtx 5080', 360), @('rtx 5070 ti', 300), @('rtx 5070', 250),
+        @('rtx 4090', 450), @('rtx 4080', 320), @('rtx 4070 ti', 285), @('rtx 4070', 200),
+        @('rtx 3090 ti', 450), @('rtx 3080 ti', 350), @('rtx 3090', 350), @('rtx 3080', 320),
+        @('rtx 3070 ti', 290), @('rtx 3060 ti', 200), @('rtx 3070', 220), @('rtx 3060', 170), @('rtx 3050', 130),
+        @('rtx 2080 ti', 250), @('rtx 2080', 215), @('rtx 2070', 175), @('rtx 2060', 160),
+        @('gtx 1080 ti', 250), @('gtx 1080', 180), @('gtx 1070', 150), @('gtx 1660', 120),
+        @('rx 7900 xtx', 355), @('rx 7900 xt', 315), @('rx 7800 xt', 263), @('rx 7700 xt', 245),
+        @('rx 6950 xt', 335), @('rx 6900 xt', 300), @('rx 6800 xt', 300), @('rx 6800', 250),
+        @('rx 6700 xt', 230), @('rx 6600 xt', 182), @('rx 6600', 132),
+        @('arc a770', 225), @('arc a750', 225), @('arc a580', 175), @('arc a380', 75)
+    )
+    foreach ($e in $table) { if ($n.Contains($e[0])) { return [int]$e[1] } }
+    return $null
+}
+
+function Get-MossUpscalerModels {
+    # ALL upscaler models the user placed in models\upscalers (.pth). The
+    # USER chooses which one to use - MOSS never overrides that choice (a
+    # different model, e.g. an anime or black-and-white specialist, is just
+    # as valid). Returns an EMPTY list when none exist (the fast option is
+    # then unavailable; MOSS falls back to detail regeneration). The unary
+    # comma keeps the list object intact even when empty (pipeline gotcha).
+    $dir = Join-Path $script:AppRoot 'models\upscalers'
+    $list = New-Object System.Collections.ArrayList
+    try {
+        foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.pth' -File -ErrorAction SilentlyContinue | Sort-Object Name)) { [void]$list.Add([string]$f.FullName) }
+    } catch {}
+    return ,$list
+}
+
+function Get-MossDefaultUpscaleModel {
+    # Preferred DEFAULT selection only: the RealESRGAN x4 model - verified to
+    # load in the bundled engine (the x2 'x2plus' variant uses a feature-32
+    # architecture the engine's ESRGAN loader rejects). The pipeline renders
+    # at HALF the image's size and the x4 model sharpens it to 2x. The user
+    # can pick any other model in the dialogs; $null when none exist.
+    $models = Get-MossUpscalerModels
+    if ($models.Count -eq 0) { return $null }
+    $hit = @($models | Where-Object { (Split-Path -Leaf $_) -ieq 'RealESRGAN_x4plus.pth' } | Select-Object -First 1)
+    if ($hit) { return [string]$hit[0] }
+    return [string]$models[0]
+}
+
+function Get-MossSidecarPath([string]$ImagePath) {
+    # Where a NEW per-image sidecar is written: '<image folder>\metadata\
+    # <name>.json'. The output folder therefore only shows the pictures;
+    # the JSON sidecars (seed/prompt/settings that power Improve, re-render
+    # from seed and the Info dialog) live in their own subfolder. Returns
+    # the path WITHOUT checking that it exists.
+    $dir = [System.IO.Path]::GetDirectoryName([string]$ImagePath)
+    if ([string]::IsNullOrEmpty($dir)) { return [System.IO.Path]::ChangeExtension([string]$ImagePath, '.json') }
+    return (Join-Path (Join-Path $dir 'metadata') ([System.IO.Path]::GetFileNameWithoutExtension([string]$ImagePath) + '.json'))
+}
+
+function Get-MossSidecarReadPath([string]$ImagePath) {
+    # Where to READ a sidecar: the metadata subfolder when present, otherwise
+    # the legacy location next to the image (images made by older versions).
+    $p = Get-MossSidecarPath $ImagePath
+    if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+    return [System.IO.Path]::ChangeExtension([string]$ImagePath, '.json')
+}
+
+function Get-MossOrphanSidecars([string]$ImagePath) {
+    # Sidecar files whose picture no longer exists: they appear when a
+    # picture is RENAMED or MOVED outside MOSS (the sidecar is named after
+    # the picture), or when a picture was deleted by hand. Only MOSS's own
+    # sidecars are considered; the sidecar matching THIS image is skipped.
+    $result = New-Object System.Collections.ArrayList
+    $dir = [System.IO.Path]::GetDirectoryName([string]$ImagePath)
+    if ([string]::IsNullOrEmpty($dir) -or -not (Test-Path -LiteralPath $dir -PathType Container)) { return $result.ToArray() }
+    $imgName = [System.IO.Path]::GetFileNameWithoutExtension([string]$ImagePath)
+    $seen = @{}
+    foreach ($loc in @((Join-Path $dir 'metadata'), $dir)) {
+        if (-not (Test-Path -LiteralPath $loc -PathType Container)) { continue }
+        foreach ($js in @(Get-ChildItem -LiteralPath $loc -Filter 'MOSS_*.json' -File -ErrorAction SilentlyContinue)) {
+            $base = [System.IO.Path]::GetFileNameWithoutExtension($js.Name)
+            if ($base -eq $imgName -or $seen.ContainsKey($js.Name)) { continue }
+            $seen[$js.Name] = $true
+            $imgCandidate = Join-Path $dir ($base + '.png')
+            if (-not (Test-Path -LiteralPath $imgCandidate -PathType Leaf)) { [void]$result.Add($js.FullName) }
+        }
+    }
+    # Return the ELEMENTS (not a wrapped collection): an empty list then
+    # collapses to no output, so @(Get-MossOrphanSidecars ...) in the caller
+    # yields Count 0 for 'no orphans' - with 'return ,$result' the empty
+    # ArrayList arrived as ONE item and made Count always >= 1, which fired
+    # the adoption offer on every improve even for images WITH a sidecar.
+    return $result.ToArray()
+}
+
+function Approve-MossSidecarAdoption([string]$ImagePath) {
+    # Called when a picture has NO sidecar at all: if exactly ONE orphaned
+    # sidecar exists (its picture was renamed/moved/deleted outside MOSS),
+    # offer to attach it to this picture - with seed and prompt shown so
+    # the user can judge whether it belongs. Returns $true when adopted.
+    # GUARD: only when THIS picture really has no sidecar - the offer must
+    # never claim 'no sidecar' for an image that has one.
+    if (Test-Path -LiteralPath (Get-MossSidecarReadPath $ImagePath) -PathType Leaf) { return $false }
+    $orphans = @(Get-MossOrphanSidecars $ImagePath)
+    if ($orphans.Count -ne 1) { return $false }
+    $op = [string]$orphans[0]
+    $info = ''
+    try {
+        $sc = Get-Content -LiteralPath $op -Raw | ConvertFrom-Json
+        $pr = ''
+        if ($sc.PromptProtected) {
+            if (-not $script:HistoryLocked -and $script:HistoryPassphrase) {
+                try { $pr = [string](Unprotect-MossPayload ([string]$sc.PromptProtected) $script:HistoryPassphrase) } catch { $pr = '' }
+            }
+            if (-not $pr) { $pr = '(encrypted - enter the history code to read it)' }
+        } elseif ($sc.Prompt) { $pr = [string]$sc.Prompt }
+        if ($pr.Length -gt 140) { $pr = $pr.Substring(0, 140) + '...' }
+        $info = ('Stored: seed {0}, {1} x {2}, {3} steps{4}Prompt: {5}' -f $(if ($sc.Seed) { [string]$sc.Seed } else { '?' }), $(if ($sc.Width) { [string]$sc.Width } else { '?' }), $(if ($sc.Height) { [string]$sc.Height } else { '?' }), $(if ($sc.Steps) { [string]$sc.Steps } else { '?' }), [Environment]::NewLine, $(if ($pr) { $pr } else { '(no prompt stored)' }))
+    } catch { $info = 'Could not read its contents.' }
+    $a = [System.Windows.Forms.MessageBox]::Show(("This image has no stored settings (no sidecar).`r`n`r`nThere is exactly one ORPHANED settings file: {0}`r`n{1}`r`n`r`nIts picture no longer exists - usually because the picture was RENAMED or MOVED outside MOSS. Attach these settings to this image? (If they belong to a different picture, choose No.)" -f ([System.IO.Path]::GetFileName($op)), $info), 'Orphaned settings found', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($a -ne [System.Windows.Forms.DialogResult]::Yes) { return $false }
+    $target = Get-MossSidecarPath $ImagePath
+    $tdir = [System.IO.Path]::GetDirectoryName($target)
+    if (-not (Test-Path -LiteralPath $tdir -PathType Container)) { New-Item -ItemType Directory -Path $tdir -Force | Out-Null }
+    try { Move-Item -LiteralPath $op -Destination $target -Force; return $true } catch { return $false }
+}
+
+function Test-MossPngValid([string]$ImagePath) {
+    # True only when the file exists AND is a complete, decodable PNG.
+    # Guards against truncated writes (disk full, power loss, antivirus
+    # interference): the engine 'creates' the file, but a half-written PNG
+    # is not a picture - it must never enter the generated-files list.
+    try {
+        if (-not (Test-Path -LiteralPath $ImagePath -PathType Leaf)) { return $false }
+        $bytes = [System.IO.File]::ReadAllBytes($ImagePath)
+        if ($bytes.Length -lt 33) { return $false }
+        if ($bytes[0] -ne 0x89 -or $bytes[1] -ne 0x50 -or $bytes[2] -ne 0x4E -or $bytes[3] -ne 0x47) { return $false }
+        $t = $bytes.Length
+        # PNG ends with the IEND chunk: 4 zero length bytes + 'IEND' + 4-byte CRC.
+        if (-not ($bytes[$t-8] -eq 0x49 -and $bytes[$t-7] -eq 0x45 -and $bytes[$t-6] -eq 0x4E -and $bytes[$t-5] -eq 0x44)) { return $false }
+        $ms = New-Object System.IO.MemoryStream (,$bytes)
+        try {
+            $img = [System.Drawing.Image]::FromStream($ms)
+            try { return ($img.Width -gt 0 -and $img.Height -gt 0) } finally { $img.Dispose() }
+        } finally { $ms.Dispose() }
+    } catch { return $false }
+}
+
 function Write-MossErrorLog([string]$Title,[string]$Body) {
     # Always keep a local copy, even if later uploading fails or the PC is offline.
     try {
@@ -727,7 +1228,11 @@ function Get-MossModelUpdateInfo {
         @{ Name='moss_image_sft_int8_convrot.safetensors'; Setting='DiffusionModelPath'; Repo='Comfy-Org/MOSS-Image'; RepoPath='diffusion_models/moss_image_sft_int8_convrot.safetensors' },
         @{ Name='flux2-vae.safetensors'; Setting='VaePath'; Repo='Comfy-Org/MOSS-Image'; RepoPath='vae/flux2-vae.safetensors' },
         @{ Name='Qwen3.5-9B-Q4_K_M.gguf'; Setting='LlmPath'; Repo='unsloth/Qwen3.5-9B-GGUF'; RepoPath='Qwen3.5-9B-Q4_K_M.gguf' },
-        @{ Name='tokenizer_qwen3.5.json'; Setting='TokenizerPath'; Repo='OpenMOSS-Team/MOSS-Image-Base'; RepoPath='tokenizer/tokenizer.json' }
+        @{ Name='tokenizer_qwen3.5.json'; Setting='TokenizerPath'; Repo='OpenMOSS-Team/MOSS-Image-Base'; RepoPath='tokenizer/tokenizer.json' },
+        # The fast-sharpen upscaler: part of the standard install (the fast
+        # improve mode depends on it). Lives in models\upscalers; without it
+        # MOSS still generates and falls back to detail regeneration.
+        @{ Name='RealESRGAN_x4plus.pth'; Setting=''; Repo='nateraw/real-esrgan'; RepoPath='RealESRGAN_x4plus.pth' }
     )
     $out=@()
     $treeCache=@{}
@@ -741,6 +1246,8 @@ function Get-MossModelUpdateInfo {
             $modelsDir=Join-Path $script:AppRoot 'models'
             $p=Join-Path $modelsDir $m.Name
             if(Test-Path -LiteralPath $p -PathType Leaf){ $localPath=$p }
+            # Upscaler models live in their own subfolder.
+            if(-not $localPath){ $p=Join-Path (Join-Path $modelsDir 'upscalers') $m.Name; if(Test-Path -LiteralPath $p -PathType Leaf){ $localPath=$p } }
         }
         $info=@{ Name=$m.Name; Repo=$m.Repo; RepoPath=$m.RepoPath; RemoteUrl=('https://huggingface.co/'+$m.Repo+'/resolve/main/'+$m.RepoPath); LocalPath=$localPath; LocalSize=0; RemoteSize=0; RemoteDate=''; Status='check failed' }
         if($localPath){ $info.LocalSize=(Get-Item -LiteralPath $localPath).Length }
@@ -773,23 +1280,104 @@ function Get-MossModelUpdateInfo {
     }
     return $out
 }
+function Get-MossProbeSpeed([int64]$TotalBytes, [double]$ElapsedSec, [int64]$RampBytes, [double]$RampSec) {
+    # Speed for the download probe, in MB/s (0 when not measurable).
+    # The first RampBytes (TCP slow start / TLS handshake ramp-up) are
+    # EXCLUDED from the timing: they measure connection setup, not the
+    # steady-state speed a multi-GB model download would run at.
+    if ($TotalBytes -lt 1MB) { return 0 }
+    $dataBytes = $TotalBytes - $RampBytes
+    $dataSec = $ElapsedSec - $RampSec
+    if ($dataBytes -ge 1MB -and $dataSec -gt 0.05) { return ($dataBytes / 1MB) / $dataSec }
+    # Too little data past the ramp: fall back to the full average rather
+    # than answering 0 (a rough number beats none).
+    if ($ElapsedSec -gt 0.05) { return ($TotalBytes / 1MB) / $ElapsedSec }
+    return 0
+}
+
 function Measure-MossDownloadSpeed([string]$url) {
-    # Downloads 4 MB of the file and returns the measured speed in MB/s
-    # (0 when it cannot be measured) - used for the download-time estimate.
+    # Downloads up to 6 MB of the file with a HARD 5-second wall budget and
+    # returns the steady-state speed in MB/s (0 when it cannot be measured)
+    # - used for the download-time estimate. Timeouts are deliberately
+    # short: the probe must NEVER make the user wait - 8 s to connect, 5 s
+    # per stalled read, 5 s total read budget (previous version waited up
+    # to 20+ seconds, which the user rightly found too long).
     try {
         $req=[System.Net.HttpWebRequest]::Create($url)
-        $req.Method='GET'; $req.AddRange(0,4194303); $req.Timeout=20000; $req.ReadWriteTimeout=20000; $req.UserAgent='MOSS-Image-Studio'
+        $req.Method='GET'; $req.AddRange(0,6291455); $req.Timeout=8000; $req.ReadWriteTimeout=5000; $req.UserAgent='MOSS-Image-Studio'
         $resp=$req.GetResponse()
         try {
             $sw=[System.Diagnostics.Stopwatch]::StartNew()
             $stream=$resp.GetResponseStream()
             $buf=New-Object byte[] (256KB)
-            $total=0
-            while($true){ $r=$stream.Read($buf,0,$buf.Length); if($r -le 0){ break }; $total+=$r; if($total -ge 4MB){ break } }
+            $total=0; $rampSec=-1.0; $rampBytes=512KB
+            while($true){
+                $r=$stream.Read($buf,0,$buf.Length)
+                if($r -le 0){ break }
+                $total+=$r
+                if($rampSec -lt 0 -and $total -ge $rampBytes){ $rampSec=$sw.Elapsed.TotalSeconds }
+                if($total -ge 6MB){ break }
+                if($sw.Elapsed.TotalSeconds -ge 5.0){ break }
+            }
             $sw.Stop()
-            if($total -gt 1MB){ return ($total/1MB)/$sw.Elapsed.TotalSeconds }
+            $elapsed=$sw.Elapsed.TotalSeconds
+            if($rampSec -lt 0){ $rampSec=$elapsed; $rampData=0 } else { $rampData=$rampBytes }
+            return Get-MossProbeSpeed $total $elapsed $rampData $rampSec
         } finally { $resp.Close() }
     } catch {}
+    return 0
+}
+
+function Get-MossDownloadSpeedFile { return (Join-Path $script:AppRoot 'config\downloadspeed.json') }
+function Save-MossRealDownloadSpeed([double]$MBps, [int64]$Bytes) {
+    # Records the REAL average speed of a completed model download
+    # (bytes transferred / wall time) - the most honest speed signal this
+    # machine has. Speeds <= 0 are ignored. Last 3 entries kept.
+    if ($MBps -le 0 -or $MBps -gt 2000) { return }
+    try {
+        $list = New-Object System.Collections.ArrayList
+        $f = Get-MossDownloadSpeedFile
+        if (Test-Path -LiteralPath $f) {
+            try { $data = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json; foreach ($e in @($data)) { [void]$list.Add($e) } } catch {}
+        }
+        [void]$list.Add([ordered]@{ Date = (Get-Date).ToString('o'); MBps = [Math]::Round([double]$MBps, 2); Bytes = [int64]$Bytes })
+        while ($list.Count -gt 3) { $list.RemoveAt(0) }
+        $dir = Join-Path $script:AppRoot 'config'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $list | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $f -Encoding UTF8
+    } catch {}
+}
+function Load-MossRealDownloadSpeed {
+    # The most recent REAL model-download speed (MB/s), or $null. Entries
+    # are appended chronologically, so the LAST valid entry is the newest
+    # (date strings tie when downloads complete within the same second -
+    # comparing dates would then keep an older one).
+    try {
+        $f = Get-MossDownloadSpeedFile
+        if (-not (Test-Path -LiteralPath $f)) { return $null }
+        $data = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
+        $best = $null
+        foreach ($e in @($data)) { if ([double]$e.MBps -gt 0) { $best = $e } }
+        if ($best) { return [pscustomobject]@{ MBps = [double]$best.MBps; Date = [string]$best.Date; Bytes = [int64]$best.Bytes } }
+    } catch {}
+    return $null
+}
+function Get-MossDownloadSpeedEstimate([string]$url, [int]$MaxAgeDays = 7) {
+    # The best available download speed (MB/s, 0 when unknown):
+    # 1. A REAL completed model download from the last $MaxAgeDays days is
+    #    used ALONE - no probe, the dialog opens instantly.
+    # 2. Otherwise a fresh 5-second probe is run and BLENDED 50/50 with any
+    #    older real measurement (the probe sees today's network, the real
+    #    number shows what a full multi-GB transfer settles at).
+    $real = Load-MossRealDownloadSpeed
+    $maxAge = [TimeSpan]::FromDays($MaxAgeDays)
+    if ($real) {
+        try { if (((Get-Date) - [datetime]$real.Date) -le $maxAge) { return [double]$real.MBps } } catch {}
+    }
+    $probe = Measure-MossDownloadSpeed $url
+    if ($probe -gt 0 -and $real -and [double]$real.MBps -gt 0) { return [Math]::Round((($probe + [double]$real.MBps) / 2.0), 2) }
+    if ($probe -gt 0) { return $probe }
+    if ($real -and [double]$real.MBps -gt 0) { return [double]$real.MBps }
     return 0
 }
 function Find-MossRelocationDrive([int64]$needBytes) {
@@ -862,7 +1450,7 @@ function Test-MossOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
             foreach($m in $missing){ $lines+=('  - model '+$m+' is missing') }
             $est=''
             if($modelsTotal -gt 0 -and $firstMissingUrl){
-                $spd=Measure-MossDownloadSpeed $firstMissingUrl
+                $spd=Get-MossDownloadSpeedEstimate $firstMissingUrl
                 if($spd -gt 0){ $est=' At your measured speed ('+[math]::Round($spd,1)+' MB/s) this takes about '+[math]::Round($modelsTotal/1MB/$spd/60,0)+' minutes.' }
             }
             # Not enough room on MOSS's current drive? Suggest a better place
@@ -895,7 +1483,7 @@ function Test-MossOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
                     return
                 }
             }
-            $msg=("MOSS is not fully installed yet:`r`n`r`n"+(($lines) -join "`r`n")+"`r`n`r`nWithout these files MOSS cannot generate images.`r`n`r`nDownload them now?"+$est+"`r`n(You can also do this later via 'Update engine...' in the header.)")
+            $msg=("MOSS is not fully installed yet:`r`n`r`n"+(($lines) -join "`r`n")+"`r`n`r`nWithout the engine and model files MOSS cannot generate images; the upscaler model powers the fast-sharpen improve mode (without it MOSS falls back to the slower detail regeneration).`r`n`r`nDownload them now?"+$est+"`r`n(You can also do this later via 'Update engine...' in the header.)")
             $answer=[System.Windows.Forms.MessageBox]::Show($Owner,$msg,'MOSS setup',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
             if($answer -eq [System.Windows.Forms.DialogResult]::Yes){ Show-MossEngineUpdateDialog $Owner }
         }
@@ -957,7 +1545,7 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null) {
     # Measure the download speed once (4 MB range request) so the confirm
     # dialog can give a real time estimate instead of a guess.
     $measuredSpeed=0
-    foreach($mi in $script:MossDlgModels){ if($mi.RemoteUrl){ $measuredSpeed=Measure-MossDownloadSpeed $mi.RemoteUrl; break } }
+    foreach($mi in $script:MossDlgModels){ if($mi.RemoteUrl){ $measuredSpeed=Get-MossDownloadSpeedEstimate ([string]$mi.RemoteUrl); break } }
     if($measuredSpeed -gt 0){ [void]$log.Add(('Measured download speed: '+[math]::Round($measuredSpeed,1)+' MB/s')) } else { [void]$log.Add('Download speed could not be measured') }
 
     # Dialog: release list + changelog reader + variant selection + installer.
@@ -968,7 +1556,7 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null) {
     $cText=[System.Drawing.Color]::FromArgb(230,236,245); $cMuted=[System.Drawing.Color]::FromArgb(145,161,185)
     $ttl=New-Object System.Windows.Forms.Label; $ttl.Text='UPDATE ENGINE  -  sd-cli core files'; $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',13,[System.Drawing.FontStyle]::Bold); $ttl.AutoSize=$true; $ttl.Location=New-Object System.Drawing.Point(12,10); $g.Controls.Add($ttl)
     $sub=New-Object System.Windows.Forms.Label; $sub.Text="MOSS is the GUI - sd-cli.exe and its libraries are the engine that renders the images. This dialog updates only those engine files; the MOSS app, models, prompts, outputs and settings are never touched."; $sub.Location=New-Object System.Drawing.Point(12,40); $sub.Size=New-Object System.Drawing.Size(690,44); $sub.ForeColor=$cMuted; $g.Controls.Add($sub)
-    $installedText=$(if($installedCommit){'commit '+$installedCommit}else{'version could not be read'}); $pubDate=$(if($latest.published_at){([datetime]$latest.published_at).ToString('yyyy-MM-dd')}else{'unknown date'})
+    $installedText=$(if($installedCommit){'commit '+$installedCommit}else{'version could not be read'})
     $verPanel=New-Object System.Windows.Forms.Panel; $verPanel.Location=New-Object System.Drawing.Point(12,88); $verPanel.Size=New-Object System.Drawing.Size(690,46); $verPanel.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $g.Controls.Add($verPanel)
     $vin=New-Object System.Windows.Forms.Label; $vin.Text='INSTALLED'; $vin.Location=New-Object System.Drawing.Point(10,4); $vin.Size=New-Object System.Drawing.Size(340,15); $vin.Font=New-Object System.Drawing.Font('Segoe UI',8); $vin.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $verPanel.Controls.Add($vin)
     $vinv=New-Object System.Windows.Forms.Label; $vinv.Text=$installedText; $vinv.Location=New-Object System.Drawing.Point(10,20); $vinv.Size=New-Object System.Drawing.Size(340,20); $vinv.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $verPanel.Controls.Add($vinv)
@@ -1204,7 +1792,7 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null) {
         }
         if($missingCudartExtra){
             [void]$log.Add(('ERROR: no cudart package for an extra CUDA variant in release '+$relTag))
-            [System.Windows.Forms.MessageBox]::Show($g,'This release has no CUDA runtime package for one of the extra CUDA variants you selected, and a fresh CUDA engine folder cannot start without it.`r`nUncheck that extra variant (or choose Vulkan for it) and try again.','Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+            [System.Windows.Forms.MessageBox]::Show($g,"This release has no CUDA runtime package for one of the extra CUDA variants you selected, and a fresh CUDA engine folder cannot start without it.`r`nUncheck that extra variant (or choose Vulkan for it) and try again.",'Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
             return
         }
         # Models selected in the MODELS section - downloaded and installed
@@ -1424,10 +2012,17 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null) {
                     [System.Windows.Forms.Application]::DoEvents()
                     [void]$log.Add(('Downloading model '+$mi.RemoteUrl))
                     $mTemp=Join-Path $tempRoot ('model-'+$mi.Name+'.part')
+                    $dlSw=[System.Diagnostics.Stopwatch]::StartNew()
                     Invoke-WebRequest -Uri ([string]$mi.RemoteUrl) -OutFile $mTemp -UseBasicParsing -TimeoutSec 7200
+                    $dlSw.Stop()
                     $got=(Get-Item -LiteralPath $mTemp).Length
                     if($mi.RemoteSize -gt 0 -and $got -ne $mi.RemoteSize){ throw ('download size mismatch (got '+[math]::Round($got/1GB,2)+' GB, expected '+[math]::Round($mi.RemoteSize/1GB,2)+' GB)') }
-                    [void]$log.Add(('Model download ok ('+[math]::Round($got/1GB,2)+' GB)'))
+                    # Record the REAL download speed (v0.1.88): the most honest
+                    # signal for future 'about X minutes' estimates - blended
+                    # with fresh probes when the cache is stale.
+                    $dlMBps=0.0
+                    if($dlSw.Elapsed.TotalSeconds -gt 1 -and $got -gt 1MB){ $dlMBps=($got/1MB)/$dlSw.Elapsed.TotalSeconds; Save-MossRealDownloadSpeed $dlMBps $got }
+                    [void]$log.Add(('Model download ok ('+[math]::Round($got/1GB,2)+' GB'+$(if($dlMBps -gt 0){(' at '+[math]::Round($dlMBps,1)+' MB/s')}else{''})+'))'))
                     $destModel=$mi.LocalPath; if(-not $destModel){ $destModel=Join-Path $script:AppRoot ('models\'+$mi.Name) }
                     if((Test-Path -LiteralPath $destModel -PathType Leaf) -and $modelBackupCheck.Checked){
                         $oldName=([System.IO.Path]::GetFileNameWithoutExtension($destModel))+'.old-'+$stamp+([System.IO.Path]::GetExtension($destModel))
@@ -1543,16 +2138,53 @@ function Show-GeneratorWindow {
     $script:RefineFailCount = 0
     $script:RefineStartedAt = $null
 
+    function Get-MossShortName([string]$Text,[int]$MaxChars) {
+        # Shortens long device/model names for one-line UI labels: keeps the
+        # start of the string and marks the cut with an ellipsis, so a label
+        # never pushes neighbouring text off-screen on small displays.
+        $t = [string]$Text
+        if ([string]::IsNullOrWhiteSpace($t)) { return $t }
+        if ($t.Length -le $MaxChars) { return $t }
+        return ($t.Substring(0, [Math]::Max(1, $MaxChars - 1)).TrimEnd() + [char]0x2026)
+    }
+
     $f = New-Object System.Windows.Forms.Form
-    $f.Text = "MOSS Image Studio v$($script:AppVersion) (GUI for sd-cli) | Generator"; $f.Size = New-Object System.Drawing.Size(1180,850); $f.MinimumSize = New-Object System.Drawing.Size(1000,740); $f.StartPosition='CenterScreen'
+    # Compact window (v0.1.96-98): 1052 x 551 - the app-level entries
+    # (output folder, model files, benchmarks, error report) moved into the
+    # header Options menu, so the left panel holds only generation controls
+    # and got much shorter. Update-MossLeftActionLayout is static now.
+    $f.Text = "MOSS Image Studio v$($script:AppVersion) (GUI for sd-cli) | Generator"; $f.Size = New-Object System.Drawing.Size(1052,551); $f.MinimumSize = New-Object System.Drawing.Size(900,550); $f.StartPosition='CenterScreen'
+    # Small screens (v0.1.91): shrink to the work area on first show (the
+    # layout is anchored and adapts) and lower the minimum size to what the
+    # screen actually offers. The caps track the compact default height.
+    $f.Add_Shown({
+        try {
+            $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+            $mw = [Math]::Min(900, $wa.Width - 16)
+            $mh = [Math]::Min(550, $wa.Height - 16)
+            $f.MinimumSize = New-Object System.Drawing.Size([Math]::Max(600,$mw), [Math]::Max(500,$mh))
+            $nw = [Math]::Min($f.Width, $wa.Width - 16)
+            $nh = [Math]::Min($f.Height, $wa.Height - 16)
+            if ($nw -ne $f.Width -or $nh -ne $f.Height) {
+                $f.Size = New-Object System.Drawing.Size($nw, $nh)
+                $f.Location = New-Object System.Drawing.Point([Math]::Max(0, [int](($wa.Width - $nw) / 2)), [Math]::Max(0, [int](($wa.Height - $nh) / 2)))
+            }
+            # Compact flow (v0.1.96): re-apply the flow layout after any
+            # startup shrink so the action row / status / progress sit right
+            # below the content at the final window size.
+            Update-MossLeftActionLayout
+        } catch {}
+    })
     $f.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $f.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $f.Font=New-Object System.Drawing.Font('Segoe UI',9)
     $cPanel=[System.Drawing.Color]::FromArgb(25,32,45); $cCard=[System.Drawing.Color]::FromArgb(27,34,47); $cText=[System.Drawing.Color]::FromArgb(230,236,245); $cMuted=[System.Drawing.Color]::FromArgb(145,161,185); $cAccent=[System.Drawing.Color]::FromArgb(45,112,173)
 
-    $head=New-Object System.Windows.Forms.Panel; $head.Dock='Top'; $head.Height=68; $head.BackColor=$cPanel; $f.Controls.Add($head)
-    $ttl=New-Object System.Windows.Forms.Label; $ttl.Text="MOSS  /  IMAGE STUDIO  v$($script:AppVersion)"; $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',17,[System.Drawing.FontStyle]::Bold); $ttl.AutoSize=$true; $ttl.Location=New-Object System.Drawing.Point(20,9); $head.Controls.Add($ttl)
+    # Compact header (v0.1.96): 68 -> 50 px, title 17 pt -> 13 pt, buttons
+    # 30 px -> 24 px tall. Same responsive placement logic as before.
+    $head=New-Object System.Windows.Forms.Panel; $head.Dock='Top'; $head.Height=50; $head.BackColor=$cPanel; $f.Controls.Add($head)
+    $ttl=New-Object System.Windows.Forms.Label; $ttl.Text="MOSS  /  IMAGE STUDIO  v$($script:AppVersion)"; $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',13,[System.Drawing.FontStyle]::Bold); $ttl.AutoSize=$true; $ttl.Location=New-Object System.Drawing.Point(20,5); $head.Controls.Add($ttl)
     $gpuSubtitle='GPU: automatic'
     if($script:Settings.Contains('PreferredGpuIndex') -and [int]$script:Settings.PreferredGpuIndex -ge 0){
-        $gpuSubtitle="GPU: $($script:Settings.PreferredGpuName)"
+        $gpuSubtitle="GPU: $(Get-MossShortName ([string]$script:Settings.PreferredGpuName) 24)"
         if([string]::IsNullOrWhiteSpace([string]$script:Settings.PreferredGpuName)){ $gpuSubtitle="GPU: device $($script:Settings.PreferredGpuIndex)" }
     } else {
         # Automatic still SHOWS which GPU will be used (user: 'it should
@@ -1561,21 +2193,82 @@ function Show-GeneratorWindow {
         # will be in practice.
         try {
             $gpusAuto = @(Get-GpuInventory | Where-Object { -not $_.IsVirtual -and $_.Vendor -ne 'Unknown' })
-            if ($gpusAuto.Count -gt 0) { $gpuSubtitle = 'GPU: ' + [string]$gpusAuto[0].Name }
+            if ($gpusAuto.Count -gt 0) { $gpuSubtitle = 'GPU: ' + (Get-MossShortName ([string]$gpusAuto[0].Name) 24) }
         } catch {}
     }
-    $subt=New-Object System.Windows.Forms.Label; $subt.Text="LOCAL IMAGE GENERATION  -  $gpuSubtitle"; $subt.ForeColor=$cMuted; $subt.AutoSize=$true; $subt.Location=New-Object System.Drawing.Point(23,42); $head.Controls.Add($subt)
+    $subt=New-Object System.Windows.Forms.Label; $subt.Text="LOCAL IMAGE GENERATION  -  $gpuSubtitle"; $subt.ForeColor=$cMuted; $subt.AutoSize=$true; $subt.Location=New-Object System.Drawing.Point(23,29); $head.Controls.Add($subt)
     $backendText=[string]$script:Settings.Backend; if (-not $script:Settings.BackendSelectionSaved) { $backendText='Not configured' }
-    $backendBadge=New-Object System.Windows.Forms.Label; $backendBadge.Text="BACKEND  $backendText"; $backendBadge.AutoSize=$true; $backendBadge.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $backendBadge.Location=New-Object System.Drawing.Point(535,25); $backendBadge.Anchor='Top,Right'; $head.Controls.Add($backendBadge)
-    $setupBtn=New-Object System.Windows.Forms.Button; $setupBtn.Text='Hardware / Setup'; $setupBtn.Size=New-Object System.Drawing.Size(130,30); $setupBtn.Location=New-Object System.Drawing.Point(1025,18); $setupBtn.Anchor='Top,Right'; $setupBtn.FlatStyle='Flat'; $setupBtn.BackColor=$cAccent; $setupBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($setupBtn)
-    $setupBtn.Add_Click({ $f.Tag='SETUP'; $f.Close() })
-$headTip=New-Object System.Windows.Forms.ToolTip; $headTip.InitialDelay=300
-$updateBtn=New-Object System.Windows.Forms.Button; $updateBtn.Text='Update MOSS...'; $updateBtn.Size=New-Object System.Drawing.Size(130,30); $updateBtn.Location=New-Object System.Drawing.Point(880,18); $updateBtn.Anchor='Top,Right'; $updateBtn.FlatStyle='Flat'; $updateBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $updateBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($updateBtn)
-$headTip.SetToolTip($updateBtn,"Updates the MOSS application itself (the program files). Models, outputs and the sd-cli engine are not touched. Use 'Update engine...' for the rendering engine.")
-$engineBtn=New-Object System.Windows.Forms.Button; $engineBtn.Text='Update engine...'; $engineBtn.Size=New-Object System.Drawing.Size(130,30); $engineBtn.Location=New-Object System.Drawing.Point(735,18); $engineBtn.Anchor='Top,Right'; $engineBtn.FlatStyle='Flat'; $engineBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $engineBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($engineBtn)
-$headTip.SetToolTip($engineBtn,'Updates the sd-cli engine core files (the renderer in the bin folder): shows release changelogs and installs the newest engine build. MOSS itself is not changed.')
-$engineBtn.Add_Click({ Show-MossEngineUpdateDialog $f })
-$updateBtn.Add_Click({
+    $backendBadge=New-Object System.Windows.Forms.Label; $backendBadge.Text="BACKEND  $backendText"; $backendBadge.AutoSize=$true; $backendBadge.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $backendBadge.Location=New-Object System.Drawing.Point(535,17); $head.Controls.Add($backendBadge)
+    # Header OPTIONS MENU (v0.1.97, user: 'these are really options'): the
+    # three former header buttons (Hardware / Setup, Update engine, Update
+    # MOSS) fold into ONE 'Options' dropdown button - the header stays
+    # uncluttered and narrower windows keep room for the BACKEND badge.
+    # Header OPTIONS MENU (v0.1.97/98): app-level entries live here instead
+    # of cluttering the main window - Output folder..., Model files...,
+    # Benchmarks..., Error report plus Hardware / Setup and the updaters.
+    # Item labels show live status (folder name, model-file health) on open.
+    $mossOptionsMenu=New-Object System.Windows.Forms.ContextMenuStrip
+    $mossOptionsMenu.ShowItemToolTips=$true
+    $miOut=$mossOptionsMenu.Items.Add('Output folder...')
+    $miOut.ToolTipText='Where finished images are saved. Set once - this menu is all you need.'
+    $miOut.Add_Click({
+        $dlg=New-Object System.Windows.Forms.FolderBrowserDialog
+        $dlg.Description='Select the output folder for generated images.'
+        $dlg.ShowNewFolderButton=$true
+        $current=Get-AbsoluteAppPath $out.Text
+        if(Test-Path -LiteralPath $current -PathType Container){$dlg.SelectedPath=$current}
+        elseif(-not [string]::IsNullOrWhiteSpace($current)){$currentParent=Split-Path -Parent $current;if(Test-Path -LiteralPath $currentParent -PathType Container){$dlg.SelectedPath=$currentParent}}
+        if($dlg.ShowDialog($f) -eq 'OK'){$out.Text=$dlg.SelectedPath}
+        $dlg.Dispose()
+    })
+    $miModels=$mossOptionsMenu.Items.Add('Model files...')
+    $miModels.ToolTipText='Shows and changes the engine and model file paths, and reports whether all five files are found.'
+    $miModels.Add_Click({ Show-MossModelFilesDialog })
+    [void]$mossOptionsMenu.Items.Add('-')
+    $miBench=$mossOptionsMenu.Items.Add('Benchmarks...')
+    $miBench.ToolTipText='Measured render times per size/steps, time estimates for your settings and bigger jobs, and the quick benchmark.'
+    $miBench.Add_Click({ Show-MossBenchmarkDialog })
+    $miReport=$mossOptionsMenu.Items.Add('Error report')
+    $miReport.ToolTipText='Copies an anonymised technical error report to the clipboard and saves it under logs. Nothing is sent over the internet.'
+    $miReport.Add_Click({ Copy-MossErrorReport })
+    [void]$mossOptionsMenu.Items.Add('-')
+    $miSetup=$mossOptionsMenu.Items.Add('Hardware / Setup...')
+    $miSetup.Add_Click({ $f.Tag='SETUP'; $f.Close() })
+    $miSetup.ToolTipText='Adapter detection, backend selection (CUDA / Vulkan / ROCm / SYCL / CPU) and GPU preference.'
+    $miEngine=$mossOptionsMenu.Items.Add('Update engine...')
+    $miEngine.Add_Click({ Show-MossEngineUpdateDialog $f })
+    $miEngine.ToolTipText='Updates the sd-cli engine core files (the renderer in the bin folder): shows release changelogs and installs the newest engine build. MOSS itself is not changed.'
+    $miUpdate=$mossOptionsMenu.Items.Add('Update MOSS...')
+    $miUpdate.ToolTipText="Updates the MOSS application itself (the program files). Models, outputs and the sd-cli engine are not touched. Use 'Update engine...' for the rendering engine."
+    $mossOptionsMenu.Add_Opening({
+        try {
+            $of = Get-AbsoluteAppPath ([string]$out.Text)
+            $miOut.Text = if (Test-Path -LiteralPath $of -PathType Container) { ('Output folder...  (' + (Split-Path -Leaf $of) + ')') } else { 'Output folder...  (not set)' }
+            $missing = 0
+            try { $missing = [int](Update-MossModelSummary) } catch { $missing = -1 }
+            $miModels.Text = if ($missing -eq 0) { 'Model files...  (all found)' } elseif ($missing -gt 0) { ('Model files...  ({0} missing)' -f $missing) } else { 'Model files...' }
+        } catch {}
+    })
+    $optBtn=New-Object System.Windows.Forms.Button; $optBtn.Text=('Options  ' + [char]0x25BE); $optBtn.Size=New-Object System.Drawing.Size(86,24); $optBtn.Location=New-Object System.Drawing.Point(950,13); $optBtn.FlatStyle='Flat'; $optBtn.BackColor=$cAccent; $optBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($optBtn)
+    $optBtn.Add_Click({ $mossOptionsMenu.Show($optBtn, 0, $optBtn.Height) })
+    # Responsive header (v0.1.91/97): the title and subtitle on the left grow
+    # with their text, while the BACKEND badge and the Options button used to
+    # be anchored to the RIGHT edge - on a narrower window Windows slid them
+    # LEFT until they sat on top of the version title. The whole right side
+    # is placed by this handler: the button from the right edge, the badge
+    # between title and button, clamped so it can never overlap the title.
+    $mossHeadLayout = {
+        try {
+            $optBtn.Left = $head.ClientSize.Width - 25 - $optBtn.Width
+            $x = $optBtn.Left - 14 - $backendBadge.Width
+            $minX = $ttl.Right + 12
+            if ($x -lt $minX) { $x = $minX }
+            $backendBadge.Left = $x
+        } catch {}
+    }
+    $head.Add_Resize($mossHeadLayout)
+    & $mossHeadLayout
+$miUpdate.Add_Click({
     $release=$null
     try {
         [System.Net.ServicePointManager]::SecurityProtocol=[System.Net.SecurityProtocolType]::Tls12
@@ -1647,15 +2340,19 @@ try {
     try { Start-Process 'https://github.com/kukomamasan/moss-image-studio/releases/latest' } catch { [System.Windows.Forms.MessageBox]::Show('The releases page could not be opened. Go to the MOSS repository on GitHub and open Releases.','MOSS updates')|Out-Null }
 })
 
-    $left=New-Object System.Windows.Forms.Panel; $left.Location=New-Object System.Drawing.Point(18,84); $left.Size=New-Object System.Drawing.Size(700,710); $left.Anchor='Top,Bottom,Left'; $left.BackColor=$cCard; $f.Controls.Add($left)
-    $right=New-Object System.Windows.Forms.Panel; $right.Location=New-Object System.Drawing.Point(735,84); $right.Size=New-Object System.Drawing.Size(415,710); $right.Anchor='Top,Bottom,Left,Right'; $right.BackColor=$cCard; $f.Controls.Add($right)
+    # Compact panels (v0.1.96): start at y=58 (header 50 + 8 gap) and are
+    # 496 px tall - exactly the collapsed-content height. The action row,
+    # status line and progress bar flow below the content instead of being
+    # pinned to a fixed bottom edge.
+    $left=New-Object System.Windows.Forms.Panel; $left.Location=New-Object System.Drawing.Point(18,58); $left.Size=New-Object System.Drawing.Size(620,440); $left.Anchor='Top,Bottom,Left'; $left.BackColor=$cCard; $f.Controls.Add($left)
+    $right=New-Object System.Windows.Forms.Panel; $right.Location=New-Object System.Drawing.Point(654,58); $right.Size=New-Object System.Drawing.Size(380,440); $right.Anchor='Top,Bottom,Left,Right'; $right.BackColor=$cCard; $f.Controls.Add($right)
     function Add-Label($parent,[string]$text,[int]$x,[int]$y,[int]$w=200) { $l=New-Object System.Windows.Forms.Label; $l.Text=$text; $l.Location=New-Object System.Drawing.Point($x,$y); $l.Size=New-Object System.Drawing.Size($w,22); $l.ForeColor=$cMuted; $parent.Controls.Add($l); return $l }
     function Add-TextBox($parent,[string]$value,[int]$x,[int]$y,[int]$w,[int]$h=26) { $t=New-Object System.Windows.Forms.TextBox; $t.Text=$value; $t.Location=New-Object System.Drawing.Point($x,$y); $t.Size=New-Object System.Drawing.Size($w,$h); $t.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $t.ForeColor=$cText; $t.BorderStyle='FixedSingle'; $parent.Controls.Add($t); return $t }
     function Add-Button($parent,[string]$text,[int]$x,[int]$y,[int]$w,[int]$h=29) { $b=New-Object System.Windows.Forms.Button; $b.Text=$text; $b.Location=New-Object System.Drawing.Point($x,$y); $b.Size=New-Object System.Drawing.Size($w,$h); $b.FlatStyle='Flat'; $b.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $b.ForeColor=$cText; $parent.Controls.Add($b); return $b }
 
-    Add-Label $left 'PROMPT' 18 14 180 | Out-Null
-    $historyPick=New-Object System.Windows.Forms.ComboBox; $historyPick.DropDownStyle='DropDownList'; $historyPick.Location=New-Object System.Drawing.Point(315,9); $historyPick.Size=New-Object System.Drawing.Size(150,27); $historyPick.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $historyPick.ForeColor=$cText; $left.Controls.Add($historyPick)
-    $resetHistoryCode=Add-Button $left 'History code...' 471 8 90 28
+    Add-Label $left 'Prompt' 18 10 180 | Out-Null
+    $historyPick=New-Object System.Windows.Forms.ComboBox; $historyPick.DropDownStyle='DropDownList'; $historyPick.Location=New-Object System.Drawing.Point(275,7); $historyPick.Size=New-Object System.Drawing.Size(150,25); $historyPick.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $historyPick.ForeColor=$cText; $left.Controls.Add($historyPick)
+    $resetHistoryCode=Add-Button $left 'History code...' 431 7 90 25
     # The button used to RESET the code directly - which DELETES the saved
     # history and gives no way to enter the existing code after skipping the
     # startup prompt (user: 'i dont get an option to enter the prompt
@@ -1681,9 +2378,13 @@ try {
     $resetHistoryCode.Add_Click({ Show-MossHistoryCodeMenu $f })
     $resetHistoryCode.Enabled=$true
     foreach($oldPrompt in @($history | Select-Object -First 10)){[void]$historyPick.Items.Add([string]$oldPrompt)}
-    $paste=Add-Button $left 'Paste' 567 8 95 28
+    $paste=Add-Button $left 'Paste' 527 7 75 25
     $paste.Enabled=$true
-    $prompt=New-Object System.Windows.Forms.TextBox; $prompt.Multiline=$true; $prompt.AcceptsReturn=$true; $prompt.AcceptsTab=$true; $prompt.ScrollBars='Vertical'; $prompt.Location=New-Object System.Drawing.Point(18,39); $prompt.Size=New-Object System.Drawing.Size(662,150); $prompt.Anchor='Top,Left,Right'; $prompt.Font=New-Object System.Drawing.Font('Segoe UI',10); $prompt.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $prompt.ForeColor=$cText; $prompt.BorderStyle='FixedSingle'; $left.Controls.Add($prompt)
+    # Prompt box (v0.1.95): HALF WIDTH (331 px), same 96 px height (4 lines)
+    # - the full-width editor dominated the panel. Fixed width (no Right
+    # anchor) so it stays exactly this size when the window grows. (v0.1.96:
+    # moved up 5 px with the tightened row spacing.)
+    $prompt=New-Object System.Windows.Forms.TextBox; $prompt.Multiline=$true; $prompt.AcceptsReturn=$true; $prompt.AcceptsTab=$true; $prompt.ScrollBars='Vertical'; $prompt.Location=New-Object System.Drawing.Point(18,34); $prompt.Size=New-Object System.Drawing.Size(331,96); $prompt.Anchor='Top,Left'; $prompt.Font=New-Object System.Drawing.Font('Segoe UI',10); $prompt.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $prompt.ForeColor=$cText; $prompt.BorderStyle='FixedSingle'; $left.Controls.Add($prompt)
     $prompt.ReadOnly=$false
     $paste.Add_Click({ try { if ([System.Windows.Forms.Clipboard]::ContainsText()) { $clipText=[System.Windows.Forms.Clipboard]::GetText(); $prompt.Text=$clipText; $status.Text=('Pasted {0} characters from clipboard.' -f $clipText.Length) } else { $status.Text='The clipboard does not contain any text.' } } catch { [System.Windows.Forms.MessageBox]::Show('Clipboard text could not be read.','Clipboard') | Out-Null } })
     $historyPick.Add_SelectedIndexChanged({if($historyPick.SelectedIndex -ge 0){$prompt.Text=[string]$historyPick.SelectedItem}})
@@ -1716,26 +2417,33 @@ try {
         }
     }
 
-    Add-Label $left 'IMAGE SETTINGS' 18 202 160 | Out-Null
+    # (v0.1.97, user: the image-settings heading was unnecessary - the row
+    # now starts directly with the Generation... button.)
     $negInitial=if([string]$script:Settings.NegativePrompt){'negative prompt: set'}else{'negative prompt: not set'}
-    $negState=Add-Label $left $negInitial 310 202 240
+    $negState=Add-Label $left $negInitial 108 135 240
     function Show-MossGenerationOptionsDialog {
         # Advanced generation options in one dialog so the compact main window
         # stays uncluttered: negative prompt (engine flag -n), sampler and
         # scheduler. 'Default (model)' omits the flag so the engine keeps its
         # model-specific choice (euler for Flux/SD3/Wan).
         $g=New-Object System.Windows.Forms.Form
-        $g.Text='Generation options'; $g.Size=New-Object System.Drawing.Size(560,530); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
+        $g.Text='Generation options'; $g.Size=New-Object System.Drawing.Size(560,604); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
         $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
         $hint=New-Object System.Windows.Forms.Label; $hint.Text='Negative prompt - what the image should NOT contain, e.g. blurry, extra fingers, watermark. Left empty = none.'; $hint.Location=New-Object System.Drawing.Point(12,10); $hint.Size=New-Object System.Drawing.Size(520,20); $hint.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($hint)
-        $box=New-Object System.Windows.Forms.TextBox; $box.Multiline=$true; $box.ScrollBars='Vertical'; $box.Text=[string]$script:Settings.NegativePrompt; $box.Location=New-Object System.Drawing.Point(12,34); $box.Size=New-Object System.Drawing.Size(520,120); $box.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $box.ForeColor=$cText; $box.BorderStyle='FixedSingle'; $g.Controls.Add($box)
+        # Negative prompt box (v0.1.97, user: 'again huge'): SAME size as the
+        # main-window prompt box (331 x 96) instead of the old 520 x 120 -
+        # it scrolls, so long prompts still work.
+        $box=New-Object System.Windows.Forms.TextBox; $box.Multiline=$true; $box.ScrollBars='Vertical'; $box.Text=[string]$script:Settings.NegativePrompt; $box.Location=New-Object System.Drawing.Point(12,34); $box.Size=New-Object System.Drawing.Size(331,96); $box.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $box.ForeColor=$cText; $box.BorderStyle='FixedSingle'; $g.Controls.Add($box)
         Add-Label $g 'Sampler' 12 170 100 | Out-Null
-        $optSampler=New-Object System.Windows.Forms.ComboBox; $optSampler.DropDownStyle='DropDownList'; $optSampler.Location=New-Object System.Drawing.Point(12,192); $optSampler.Size=New-Object System.Drawing.Size(250,26); $optSampler.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSampler.ForeColor=$cText
+        # Snug dropdowns (v0.1.97, user: 'fit the text, but only barely'):
+        # each combo is just wide enough for its longest entry (the open
+        # list auto-expands to the longest item regardless).
+        $optSampler=New-Object System.Windows.Forms.ComboBox; $optSampler.DropDownStyle='DropDownList'; $optSampler.Location=New-Object System.Drawing.Point(12,192); $optSampler.Size=New-Object System.Drawing.Size(130,26); $optSampler.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSampler.ForeColor=$cText
         foreach($s in @('Default (euler)','euler','euler_a','heun','dpm2','dpm++2s_a','dpm++2m','dpm++2mv2','ipndm','ipndm_v','lcm','ddim_trailing','tcd','res_multistep','res_2s','er_sde','euler_cfg_pp','euler_a_cfg_pp','euler_ge','dpm++2m_sde','dpm++2m_sde_bt','lms')){[void]$optSampler.Items.Add($s)}
         $storedSampler=[string]$script:Settings.SamplingMethod; if($storedSampler -eq 'Default (model)'){$storedSampler='Default (euler)'}
         $optSampler.SelectedItem=$storedSampler; if($optSampler.SelectedIndex -lt 0){$optSampler.SelectedIndex=0}; $g.Controls.Add($optSampler)
         Add-Label $g 'Scheduler' 280 170 100 | Out-Null
-        $optSched=New-Object System.Windows.Forms.ComboBox; $optSched.DropDownStyle='DropDownList'; $optSched.Location=New-Object System.Drawing.Point(280,192); $optSched.Size=New-Object System.Drawing.Size(250,26); $optSched.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSched.ForeColor=$cText
+        $optSched=New-Object System.Windows.Forms.ComboBox; $optSched.DropDownStyle='DropDownList'; $optSched.Location=New-Object System.Drawing.Point(280,192); $optSched.Size=New-Object System.Drawing.Size(175,26); $optSched.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSched.ForeColor=$cText
         foreach($s in @('Default (flux schedule)','discrete','karras','exponential','ays','gits','sgm_uniform','simple','smoothstep','kl_optimal','lcm','bong_tangent','ltx2','logit_normal','flux2','flux','beta','llada_image')){[void]$optSched.Items.Add($s)}
         $storedSched=[string]$script:Settings.Scheduler; if($storedSched -eq 'Default (model)'){$storedSched='Default (flux schedule)'}
         $optSched.SelectedItem=$storedSched; if($optSched.SelectedIndex -lt 0){$optSched.SelectedIndex=0}; $g.Controls.Add($optSched)
@@ -1748,7 +2456,7 @@ try {
           'heun'='More accurate per step, but roughly twice the work per step.'
           'dpm2'='Deterministic second-order solver: crisp, sensitive to step count.'
           'dpm++2s_a'='Ancestral second-order solver: sharp detail with some randomness.'
-          'dpm++2m'='Fast, converging solver; very good quality at moderate steps.'
+          'dpm++2m'='Fast, converging solver; very good quality at moderate steps. Verified in-house: same detail as euler at HALF the steps (~40% less time) - the fast-sampler default for improves.'
           'dpm++2mv2'='Improved variant of dpm++2m, often a little more detail.'
           'ipndm'='Improved pseudo-numerical method: smooth and conservative.'
           'ipndm_v'='Variant of ipndm with a different update schedule.'
@@ -1768,9 +2476,9 @@ try {
         $schedulerDescriptions=@{
           'Default (flux schedule)'="Uses the engine's default for this model: a Flux-family sigma schedule, chosen automatically. Recommended."
           'discrete'='Classic discrete sigma schedule (the traditional default).'
-          'karras'='Karras schedule: more steps on fine detail near the end; often sharper texture.'
+          'karras'='Karras schedule: more steps on fine detail near the end; often sharper texture. Verified in-house: sharper than the default schedule at the same step count.'
           'exponential'='Exponential sigma spacing: smooth, even denoising.'
-          'ays'='Align Your Steps: optimized step placement, good with fewer steps.'
+          'ays'='Align Your Steps: CAUTION - verified incompatible with second-order samplers (dpm++2m family) on this engine: the render continues WITHOUT the scheduler and can come out blank. Use with euler only.'
           'gits'='GITS: trained step distribution, good quality at low step counts.'
           'sgm_uniform'='Uniform schedule from the SGM paper: even coverage of the range.'
           'simple'='Plain uniform sigma spacing.'
@@ -1797,13 +2505,16 @@ try {
         $impStrengthBox=Add-TextBox $g ([string]$script:Settings.ImproveStrength) 12 314 100
         $impStrengthHint=New-Object System.Windows.Forms.Label; $impStrengthHint.Text='How strongly an image is re-rendered when improving it. 0.45 keeps the look; 0.6 refreshes detail; 0.8 re-renders strongly.'; $impStrengthHint.Location=New-Object System.Drawing.Point(120,317); $impStrengthHint.Size=New-Object System.Drawing.Size(412,46); $impStrengthHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($impStrengthHint)
         $dlgTip.SetToolTip($impStrengthBox,'Improvement strength: how freely the image is re-rendered when improving. Low keeps it mostly as it is; high repaints more. Fast previews automatically use at least 0.5-0.74 regardless of this setting.')
-        $note=New-Object System.Windows.Forms.Label; $note.Text="'Default (euler)' and 'Default (flux schedule)' use the engine's own choice - recommended unless you want to experiment. Quick improve reuses the image's own settings; 'Improve this image' opens a dialog where you pick the target size (Same/2x/4x) with steps and CFG prefilled from here."; $note.Location=New-Object System.Drawing.Point(12,392); $note.Size=New-Object System.Drawing.Size(520,34); $note.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($note)
+        $note=New-Object System.Windows.Forms.Label; $note.Text="'Default (euler)' and 'Default (flux schedule)' use the engine's own choice - recommended unless you want to experiment. Quick improve reuses the image's own settings; 'Improve this image' opens a dialog where you pick the target size (Same/2x/4x) with steps and CFG prefilled from here."; $note.Location=New-Object System.Drawing.Point(12,392); $note.Size=New-Object System.Drawing.Size(520,32); $note.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($note)
         # MOSS is a GUI front-end for the sd-cli command-line engine: optionally
         # log the exact command line before every run (full transparency).
         $cmdCheck=New-Object System.Windows.Forms.CheckBox; $cmdCheck.Text='Show the exact sd-cli command line in the generation log (see what MOSS runs)'; $cmdCheck.Location=New-Object System.Drawing.Point(12,364); $cmdCheck.Size=New-Object System.Drawing.Size(520,24); $cmdCheck.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($cmdCheck)
         $cmdCheck.Checked= (-not $script:Settings.Contains('ShowEngineCommandLine')) -or ([string]$script:Settings.ShowEngineCommandLine -eq '1')
-        $negOk=Add-Button $g 'Save' 350 434 80 30
-        $negCancel=Add-Button $g 'Cancel' 440 434 90 30
+        $safeCheck=New-Object System.Windows.Forms.CheckBox; $safeCheck.Text='Safe mode - block sexual and gore/violence prompts: matching prompts are refused before anything runs, and safety words are added to the negative prompt'; $safeCheck.Location=New-Object System.Drawing.Point(12,430); $safeCheck.Size=New-Object System.Drawing.Size(520,30); $safeCheck.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($safeCheck)
+        $safeCheck.Checked = [bool]$script:Settings.SafeMode
+        $safeHint=New-Object System.Windows.Forms.Label; $safeHint.Text='Safe mode applies to generation, improving and re-rendering alike. It is a prompt gate, not a trained image filter - creative wording can still slip past.'; $safeHint.Location=New-Object System.Drawing.Point(12,464); $safeHint.Size=New-Object System.Drawing.Size(520,32); $safeHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($safeHint)
+        $negOk=Add-Button $g 'Save' 350 506 80 30
+        $negCancel=Add-Button $g 'Cancel' 440 506 90 30
         $negOk.Add_Click({
             $impCheck=0.0
             $script:Settings.NegativePrompt=($box.Text -replace "(\r?\n)+",' ').Trim()
@@ -1814,57 +2525,60 @@ try {
             if(-not (ConvertTo-MossDouble $impStrengthBox.Text ([ref]$impCheck)) -or $impCheck -lt 0.05 -or $impCheck -gt 0.95){[System.Windows.Forms.MessageBox]::Show('Improve strength must be between 0.05 and 0.95 (use a dot or a comma for decimals, e.g. 0.6 or 0,6).','Invalid strength')|Out-Null;return}
             $script:Settings.ImproveStrength=ConvertFrom-MossDouble $impCheck
             $script:Settings.ShowEngineCommandLine= if($cmdCheck.Checked){'1'}else{'0'}
+            $script:Settings.SafeMode=[bool]$safeCheck.Checked
+            # PERSIST IMMEDIATELY (v0.1.89): Options changes used to be written
+            # to disk only at the NEXT generate - deleting the negative prompt
+            # and restarting MOSS brought the old text back (user report), and
+            # a Safe-mode toggle would silently revert the same way.
+            [void](Save-Settings)
             $negState.Text=if($script:Settings.NegativePrompt){('negative prompt: set ('+$script:Settings.NegativePrompt.Length+' chars)')}else{'negative prompt: not set'}
             $g.Close()
         })
         $negCancel.Add_Click({$g.Close()})
         [void]$g.ShowDialog($f)
     }
-    $negBtn=Add-Button $left 'Options...' 200 199 100 27
+    # 'Generation...' (v0.1.97): was 'Options...' - the header now has its
+    # own Options menu (Setup / engine / MOSS updates), so the in-panel
+    # generation-settings button is named for what it opens. Width measured.
+    $negBtn=Add-Button $left 'Generation...' 18 134 84 22
     $negBtn.Add_Click({ Show-MossGenerationOptionsDialog })
-    Add-Label $left 'VISUAL STYLE' 18 231 130 | Out-Null
-    $style=New-Object System.Windows.Forms.ComboBox; $style.DropDownStyle='DropDownList'; $style.Location=New-Object System.Drawing.Point(18,254); $style.Size=New-Object System.Drawing.Size(250,28); $style.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $style.ForeColor=$cText; foreach($item in @('None (no style)','Photorealistic','Anime','Digital illustration','Oil painting','Watercolor','3D render','Comic book','Cinematic','Fantasy art','Dark fantasy / gothic','Cyberpunk / sci-fi','Studio portrait','Sketch / pencil drawing','Pixel art','Synthwave / retro 80s','Low poly 3D')){[void]$style.Items.Add($item)}; $style.SelectedItem=[string]$script:Settings.ImageStyle; if($style.SelectedIndex -lt 0){$style.SelectedIndex=0}; $left.Controls.Add($style)
-    Add-Label $left 'Resolution' 300 231 90 | Out-Null
-    $res=New-Object System.Windows.Forms.ComboBox; $res.DropDownStyle='DropDownList'; $res.Location=New-Object System.Drawing.Point(300,254); $res.Size=New-Object System.Drawing.Size(250,28); $res.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $res.ForeColor=$cText
+    Add-Label $left 'Visual style' 18 163 130 | Out-Null
+    # Snug dropdown (v0.1.97): fits 'Dark fantasy / gothic', barely.
+    $style=New-Object System.Windows.Forms.ComboBox; $style.DropDownStyle='DropDownList'; $style.Location=New-Object System.Drawing.Point(18,181); $style.Size=New-Object System.Drawing.Size(160,23); $style.MaxDropDownItems=7; $style.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $style.ForeColor=$cText; foreach($item in @('None (no style)','Photorealistic','Anime','Digital illustration','Oil painting','Watercolor','3D render','Comic book','Cinematic','Fantasy art','Dark fantasy / gothic','Cyberpunk / sci-fi','Studio portrait','Sketch / pencil drawing','Pixel art','Synthwave / retro 80s','Low poly 3D')){[void]$style.Items.Add($item)}; $style.SelectedItem=[string]$script:Settings.ImageStyle; if($style.SelectedIndex -lt 0){$style.SelectedIndex=0}; $left.Controls.Add($style)
+    # Resolution sits UNDER Visual style (v0.1.99, user).
+    Add-Label $left 'Resolution' 18 209 90 | Out-Null
+    # Snug dropdown (v0.1.97): fits 'Landscape 16:9  |  1360 x 768', barely.
+    $res=New-Object System.Windows.Forms.ComboBox; $res.DropDownStyle='DropDownList'; $res.Location=New-Object System.Drawing.Point(18,226); $res.Size=New-Object System.Drawing.Size(190,23); $res.MaxDropDownItems=7; $res.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $res.ForeColor=$cText
     $resItems=@('Landscape 16:9  |  1360 x 768','Square  |  1024 x 1024','Portrait 3:4  |  768 x 1024','Landscape 4:3  |  1280 x 960','Portrait 9:16  |  768 x 1360','2K Landscape  |  2560 x 1440','2K Square  |  2048 x 2048','2K Portrait  |  1536 x 2048','2K 4:3  |  2048 x 1536','2K 9:16  |  1440 x 2560','4K Landscape  |  3840 x 2160','4K Square  |  4096 x 4096','4K Portrait  |  3072 x 4096','4K 4:3  |  4096 x 3072','4K 9:16  |  2160 x 3840','Custom dimensions')
     foreach($ri in $resItems){[void]$res.Items.Add($ri)}; $left.Controls.Add($res)
-    $wBox=Add-TextBox $left ([string]$script:Settings.Width) 300 314 82; $hBox=Add-TextBox $left ([string]$script:Settings.Height) 395 314 82
-    Add-Label $left 'Width' 300 291 80 | Out-Null; Add-Label $left 'Height' 395 291 80 | Out-Null
+    $wBox=Add-TextBox $left ([string]$script:Settings.Width) 232 226 82 23; $hBox=Add-TextBox $left ([string]$script:Settings.Height) 327 226 82 23
+    Add-Label $left 'Width' 232 209 80 | Out-Null; Add-Label $left 'Height' 327 209 80 | Out-Null
     $resMap=@(@(1360,768),@(1024,1024),@(768,1024),@(1280,960),@(768,1360),@(2560,1440),@(2048,2048),@(1536,2048),@(2048,1536),@(1440,2560),@(3840,2160),@(4096,4096),@(3072,4096),@(4096,3072),@(2160,3840))
     $matched=-1; for($ri=0;$ri -lt $resMap.Count;$ri++){if([int]$script:Settings.Width -eq $resMap[$ri][0] -and [int]$script:Settings.Height -eq $resMap[$ri][1]){$matched=$ri;break}}; if($matched -ge 0){$res.SelectedIndex=$matched}else{$res.SelectedIndex=15}
     $res.Add_SelectedIndexChanged({ if($res.SelectedIndex -ge 0 -and $res.SelectedIndex -lt $resMap.Count){$wBox.Text=[string]$resMap[$res.SelectedIndex][0];$hBox.Text=[string]$resMap[$res.SelectedIndex][1]} })
-    Add-Label $left 'Steps' 18 344 70 | Out-Null; $steps=Add-TextBox $left ([string]$script:Settings.Steps) 18 367 75
-    Add-Label $left 'CFG scale' 110 344 90 | Out-Null; $cfg=Add-TextBox $left ([string]$script:Settings.CfgScale) 110 367 62
-    $cfgHelp=Add-Button $left '?' 174 367 20 26
+    Add-Label $left 'Steps' 18 254 70 | Out-Null; $steps=Add-TextBox $left ([string]$script:Settings.Steps) 18 271 75 23
+    Add-Label $left 'CFG scale' 110 254 90 | Out-Null; $cfg=Add-TextBox $left ([string]$script:Settings.CfgScale) 110 271 62 23
+    $cfgHelp=Add-Button $left '?' 174 271 20 23
     $cfgHelp.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("CFG scale (Classifier-Free Guidance) controls how strictly the image follows your prompt.`r`n`r`n- Low (1-4): more artistic freedom, softer prompt adherence. This model is tuned for this range - the default 3 suits it well.`r`n- Medium (5-10): stronger prompt following; colors and contrast grow.`r`n- High (15-30): forces the prompt hard - often causes burned, oversaturated or distorted images.`r`n`r`nRule of thumb: raise it only if the image ignores parts of your prompt; lower it if images look overcooked.",'What is CFG scale?',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
     })
-    Add-Label $left 'Images' 202 344 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDown'; $count.Location=New-Object System.Drawing.Point(202,367); $count.Size=New-Object System.Drawing.Size(75,26); foreach($n in @(1,2,4,8,16,32,64,128,256,512,1000)){[void]$count.Items.Add([string]$n)}; $count.Text=[string]$script:Settings.ImageCount; $left.Controls.Add($count)
-    Add-Label $left 'Seed (-1 = random)' 300 344 150 | Out-Null; $seed=Add-TextBox $left ([string]$script:Settings.Seed) 300 367 90
-    $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(410,367); $speedCombo.Size=New-Object System.Drawing.Size(270,24); $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (full quality)','~2x faster (upscale from 70%)','~4x faster (upscale from 50%)','~8x faster (upscale from 35%)','Fastest (upscale from smallest)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo)
-    $speedHint=New-Object System.Windows.Forms.Label; $speedHint.Text='Faster settings render the image small and enlarge it - quick drafts, never distorted. Exact = full quality at full size and full steps.'; $speedHint.Location=New-Object System.Drawing.Point(410,392); $speedHint.Size=New-Object System.Drawing.Size(270,30); $speedHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $left.Controls.Add($speedHint)
-    Add-Label $left 'OUTPUT FOLDER' 18 404 190 | Out-Null
-    $out=Add-TextBox $left ([string]$script:Settings.OutputPath) 18 429 540; $out.Anchor='Top,Left,Right'; $out.ReadOnly=$true; $outBrowse=Add-Button $left 'Browse...' 570 428 110; $outBrowse.Anchor='Top,Right'; $outBrowse.Enabled=$true
-    $outBrowse.Add_Click({
-        $dlg=New-Object System.Windows.Forms.FolderBrowserDialog
-        $dlg.Description='Select the output folder for generated images.'
-        $dlg.ShowNewFolderButton=$true
-        $current=Get-AbsoluteAppPath $out.Text
-        if(Test-Path -LiteralPath $current -PathType Container){$dlg.SelectedPath=$current}
-        elseif(-not [string]::IsNullOrWhiteSpace($current)){
-            $currentParent=Split-Path -Parent $current
-            if(Test-Path -LiteralPath $currentParent -PathType Container){$dlg.SelectedPath=$currentParent}
-        }
-        if($dlg.ShowDialog($f) -eq 'OK'){$out.Text=$dlg.SelectedPath}
-        $dlg.Dispose()
-    }.GetNewClosure())
-
-    # Model files live in a collapsible section: hidden by default, with a
-    # one-line health summary. Auto-expands only when a file is missing.
-    $modelToggle=Add-Button $left 'Model files' 18 458 110 27
-    $modelSummary=Add-Label $left '' 134 462 546
-    $script:ModelFilesExpanded=$false
-    $modelRowControls=New-Object System.Collections.ArrayList
+    Add-Label $left 'Images' 202 254 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDown'; $count.Location=New-Object System.Drawing.Point(202,271); $count.Size=New-Object System.Drawing.Size(75,23); foreach($n in @(1,2,4,8,16,32,64,128,256,512,1000)){[void]$count.Items.Add([string]$n)}; $count.Text=[string]$script:Settings.ImageCount; $left.Controls.Add($count)
+    Add-Label $left 'Seed (-1 = random)' 284 254 116 | Out-Null; $seed=Add-TextBox $left ([string]$script:Settings.Seed) 284 271 90 23
+    # Speed modes (v0.1.93): 8x and Fastest REMOVED from the UI - measured,
+    # their drafts (35% / 128-px side) are too soft to be useful and cannot
+    # be rescued by any improve (see Test-MossUltraSoftDraft). The engine
+    # and all internal helpers still SUPPORT '8x'/'Fast' for old benchmark
+    # data, old queue items and the OOM auto-retry ladder.
+    $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(404,271); $speedCombo.Size=New-Object System.Drawing.Size(130,23); $speedCombo.MaxDropDownItems=3; $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (full quality)','~2x faster (70%)','~4x faster (50%)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo)
+    $speedHint=New-Object System.Windows.Forms.Label; $speedHint.Text='Faster modes render the image small and enlarge it - quick drafts. Exact = full size, full steps.'; $speedHint.Location=New-Object System.Drawing.Point(284,296); $speedHint.Size=New-Object System.Drawing.Size(250,46); $speedHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $left.Controls.Add($speedHint)
+    # OUTPUT FOLDER (v0.1.98): MOVED INTO THE HEADER OPTIONS MENU (user).
+    # The read-only textbox stays as a HIDDEN state holder - the generate
+    # handler and 'Open output' read it directly.
+    $out=Add-TextBox $left ([string]$script:Settings.OutputPath) 18 346 506 23; $out.ReadOnly=$true; $out.Visible=$false
+    # Model files (v0.1.98): MOVED INTO THE HEADER OPTIONS MENU (user). The
+    # four path textboxes remain as HIDDEN state holders - the generate
+    # handler reads them directly. 'Model files...' opens a dialog that
+    # edits copies of them (OK applies, Cancel discards).
     $modelRows=@(
       @('Diffusion model','DiffusionModelPath','moss_image_sft_int8_convrot.safetensors'),
       @('LLM','LlmPath','Qwen3.5-9B-Q4_K_M.gguf'),
@@ -1872,62 +2586,303 @@ try {
       @('Tokenizer','TokenizerPath','tokenizer_qwen3.5.json')
     )
     $modelControls=@{}
-    $yy=492
     foreach($mr in $modelRows){
-        $mrLabel=Add-Label $left $mr[0] 18 ($yy+3) 105; [void]$modelRowControls.Add($mrLabel)
         $val=[string]$script:Settings[$mr[1]]; if([string]::IsNullOrWhiteSpace($val)){$val=Join-Path $script:AppRoot ('models\'+$mr[2])} else {$val=Get-AbsoluteAppPath $val}
-        $tb=Add-TextBox $left $val 125 $yy 445; $tb.Anchor='Top,Left,Right'; [void]$modelRowControls.Add($tb)
-        $br=Add-Button $left '...' 580 ($yy-1) 100 27; $br.Anchor='Top,Right'; [void]$modelRowControls.Add($br)
-        $key=$mr[1]; $br.Add_Click({$dlg=New-Object System.Windows.Forms.OpenFileDialog;$dlg.Title="Select $($mr[0]) file";$dlg.Filter='Model and data files|*.safetensors;*.gguf;*.json|All files (*.*)|*.*';$dlg.CheckFileExists=$true;$cur=Get-AbsoluteAppPath $tb.Text;if(Test-Path -LiteralPath $cur -PathType Leaf){$dlg.InitialDirectory=Split-Path -Parent $cur;$dlg.FileName=Split-Path -Leaf $cur}else{$modelsDir=Join-Path $script:AppRoot 'models';if(Test-Path -LiteralPath $modelsDir -PathType Container){$dlg.InitialDirectory=$modelsDir}};if($dlg.ShowDialog($f) -eq 'OK'){$tb.Text=$dlg.FileName};$dlg.Dispose()}.GetNewClosure())
-        $modelControls[$key]=$tb; $yy+=29
+        $tb=Add-TextBox $left $val -2000 -2000 419 23; $tb.Visible=$false
+        $modelControls[$mr[1]]=$tb
     }
     function Update-MossModelSummary {
         $check=@((Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)))
         foreach($k in @('DiffusionModelPath','LlmPath','VaePath','TokenizerPath')){ $check+=(Get-AbsoluteAppPath $modelControls[$k].Text) }
-        $missingModels=@($check | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
-        if($missingModels.Count -eq 0){ $modelSummary.Text='All 5 engine/model files found.'; $modelSummary.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164) }
-        else { $modelSummary.Text=('{0} of 5 engine/model file(s) not found - click Model files to check the paths.' -f $missingModels.Count); $modelSummary.ForeColor=[System.Drawing.Color]::FromArgb(224,138,138) }
-        return $missingModels.Count
+        return @($check | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count
     }
-    if((Update-MossModelSummary) -gt 0){ $script:ModelFilesExpanded=$true } else { $script:ModelFilesExpanded=$false }
-    foreach($c in $modelRowControls){ $c.Visible=$script:ModelFilesExpanded }
-    $modelToggle.Text=if($script:ModelFilesExpanded){'Model files  [-]'}else{'Model files  [+]'}
-    $modelToggle.Add_Click({
-        $script:ModelFilesExpanded=-not $script:ModelFilesExpanded
-        foreach($c in $modelRowControls){ $c.Visible=$script:ModelFilesExpanded }
-        $modelToggle.Text=if($script:ModelFilesExpanded){'Model files  [-]'}else{'Model files  [+]'}
-        [void](Update-MossModelSummary)
-    })
+    function Show-MossModelFilesDialog {
+        $g=New-Object System.Windows.Forms.Form
+        $g.Text='Model files'; $g.Size=New-Object System.Drawing.Size(560,252); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
+        $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
+        $hint=New-Object System.Windows.Forms.Label; $hint.Text='The engine and model files MOSS loads. Paths are resolved against the MOSS folder.'; $hint.Location=New-Object System.Drawing.Point(12,10); $hint.Size=New-Object System.Drawing.Size(520,20); $hint.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($hint)
+        $dlgBoxes=@{}
+        $y=38
+        foreach($mr in $modelRows){
+            $rl=New-Object System.Windows.Forms.Label; $rl.Text=$mr[0]; $rl.Location=New-Object System.Drawing.Point(12,($y+3)); $rl.Size=New-Object System.Drawing.Size(120,22); $rl.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($rl)
+            $tb=New-Object System.Windows.Forms.TextBox; $tb.Text=[string]$modelControls[$mr[1]].Text; $tb.Location=New-Object System.Drawing.Point(140,$y); $tb.Size=New-Object System.Drawing.Size(364,23); $tb.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $tb.ForeColor=$cText; $tb.BorderStyle='FixedSingle'; $g.Controls.Add($tb)
+            $dlgBoxes[$mr[1]]=$tb
+            $bb=Add-Button $g '...' 508 $y 30 23
+            $key=$mr[1]
+            $bb.Add_Click({$dlg=New-Object System.Windows.Forms.OpenFileDialog;$dlg.Title="Select file";$dlg.Filter='Model and data files|*.safetensors;*.gguf;*.json|All files (*.*)|*.*';$dlg.CheckFileExists=$true;$cur=Get-AbsoluteAppPath $dlgBoxes[$key].Text;if(Test-Path -LiteralPath $cur -PathType Leaf){$dlg.InitialDirectory=Split-Path -Parent $cur;$dlg.FileName=Split-Path -Leaf $cur}else{$modelsDir=Join-Path $script:AppRoot 'models';if(Test-Path -LiteralPath $modelsDir -PathType Container){$dlg.InitialDirectory=$modelsDir}};if($dlg.ShowDialog($g) -eq 'OK'){$dlgBoxes[$key].Text=$dlg.FileName};[void](Update-MossDlgSummary);$dlg.Dispose()}.GetNewClosure())
+            $y+=30
+        }
+        $dlgSummary=New-Object System.Windows.Forms.Label; $dlgSummary.Location=New-Object System.Drawing.Point(12,164); $dlgSummary.Size=New-Object System.Drawing.Size(520,20); $g.Controls.Add($dlgSummary)
+        function Update-MossDlgSummary {
+            $check=@((Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)))
+            foreach($k in @('DiffusionModelPath','LlmPath','VaePath','TokenizerPath')){ $check+=(Get-AbsoluteAppPath $dlgBoxes[$k].Text) }
+            $missing=@($check | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
+            if($missing.Count -eq 0){ $dlgSummary.Text='All 5 engine/model files found.'; $dlgSummary.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164) }
+            else { $dlgSummary.Text=('{0} of 5 engine/model file(s) not found.' -f $missing.Count); $dlgSummary.ForeColor=[System.Drawing.Color]::FromArgb(224,138,138) }
+        }
+        [void](Update-MossDlgSummary)
+        $ok=Add-Button $g 'OK' 386 196 80 26
+        $cancel=Add-Button $g 'Cancel' 474 196 80 26
+        $ok.Add_Click({
+            foreach($k in @('DiffusionModelPath','LlmPath','VaePath','TokenizerPath')){ $modelControls[$k].Text=[string]$dlgBoxes[$k].Text }
+            $g.Close()
+        })
+        $cancel.Add_Click({$g.Close()})
+        $g.AcceptButton=$ok
+        [void]$g.ShowDialog($f)
+    }
 
-    $generate=Add-Button $left 'GENERATE' 18 615 145 42; $generate.BackColor=$cAccent; $generate.ForeColor=[System.Drawing.Color]::White; $generate.Font=New-Object System.Drawing.Font('Segoe UI Semibold',10,[System.Drawing.FontStyle]::Bold)
-    $cancel=Add-Button $left 'Cancel' 189 615 70 42; $cancel.Enabled=$false
-    $openOut=Add-Button $left 'Open output' 285 615 105 42
-    $btnReport=Add-Button $left 'Error report' 416 615 105 42
-    $refineNative=Add-Button $left 'Improve last image' 547 615 140 42; $refineNative.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164)
-    $refineNative.Add_Click({
-        # Settings-driven improve of the most recent image: the size, steps,
-        # CFG, seed and prompt come from the improve dialog (same as right-click
-        # "Improve this image"), and the prompt
-        # falls back to the image's own stored prompt when the box is empty.
-        if ($script:GenState.IsRunning) { return }
-        if ($script:GeneratedFiles -and $script:GeneratedFiles.Count -gt 0) {
-            $script:SelectedFile = [string]$script:GeneratedFiles[$script:GeneratedFiles.Count - 1]
-            Start-MossRefineWithCurrentSettings
+    # Compact action row (v0.1.96/98): half-size buttons (24 px tall). The
+    # row is placed by Update-MossLeftActionLayout right below the speed
+    # hint; with Output folder / Model files / Error report / Benchmarks in
+    # the header Options menu, only the four generation actions remain.
+    $generate=Add-Button $left 'Generate' 18 348 96 24; $generate.BackColor=$cAccent; $generate.ForeColor=[System.Drawing.Color]::White; $generate.Font=New-Object System.Drawing.Font('Segoe UI Semibold',9,[System.Drawing.FontStyle]::Bold)
+    $cancel=Add-Button $left 'Cancel' 120 348 56 24; $cancel.Enabled=$false
+    # Pause/Resume (v0.1.91): freezes the RUNNING engine process for real
+    # (ntdll NtSuspendProcess) and continues it on Resume - a large batch
+    # can be put on hold without losing the run.
+    $btnPause=Add-Button $left 'Pause' 182 348 60 24; $btnPause.Enabled=$false
+    $btnPause.Add_Click({
+        $st=$script:GenState
+        if (-not $st.IsRunning -or $null -eq $st.Process -or $st.Process.HasExited) { return }
+        if (-not $st.Paused) {
+            if (Suspend-MossProcess $st.Process) {
+                $st.Paused=$true; $st.PausedAt=Get-Date
+                $btnPause.Text='Resume'
+                $status.Text=("PAUSED - image {0} of {1} frozen (VRAM stays allocated). Click Resume to continue." -f [int]$st.CurrentImageIndex,[int]$st.Job.Count)
+                $log.AppendText("`r`nPaused: the engine process is frozen mid-batch. Images already saved are kept; nothing renders until you click Resume.")
+            } else {
+                $log.AppendText("`r`nPause failed: the engine process could not be suspended (it keeps running).")
+            }
         } else {
-            [System.Windows.Forms.MessageBox]::Show('Generate an image first - the most recent one is then used as the starting picture for the improvement.','Nothing to improve')|Out-Null
+            if (Resume-MossProcess $st.Process) {
+                # Shift the time anchors by the paused span so elapsed
+                # times, the ETA and the power meter exclude the pause.
+                $pauseSpan=((Get-Date)-$st.PausedAt).TotalSeconds
+                if ($st.JobStartedAt) { $st.JobStartedAt=$st.JobStartedAt.AddSeconds($pauseSpan) }
+                if ($st.ImageStartedAt) { $st.ImageStartedAt=$st.ImageStartedAt.AddSeconds($pauseSpan) }
+                if ($script:RefineStartedAt) { $script:RefineStartedAt=$script:RefineStartedAt.AddSeconds($pauseSpan) }
+                $st.PausedTotalSec=[double]$st.PausedTotalSec+$pauseSpan
+                $st.Paused=$false; $st.PausedAt=$null
+                $st.PowerLastSample=Get-Date
+                $btnPause.Text='Pause'
+                $status.Text='Rendering...'
+                $log.AppendText(("`r`nResumed after {0} paused. Rendering continues." -f (Format-MossDuration $pauseSpan)))
+            } else {
+                $log.AppendText("`r`nResume failed: the engine process could not be resumed.")
+            }
         }
     })
-    $btnReport.Add_Click({ Copy-MossErrorReport })
+    $openOut=Add-Button $left 'Open output' 248 348 92 24
+    function Show-MossBenchmarkDialog {
+        # Shows every recorded resolution/steps/speed-mode combination with its
+        # real measured seconds per image, an estimate for the CURRENT main
+        # window settings, and a quick benchmark runner for gaps in the table.
+        # The bigger-job estimator at the bottom extrapolates the recorded
+        # measurements to ANY size / steps / speed mode / image count.
+        $g = New-Object System.Windows.Forms.Form
+        $g.Text = 'Performance benchmarks'; $g.Size = New-Object System.Drawing.Size(780, 760); $g.StartPosition = 'CenterParent'; $g.FormBorderStyle = 'FixedDialog'; $g.MaximizeBox = $false
+        $g.BackColor = $cPanel; $g.ForeColor = $cText; $g.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+        $hint = New-Object System.Windows.Forms.Label; $hint.Text = 'Measured seconds per image for every size / speed mode / step combination that ran on this PC. Times are engine render time per image (image-to-image runs are listed separately).'; $hint.Location = New-Object System.Drawing.Point(14, 10); $hint.Size = New-Object System.Drawing.Size(730, 30); $hint.ForeColor = $cMuted; $g.Controls.Add($hint)
+
+        $grid = New-Object System.Windows.Forms.DataGridView
+        $grid.ReadOnly = $true; $grid.AllowUserToAddRows = $false; $grid.AllowUserToDeleteRows = $false; $grid.RowHeadersVisible = $false
+        $grid.SelectionMode = 'FullRowSelect'; $grid.MultiSelect = $false; $grid.AutoSizeColumnsMode = 'Fill'; $grid.BorderStyle = 'None'
+        $grid.BackgroundColor = [System.Drawing.Color]::FromArgb(16, 21, 30); $grid.GridColor = [System.Drawing.Color]::FromArgb(40, 50, 66)
+        $grid.EnableHeadersVisualStyles = $false
+        $grid.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(25, 32, 45); $grid.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::FromArgb(200, 210, 225)
+        $grid.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(16, 21, 30); $grid.DefaultCellStyle.ForeColor = $cText
+        $grid.Location = New-Object System.Drawing.Point(14, 44); $grid.Size = New-Object System.Drawing.Size(734, 300); $g.Controls.Add($grid)
+        foreach ($n in @('Resolution', 'Mode', 'Type', 'Engine steps', 'Avg / image', 'Runs', 'Last recorded')) {
+            $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn; $c.Name = $n; $c.HeaderText = $n; $c.ReadOnly = $true
+            if ($n -eq 'Resolution' -or $n -eq 'Avg / image' -or $n -eq 'Last recorded') { $c.FillWeight = 22 } else { $c.FillWeight = 10 }
+            [void]$grid.Columns.Add($c)
+        }
+
+        $estLabel = New-Object System.Windows.Forms.Label; $estLabel.Location = New-Object System.Drawing.Point(14, 352); $estLabel.Size = New-Object System.Drawing.Size(734, 44); $estLabel.ForeColor = [System.Drawing.Color]::FromArgb(125, 205, 164); $g.Controls.Add($estLabel)
+
+        $fillGrid = {
+            $grid.Rows.Clear()
+            $list = Load-MossBenchmarks
+            $groups = @{}
+            foreach ($e in $list) {
+                # Detail-regeneration runs get their OWN row: their measured
+                # time includes the enlarged second pass and is not comparable
+                # with a plain run at the same size/steps.
+                $hr = 0.0; if ($e.PSObject.Properties['HiresScale']) { $hr = [double]$e.HiresScale }
+                $k = ('{0}x{1}|{2}|{3}|{4}|{5}' -f $e.W, $e.H, $e.SpeedMode, $e.Steps, [bool]$e.Img2Img, $hr)
+                if (-not $groups.Contains($k)) { $groups[$k] = @{ Sum = 0.0; Runs = 0; Last = '' ; W = $e.W; H = $e.H; Mode = $e.SpeedMode; Steps = $e.Steps; I2I = [bool]$e.Img2Img; Hr = $hr } }
+                $groups[$k].Sum += ([double]$e.SecondsPerImage * [int]$e.Images)
+                $groups[$k].Runs += [int]$e.Images
+                if ([string]$e.Date -gt $groups[$k].Last) { $groups[$k].Last = [string]$e.Date }
+            }
+            $rows = @($groups.Values | Sort-Object { -([double]$_.W * $_.H) }, { -[int]$_.Steps })
+            foreach ($r0 in $rows) {
+                $avg = if ($r0.Runs -gt 0) { $r0.Sum / $r0.Runs } else { 0 }
+                [void]$grid.Rows.Add(@(
+                    ('{0} x {1}' -f $r0.W, $r0.H),
+                    $r0.Mode,
+                    $(if ($r0.Hr -ge 1.5) { ('img2img + highres {0}x' -f ([string]$r0.Hr).Replace(',', '.')) } elseif ($r0.I2I) { 'img2img' } else { 'fresh' }),
+                    ([string]$r0.Steps),
+                    (Format-MossFixedTime $avg),
+                    ([string]$r0.Runs),
+                    $r0.Last
+                ))
+            }
+            if ($rows.Count -eq 0) { [void]$grid.Rows.Add(@('No data yet - generate images or run the quick benchmark', '', '', '', '', '', '')) }
+        }
+
+        $refreshEstimate = {
+            try {
+                $wi = [int]$wBox.Text; $he = [int]$hBox.Text; $stn = [int]$steps.Text
+                $mode = switch ([string]$speedCombo.SelectedItem) { '~2x faster (70%)' { '2x' } '~4x faster (50%)' { '4x' } default { 'Exact' } }
+                $bm = Get-MossBenchmarkEstimate $wi $he $mode $stn $false
+                if ($bm) {
+                    $estLabel.Text = ('Estimated for your current settings ({0} x {1}, {2}, {3} steps): ~{4} per image  -  ~{5} for a batch of 16.{6}Based on the measured run: {7}.' -f $wi, $he, $mode, $stn, (Format-MossFixedTime $bm.Sec), (Format-MossFixedTime ($bm.Sec * 16)), [Environment]::NewLine, $bm.Based)
+                } else {
+                    $estLabel.Text = 'No benchmark data yet for an estimate - generate a few images (or run the quick benchmark below) and this fills in automatically.'
+                }
+            } catch { $estLabel.Text = 'Estimate unavailable.' }
+        }
+        & $fillGrid
+        & $refreshEstimate
+
+        $runBtn = Add-Button $g 'Run quick benchmark...' 14 406 200 32
+        $runBtn.Add_Click({
+            if ($script:GenState.IsRunning) { [System.Windows.Forms.MessageBox]::Show($g, 'A generation is running. Wait for it to finish first.', 'Benchmarks') | Out-Null; return }
+            $quickAnswer = [System.Windows.Forms.MessageBox]::Show($g, "The quick benchmark renders 3 small test images (512 x 512, 1024 x 1024, 2048 x 2048) at 8 steps each with your current sampler settings.`r`n`r`nThey run one after another in a 'benchmarks' folder (not in your output list) and their measured times fill the table above.`r`n`r`nStart now? (Roughly a few minutes on most GPUs.)", 'Quick benchmark', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information)
+            if ($quickAnswer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            $script:RefineQueue.Clear()
+            # 'Default (model)' is the DISPLAY label in the options dialog, not an
+            # engine value: like every other queue path (Get-MossImproveDefaults,
+            # the generate button), an empty value makes the engine flag be OMITTED
+            # so the model keeps its own default. Passing the label verbatim made
+            # sd-cli reject the command ('unknown argument: (model)').
+            $benchSampler = [string]$script:Settings.SamplingMethod; if ($benchSampler -eq 'Default (model)') { $benchSampler = '' }
+            $benchSched = [string]$script:Settings.Scheduler; if ($benchSched -eq 'Default (model)') { $benchSched = '' }
+            foreach ($sz in @(@(512, 512), @(1024, 1024), @(2048, 2048))) {
+                [void]$script:RefineQueue.Add([pscustomobject]@{ File = ''; W = [int]$sz[0]; H = [int]$sz[1]; Seed = 42; Prompt = 'benchmark speed test'; NegativePrompt = ''; SamplingMethod = $benchSampler; Scheduler = $benchSched; Strength = 0.6; Steps = 8; Cfg = [double]$script:Settings.CfgScale; Tag = 'bench'; FreshRender = $true })
+            }
+            $script:RefineTotal = $script:RefineQueue.Count
+            $script:RefineStartedAt = Get-Date
+            $g.Close()
+            Start-MossNextRefine
+        })
+        $clearBtn = Add-Button $g 'Clear recorded data...' 226 406 180 32
+        $clearBtn.Add_Click({
+            $a = [System.Windows.Forms.MessageBox]::Show($g, 'Delete ALL recorded benchmark data? Times are re-learned as you keep generating.', 'Clear benchmark data', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($a -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            Save-MossBenchmarks (New-Object System.Collections.ArrayList)
+            & $fillGrid
+            & $refreshEstimate
+        })
+        $closeBtn = Add-Button $g 'Close' 660 406 88 32
+        $closeBtn.Add_Click({ $g.Close() })
+
+        # --- Bigger-job estimator -------------------------------------------
+        # Type ANY size, steps, speed mode and image count: the expected per
+        # image and total render time is extrapolated from the benchmark store
+        # (scaled by render megapixels x engine steps, same rule as the live
+        # ETA). Answering 'what would a bigger job take' without rendering it.
+        $calcHead = New-Object System.Windows.Forms.Label; $calcHead.Text = 'Bigger jobs - what would it take? (extrapolated from the measured data above)'; $calcHead.Location = New-Object System.Drawing.Point(14, 446); $calcHead.Size = New-Object System.Drawing.Size(734, 20); $calcHead.ForeColor = $cMuted; $g.Controls.Add($calcHead)
+        function New-BenchCalcField([int]$lx, [string]$cap, [int]$capW, [int]$bx, [int]$bw) {
+            $l = New-Object System.Windows.Forms.Label; $l.Text = $cap; $l.Location = New-Object System.Drawing.Point($lx, 474); $l.Size = New-Object System.Drawing.Size($capW, 18); $l.ForeColor = $cMuted; $g.Controls.Add($l)
+            $b = New-Object System.Windows.Forms.TextBox; $b.Location = New-Object System.Drawing.Point($bx, 470); $b.Size = New-Object System.Drawing.Size($bw, 23); $g.Controls.Add($b); return $b
+        }
+        $cbW = New-BenchCalcField 14 'Width' 46 62 52
+        $cbH = New-BenchCalcField 126 'Height' 48 176 52
+        $cbS = New-BenchCalcField 242 'Steps' 42 286 46
+        $cbN = New-BenchCalcField 346 'Images' 46 394 50
+        $cbW.Text = [string]$wBox.Text; $cbH.Text = [string]$hBox.Text; $cbS.Text = [string]$steps.Text
+        try { $cbN.Text = [string]([int]$count.Text) } catch { $cbN.Text = '16' }
+        $cbMLbl = New-Object System.Windows.Forms.Label; $cbMLbl.Text = 'Mode'; $cbMLbl.Location = New-Object System.Drawing.Point(458, 474); $cbMLbl.Size = New-Object System.Drawing.Size(36, 18); $cbMLbl.ForeColor = $cMuted; $g.Controls.Add($cbMLbl)
+        $cbM = New-Object System.Windows.Forms.ComboBox; $cbM.DropDownStyle = 'DropDownList'; [void]$cbM.Items.AddRange(@('Exact', '2x', '4x')); $cbM.SelectedIndex = 0; $cbM.Location = New-Object System.Drawing.Point(496, 470); $cbM.Size = New-Object System.Drawing.Size(86, 23); $g.Controls.Add($cbM)
+        $calcBtn = Add-Button $g 'Estimate time...' 594 468 154 28
+        $calcOut = New-Object System.Windows.Forms.Label; $calcOut.Location = New-Object System.Drawing.Point(14, 506); $calcOut.Size = New-Object System.Drawing.Size(734, 88); $calcOut.ForeColor = [System.Drawing.Color]::FromArgb(125, 205, 164); $g.Controls.Add($calcOut)
+        $calcBtn.Add_Click({
+            try {
+                $wi = [int]$cbW.Text; $he = [int]$cbH.Text; $stn = [int]$cbS.Text; $n = [int]$cbN.Text
+                $gpuName = ''; try { $g0 = @($script:Inventory | Where-Object { -not $_.IsVirtual } | Select-Object -First 1); if ($g0) { $gpuName = [string]$g0.Name } } catch {}
+                $tdp = Get-MossGpuTdp $gpuName
+                # Power / energy: rated GPU watts x render time. The rest of the
+                # PC (CPU, board, fans, monitor) adds roughly 50-150 W on top.
+                $gpuLine = $(if ($tdp) { ('GPU power: your {0} is rated {1} W - rendering for 1 hour uses about {2:N2} kWh, an 8-hour overnight run about {3:N2} kWh (GPU only; the rest of the PC adds roughly 50-150 W).' -f $gpuName, $tdp, ($tdp / 1000.0), (8 * $tdp / 1000.0)) } elseif ($gpuName) { ('GPU power: no rated wattage known for {0} - typical modern GPUs draw 150-350 W while rendering.' -f $gpuName) } else { 'GPU power: no GPU detected for a wattage estimate.' })
+                if ($wi -lt 64 -or $he -lt 64) { $calcOut.Text = 'Sizes below 64 x 64 cannot be rendered.'; return }
+                if ($n -lt 1) { $calcOut.Text = 'Image count must be 1 or more.'; return }
+                $mode = [string]$cbM.SelectedItem
+                $bm = Get-MossBenchmarkEstimate $wi $he $mode $stn $false
+                if (-not $bm) { $calcOut.Text = 'No benchmark data yet to extrapolate from - generate a few images or run the quick benchmark first.' + [Environment]::NewLine + $gpuLine; return }
+                $tot = [double]$bm.Sec * $n
+                $energy = $(if ($tdp) { ('  ->  about {0:N2} kWh of GPU power for the job.' -f ($tot / 3600.0 * $tdp / 1000.0)) } else { '' })
+                $calcOut.Text = ('{0} x {1} at {2} steps, {3} speed: ~{4} per image  ->  ~{5} for all {6} images (one engine run; the model loads once).{7}Extrapolated from the measured run: {8}.{9}{10}{11}' -f $wi, $he, $stn, $mode, (Format-MossFixedTime $bm.Sec), (Format-MossDuration $tot), $n, [Environment]::NewLine, $bm.Based, [Environment]::NewLine, $gpuLine, $energy)
+            } catch { $calcOut.Text = 'Enter whole numbers in every field (e.g. 1360, 768, 25, 16).' }
+        })
+        $tip = New-Object System.Windows.Forms.ToolTip; $tip.InitialDelay = 300
+        $tip.SetToolTip($runBtn, 'Renders 3 tiny test images to fill the table quickly. Full-size times still come from your real generations.')
+        $tip.SetToolTip($clearBtn, 'Deletes benchmarks.json - all measured times are forgotten.')
+        $tip.SetToolTip($calcBtn, 'Estimates the total render time AND GPU power for any size, steps, speed mode and image count, extrapolated from the measured data in the table (fresh renders, one engine run).')
+        # --- POWER METER (v0.1.87) ------------------------------------------
+        # Cumulative GPU energy: the SESSION since this app start (memory),
+        # TODAY and ALL TIME (config\energy.json). Recorded draw is measured
+        # via nvidia-smi when present, otherwise estimated from the rated
+        # GPU power - each bucket says how much of it was measured.
+        $powerHead = New-Object System.Windows.Forms.Label; $powerHead.Text = 'Power meter - GPU energy while rendering'; $powerHead.Location = New-Object System.Drawing.Point(14, 600); $powerHead.Size = New-Object System.Drawing.Size(734, 20); $powerHead.ForeColor = $cMuted; $g.Controls.Add($powerHead)
+        $powerOut = New-Object System.Windows.Forms.Label; $powerOut.Location = New-Object System.Drawing.Point(14, 624); $powerOut.Size = New-Object System.Drawing.Size(734, 52); $powerOut.ForeColor = $cText; $g.Controls.Add($powerOut)
+        $powerBtn = Add-Button $g 'Refresh power' 14 680 120 28
+        $powerClear = Add-Button $g 'Reset all-time...' 142 680 130 28
+        $updatePower = {
+            $sum = Get-MossEnergySummary
+            $fmt = { param($b) ('{0:N3} kWh over {1} across {2} run(s), {3} image(s)' -f ([double]$b.Wh / 1000.0), (Format-MossDuration [double]$b.Seconds), [int]$b.Runs, [int]$b.Images) }
+            $sessLine = ('Session (since this app start):  {0}' -f (& $fmt $script:SessionEnergy))
+            $dayLine = ('Today ({0}):  {1}' -f $sum.Date, (& $fmt $sum.Day))
+            $allLine = ('All time:  {0}' -f (& $fmt $sum.AllTime))
+            $methLine = $(if ($sum.AllTime.Wh -gt 0) { ('of which {0:N3} kWh measured directly (nvidia-smi); the rest is estimated from the GPU rating.' -f ([double]$sum.AllTime.MeasuredWh / 1000.0)) } else { 'No energy recorded yet - it fills in automatically as you render.' })
+            $liveLine = ''
+            $st = $script:GenState
+            if ($st.IsRunning -and $null -ne $st.Process -and -not $st.Process.HasExited -and $null -ne $st.PowerLastW -and [double]$st.PowerLastW -gt 0) {
+                $liveLine = ('Right now: ~{0} W {1}.' -f [int][Math]::Round([double]$st.PowerLastW, 0), $(if ([bool]$st.PowerLastMeasured) { '(measured)' } else { '(estimate)' }))
+            }
+            $powerOut.Text = (($sessLine, $dayLine, $allLine, $methLine, $liveLine) -join [Environment]::NewLine)
+        }
+        & $updatePower
+        $powerBtn.Add_Click({ & $updatePower })
+        $powerClear.Add_Click({
+            $a = [System.Windows.Forms.MessageBox]::Show($g, 'Reset the recorded POWER usage (day and all-time totals in config\energy.json)? The benchmark time table is NOT touched.', 'Reset power totals', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($a -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            $ledger = [pscustomobject]@{ Days = New-Object System.Collections.ArrayList; AllTime = (New-MossEnergyBucket) }
+            Save-MossEnergy $ledger
+            & $updatePower
+        })
+        $tip.SetToolTip($powerBtn, 'Reloads the session / today / all-time energy numbers.')
+        $tip.SetToolTip($powerClear, 'Zeroes the cumulative power totals (day + all time). The per-run benchmark time data is not touched.')
+        $g.AcceptButton = $closeBtn
+        [void]$g.ShowDialog($f)
+        $g.Dispose()
+    }
+
+    # (v0.1.98: Benchmarks and Error report live in the header Options menu.)
+    # Compact flow layout (v0.1.98): the action row, the two-line status and
+    # the progress bar sit directly below the generation controls. Since
+    # Output folder / Model files / Error report / Benchmarks moved into the
+    # header Options menu, the layout is STATIC: row at y=348, status at
+    # 376, progress at 418.
+    function Update-MossLeftActionLayout {
+        $rowY = 348
+        foreach ($c in @($generate,$cancel,$btnPause,$openOut)) {
+            $c.Location = New-Object System.Drawing.Point($c.Left, $rowY)
+        }
+        $status.Location = New-Object System.Drawing.Point(18, ($rowY + 28))
+        $prog.Location = New-Object System.Drawing.Point(18, ($rowY + 70))
+    }
+    # (First placement happens after the status line and progress bar are
+    # created - see the call directly below $prog.)
     # Hover explanations for every control, so nothing is guesswork.
     $tip=New-Object System.Windows.Forms.ToolTip; $tip.InitialDelay=300; $tip.ReshowDelay=300
     $tip.SetToolTip($generate,'Renders your prompt. Quality follows the selector above: Exact (full quality) renders at full size and full steps; faster modes render small and enlarge - quick drafts, never distorted.')
     $tip.SetToolTip($cancel,'Stops the current generation and its engine processes.')
     $tip.SetToolTip($openOut,'Opens the output folder in Explorer.')
-    $tip.SetToolTip($btnReport,'Copies an anonymised technical error report to the clipboard and saves it under logs. Nothing is sent over the internet.')
-    $tip.SetToolTip($refineNative,'Improves your most recent image: same seed and composition, with a dialog to pick the target size and quality - same as right-click "Improve this image".')
-    $tip.SetToolTip($speedCombo,'How new images are rendered: Exact (full quality), or a faster draft mode that renders small and enlarges. Fastest renders at a 128-pixel side - very rough, but one click of Improve re-renders it sharp.')
-    $tip.SetToolTip($negBtn,'Generation options: negative prompt, sampler and scheduler.')
-    $tip.SetToolTip($modelToggle,'Show or hide the engine and model file paths.')
+    $tip.SetToolTip($speedCombo,'How new images are rendered: Exact (full quality), or a faster draft mode that renders small and enlarges (70% or 50% of the size).')
+    $tip.SetToolTip($negBtn,'Generation settings: negative prompt, sampler and scheduler.')
     $tip.SetToolTip($prompt,'Describe the image you want. Pasted multi-line text is flattened to one line automatically.')
     $tip.SetToolTip($historyPick,'Recent prompts (needs the history code to have been entered).')
     $tip.SetToolTip($resetHistoryCode,'Enter the history code to unlock the saved prompt history, set a new code (clears the history), or turn history off.')
@@ -1941,20 +2896,23 @@ try {
     $tip.SetToolTip($cfgHelp,'Explains what CFG scale does: how strictly the image follows your prompt.')
     $tip.SetToolTip($count,'How many images to render in one batch. No hard limit - very large batches ask first.')
     $tip.SetToolTip($seed,'Same seed + same prompt = the same image. -1 picks a random seed each run.')
-    $tip.SetToolTip($out,'Where finished images are saved.')
-    $tip.SetToolTip($outBrowse,'Choose the output folder.')
-    $status=New-Object System.Windows.Forms.Label; $status.Text='Ready'; $status.Location=New-Object System.Drawing.Point(18,668); $status.Size=New-Object System.Drawing.Size(664,24); $status.Anchor='Bottom,Left,Right'; $status.ForeColor=$cMuted; $status.Font=New-Object System.Drawing.Font('Consolas',9); $left.Controls.Add($status)
-    # Progress bar pinned to the VERY BOTTOM of the left panel (anchored
-    # Bottom) so it stays at the bottom edge when the window grows or is
-    # maximized - previously it kept its top-anchored position and floated
-    # mid-panel (user: move it all the way to the bottom). All the numbers
-    # (% overall, step N/M, ETA) live in the status line directly above;
-    # the old right-side numeric readout was removed (it duplicated them).
-    $prog=New-Object System.Windows.Forms.ProgressBar; $prog.Location=New-Object System.Drawing.Point(18,694); $prog.Size=New-Object System.Drawing.Size(556,14); $prog.Anchor='Bottom,Left,Right'; $prog.Style='Blocks'; $prog.Visible=$false; $left.Controls.Add($prog)
+    $tip.SetToolTip($out,'Where finished images are saved (Options > Output folder).')
+    # Two-line status (v0.1.91, kept): progress %, step N/M, ETA, watts and
+    # notes wrap over TWO lines. v0.1.96: the y position is set by
+    # Update-MossLeftActionLayout (flows below the action row); the anchor
+    # is now Top so the flow layout owns the position.
+    $status=New-Object System.Windows.Forms.Label; $status.Text='Ready'; $status.Location=New-Object System.Drawing.Point(18,376); $status.Size=New-Object System.Drawing.Size(584,40); $status.Anchor='Top,Left,Right'; $status.ForeColor=$cMuted; $status.Font=New-Object System.Drawing.Font('Consolas',9); $left.Controls.Add($status)
+    # Progress bar (v0.1.96): flows below the status line, full panel width.
+    # (It used to be pinned to the very bottom edge with a Bottom anchor;
+    # the flow layout replaces that.) All the numbers (% overall, step N/M,
+    # ETA) live in the status line directly above; the old right-side
+    # numeric readout was removed (it duplicated them).
+    $prog=New-Object System.Windows.Forms.ProgressBar; $prog.Location=New-Object System.Drawing.Point(18,418); $prog.Size=New-Object System.Drawing.Size(584,14); $prog.Anchor='Top,Left,Right'; $prog.Style='Blocks'; $prog.Visible=$false; $left.Controls.Add($prog)
+    Update-MossLeftActionLayout
 
-    Add-Label $right 'OUTPUT PREVIEW' 16 14 200 | Out-Null
+    Add-Label $right 'Output preview' 16 14 200 | Out-Null
     $preview=New-Object System.Windows.Forms.PictureBox; $preview.Location=New-Object System.Drawing.Point(16,42); $preview.Size=New-Object System.Drawing.Size(383,285); $preview.Anchor='Top,Left,Right'; $preview.SizeMode='Zoom'; $preview.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $right.Controls.Add($preview)
-    $filesTitle=Add-Label $right 'GENERATED FILES  (right-click: improve or delete)' 16 342 340
+    $filesTitle=Add-Label $right 'Generated files  (right-click: improve or delete)' 16 342 340
     function Copy-MossImageUnlocked([string]$path) {
         # Returns a Bitmap copy of an image file without keeping the file
         # locked. Image.FromFile holds a file lock for the lifetime of the
@@ -1967,7 +2925,32 @@ try {
     }
 
     $fileList=New-Object System.Windows.Forms.ListBox; $fileList.Location=New-Object System.Drawing.Point(16,368); $fileList.Size=New-Object System.Drawing.Size(383,150); $fileList.Anchor='Top,Left,Right'; $fileList.SelectionMode='MultiExtended'; $fileList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $fileList.ForeColor=$cText; $right.Controls.Add($fileList)
-    $fileList.Add_SelectedIndexChanged({if($fileList.SelectedItem){$p=[string]$fileList.SelectedItem;$script:SelectedFile=$p;if(Test-Path -LiteralPath $p){try{$newImg=Copy-MossImageUnlocked $p;if($newImg){$old=$preview.Image;$preview.Image=$newImg;if($old){$old.Dispose()}}}catch{}}}})
+    $fileList.Add_SelectedIndexChanged({
+        if($fileList.SelectedItem){
+            $p=[string]$fileList.SelectedItem
+            $script:SelectedFile=$p
+            if(-not (Test-Path -LiteralPath $p)){
+                # The file was deleted, renamed or moved OUTSIDE MOSS (by
+                # hand, OneDrive, a backup tool...). Prune every dead entry
+                # so the list matches the disk again - otherwise improve,
+                # re-render and info would keep failing on dead paths.
+                $fileList.ClearSelected()
+                $removed=0
+                for($i=$fileList.Items.Count-1;$i -ge 0;$i--){
+                    $ip=[string]$fileList.Items[$i]
+                    if(-not (Test-Path -LiteralPath $ip)){ $fileList.Items.RemoveAt($i); [void]$script:GeneratedFiles.Remove($ip); $removed++ }
+                }
+                $script:SelectedFile=$null
+                # Same rule as a MOSS delete: the preview goes blank, no
+                # other image is auto-shown. Click a file to view it again.
+                try { $old=$preview.Image; $preview.Image=$null; if($old){ $old.Dispose() } } catch {}
+                $fileList.ClearSelected()
+                $status.Text=('Removed {0} list entr(ies): their file(s) no longer exist on disk (deleted, renamed or moved outside MOSS).' -f $removed)
+                return
+            }
+            try{$newImg=Copy-MossImageUnlocked $p;if($newImg){$old=$preview.Image;$preview.Image=$newImg;if($old){$old.Dispose()}}}catch{}
+        }
+    })
     # A plain right-click does not change the ListBox selection - select the
     # file under the cursor first, so Improve always acts on that file. With
     # multi-select, right-clicking a file that is ALREADY part of the current
@@ -2009,12 +2992,28 @@ try {
     try {
         $outFolder=Get-AbsoluteAppPath ([string]$script:Settings.OutputPath)
         if(Test-Path -LiteralPath $outFolder){
+            # One-time sidecar migration: versions up to 0.1.76 wrote the
+            # per-image .json sidecars NEXT to the images; since 0.1.77 they
+            # live in the 'metadata' subfolder so the output folder only shows
+            # pictures. Move every MOSS_* sidecar that is still sitting in the
+            # output root (never overwrite - if the same name already exists
+            # in metadata, that newer copy wins and the old one stays).
+            try {
+                $legacySides=@(Get-ChildItem -LiteralPath $outFolder -Filter 'MOSS_*.json' -File -ErrorAction SilentlyContinue)
+                if($legacySides.Count -gt 0){
+                    $metaDir=Join-Path $outFolder 'metadata'
+                    if(-not (Test-Path -LiteralPath $metaDir -PathType Container)){ New-Item -ItemType Directory -Path $metaDir -Force | Out-Null }
+                    foreach($js in $legacySides){
+                        $target=Join-Path $metaDir $js.Name
+                        if(-not (Test-Path -LiteralPath $target -PathType Leaf)){ Move-Item -LiteralPath $js.FullName -Destination $target -Force -ErrorAction SilentlyContinue }
+                    }
+                }
+            } catch {}
             $existing=Get-ChildItem -LiteralPath $outFolder -Filter 'MOSS_*.png' -File | Sort-Object LastWriteTime
             foreach($fi in $existing){ [void]$fileList.Items.Add($fi.FullName); [void]$script:GeneratedFiles.Add($fi.FullName) }
             if($fileList.Items.Count -gt 0 -and -not $script:SelectedFile){ $fileList.SelectedIndex=$fileList.Items.Count-1 }
         }
     } catch {}
-    $logTitle=Add-Label $right 'GENERATION LOG' 16 535 200
     $log=New-Object System.Windows.Forms.TextBox; $log.Multiline=$true; $log.ReadOnly=$true; $log.ScrollBars='Vertical'; $log.Location=New-Object System.Drawing.Point(16,560); $log.Size=New-Object System.Drawing.Size(383,130); $log.Anchor='Top,Bottom,Left,Right'; $log.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $log.ForeColor=$cMuted; $right.Controls.Add($log)
     # The generation log is collapsed by default, like the model files; the
     # freed space goes to the preview and the file list.
@@ -2052,7 +3051,6 @@ try {
         # again collapses the log. (The old layout hid the toggle while
         # expanded and showed only the static title label, which had no
         # click handler - the log could not be minimized again.)
-        $logTitle.Visible = $false
         $logToggle.Location = New-Object System.Drawing.Point(16,$logTitleTop)
         $logToggle.Visible = $true
         $log.Visible = $script:LogVisible
@@ -2096,6 +3094,54 @@ try {
         StepNum = 0
         StepDen = 0
         JobStartedAt = $null
+        # Power meter state (v0.1.87): sampling cadence, integrated joules
+        # for the CURRENT job, and the last reading for the display.
+        PowerSmi = $null
+        PowerEstimateW = 250.0
+        PowerLastSample = $null
+        PowerLastW = 250.0
+        PowerLastMeasured = $false
+        PowerJoules = 0.0
+        PowerMeasuredJoules = 0.0
+        PowerSeconds = 0.0
+        # Pause/Resume (v0.1.91): the engine process is frozen mid-batch with
+        # ntdll NtSuspendProcess. PausedAt anchors the paused span so elapsed
+        # times, the ETA and the power meter exclude it on resume.
+        Paused = $false
+        PausedAt = $null
+        PausedTotalSec = 0.0
+    }
+    # Session energy totals (v0.1.87): in-memory, reset at every app start.
+    $script:SessionEnergy = New-MossEnergyBucket
+
+    # Pause/Resume (v0.1.91): freeze the engine process mid-batch with ntdll's
+    # NtSuspendProcess and continue later with NtResumeProcess. In-flight GPU
+    # work finishes before the freeze takes effect; no new work starts until
+    # the process is resumed. VRAM stays allocated while paused.
+    if (-not ('Moss.ProcCtl' -as [type])) {
+        try {
+            Add-Type -Namespace Moss -Name ProcCtl -MemberDefinition '[DllImport("ntdll.dll")] public static extern uint NtSuspendProcess(IntPtr handle);[DllImport("ntdll.dll")] public static extern uint NtResumeProcess(IntPtr handle);' | Out-Null
+        } catch {}
+    }
+    function Suspend-MossProcess {
+        param($Process)
+        if ($null -eq $Process) { return $false }
+        try { if ($Process.HasExited) { return $false } } catch { return $false }
+        if (-not ('Moss.ProcCtl' -as [type])) { return $false }
+        try {
+            $rc = [Moss.ProcCtl]::NtSuspendProcess($Process.Handle)
+            return ($rc -eq 0)
+        } catch { return $false }
+    }
+    function Resume-MossProcess {
+        param($Process)
+        if ($null -eq $Process) { return $false }
+        try { if ($Process.HasExited) { return $false } } catch { return $false }
+        if (-not ('Moss.ProcCtl' -as [type])) { return $false }
+        try {
+            $rc = [Moss.ProcCtl]::NtResumeProcess($Process.Handle)
+            return ($rc -eq 0)
+        } catch { return $false }
     }
 
     function Stop-MossGen {
@@ -2238,13 +3284,54 @@ try {
         return $span.ToString('h\:mm\:ss')
     }
 
+    function Update-MossPowerSampling {
+        # Samples the GPU power draw while the engine runs and integrates it
+        # over time (joules) - the basis for the watt display and the
+        # cumulative energy ledger (session / day / all time). MEASURED via
+        # nvidia-smi when present; otherwise the TDP-based estimate. Called
+        # every 400 ms tick; samples at most ~1x per second (nvidia-smi
+        # costs tens of milliseconds per call, a 400 ms cadence would eat
+        # real CPU). The interval BETWEEN samples is integrated with the
+        # previous reading, so no wall time is lost between samples.
+        $st = $script:GenState
+        if ($null -eq $st.Process -or $st.Process.HasExited) { return }
+        $now = Get-Date
+        $dt = 0.0
+        if ($null -ne $st.PowerLastSample) { $dt = ($now - $st.PowerLastSample).TotalSeconds }
+        if ($dt -lt 0.8) { return }
+        # Integration for the interval since the LAST sample uses that
+        # sample's reading (constant-draw assumption between samples).
+        if ($dt -gt 60.0) { $dt = 60.0 }   # stall / resume / hibernate protection
+        $st.PowerSeconds = [double]$st.PowerSeconds + $dt
+        $st.PowerJoules = [double]$st.PowerJoules + ([double]$st.PowerLastW * $dt)
+        if ([bool]$st.PowerLastMeasured) { $st.PowerMeasuredJoules = [double]$st.PowerMeasuredJoules + ([double]$st.PowerLastW * $dt) }
+        # New reading for the NEXT interval + the live display.
+        $w = $null; $measured = $false
+        if ($st.PowerSmi) {
+            try {
+                $outLines = & $st.PowerSmi '--query-gpu=power.draw' '--format=csv,noheader,nounits' 2>$null
+                foreach ($ol in @($outLines)) { $w = Parse-MossPowerCsvLine ([string]$ol); if ($null -ne $w) { break } }
+                if ($null -ne $w) { $measured = $true }
+            } catch { $w = $null }
+        }
+        if ($null -eq $w) { $w = [double]$st.PowerEstimateW; $measured = $false }
+        $st.PowerLastSample = $now
+        $st.PowerLastW = $w
+        $st.PowerLastMeasured = $measured
+    }
+
     function Update-MossLiveProgress {
         $st = $script:GenState
         if (-not $st.IsRunning -or $null -eq $st.Process -or $st.Process.HasExited) { return }
+        Update-MossPowerSampling
         if ($null -eq $st.Capture) { return }
         $elapsed = 0.0
         if ($st.JobStartedAt) { $elapsed = [Math]::Max(0, ((Get-Date) - $st.JobStartedAt).TotalSeconds) }
         $combined = ([string]$st.Capture.Out) + "`n" + ([string]$st.Capture.Err)
+        # Detail-regeneration (hires) job? Checked once per tick - the phase
+        # logic below applies only to these two-pass runs.
+        $hiresActive = $false
+        if ($st.Job -and $st.Job.PSObject.Properties['HiresScale'] -and [double]$st.Job.HiresScale -ge 1.5) { $hiresActive = $true }
         # The whole batch runs in one engine process. Track which image of the
         # batch is currently rendering from the engine's own progress lines.
         $batchMatches = [regex]::Matches($combined, '(?i)generating image:\s*(\d+)\s*/\s*(\d+)\s*-\s*seed\s*(-?\d+)')
@@ -2305,6 +3392,40 @@ try {
             if ($denominator -gt 0) { $engineProgress = [Math]::Max(0, [Math]::Min(100, [int](($numerator * 100) / $denominator))) }
             # Keep the raw step counter for the status line ('step 17/50').
             $st.StepNum = [int]$numerator; $st.StepDen = [int]$denominator
+            if ($hiresActive) {
+                # The tiled VAE decode also prints an N/M it/s bar (tiles per
+                # second) AFTER both sampling passes - positioned after the
+                # 'decoding' lines. Never mistake it for a sampling pass.
+                $barAfterDecode = $false
+                $decIdx = $progressWindow.LastIndexOf('decoding')
+                $saveIdx = $progressWindow.LastIndexOf('save result image')
+                if (($decIdx -ge 0 -and $last.Index -gt $decIdx) -or ($saveIdx -ge 0 -and $last.Index -gt $saveIdx)) { $barAfterDecode = $true }
+                if (-not $barAfterDecode) {
+                    $wasPhase1 = ([int]$st['HiresPhase'] -eq 1)
+                    Update-MossHiresPhases $st $numerator $denominator
+                    if ($wasPhase1 -and [int]$st['HiresPhase'] -eq 2 -and -not $st['HiresLoggedPhase2']) {
+                        $st['HiresLoggedPhase2'] = $true
+                        $hOutW = [int]$st.Job.Width; $hOutH = [int]$st.Job.Height
+                        if ($st.Job.PSObject.Properties['SrcW'] -and [int]$st.Job.SrcW -ge 64) {
+                            $hOutW = [int][Math]::Round([int]$st.Job.SrcW * [double]$st.Job.HiresScale)
+                            $hOutH = [int][Math]::Round([int]$st.Job.SrcH * [double]$st.Job.HiresScale)
+                        }
+                        $log.AppendText(("`r`nBase pass finished (composition kept) - the highres pass now re-synthesizes sharp detail at {0} x {1}. This second pass is the slower part of a detail-regeneration run." -f $hOutW, $hOutH))
+                    }
+                    # Overall progress counts BOTH passes: pass 1 steps + pass
+                    # 2 steps over the observed totals - monotonic, never
+                    # restarting at ~0% when the second bar begins.
+                    $hiresDone = [int]$numerator
+                    if ([int]$st['HiresPhase'] -eq 2) { $hiresDone = [int]$st['HiresPhase1Steps'] + [int]$numerator }
+                    $hiresTotal = [int]$st['HiresPhase1Steps'] + [int]$st['HiresPhase2Den']
+                    if ($hiresTotal -le 0) {
+                        $p1Steps = $(if ([int]$st['HiresPhase1Steps'] -gt 0) { [int]$st['HiresPhase1Steps'] } elseif ($st.Job.PSObject.Properties['ChosenSteps']) { [int]$st.Job.ChosenSteps } else { [int]$st.Job.Steps })
+                        $hiresTotal = $p1Steps + [int]$st.Job.Steps
+                    }
+                    $hiresTotal = [Math]::Max($hiresDone + 1, $hiresTotal)
+                    $engineProgress = [Math]::Max(0, [Math]::Min(100, [int](($hiresDone * 100) / $hiresTotal)))
+                }
+            }
         }
         if ($null -eq $engineProgress) {
             # Textual step counters ('step 17/50', '17/50 steps') from other
@@ -2337,18 +3458,50 @@ try {
         $etaText = 'ETA calculating'
         $remaining = $null
         $imageEstimate = $null
-        $avgDone = $null
-        if ($st.ImageDurations.Count -gt 0) { $avgDone = (($st.ImageDurations | Measure-Object -Average).Average) }
-        if ($null -ne $engineProgress -and $engineProgress -gt 0) {
-            $imageEstimate = $imageElapsed * 100.0 / $engineProgress
-            if ($null -ne $avgDone) { $imageEstimate = ($imageEstimate + $avgDone) / 2.0 }
-        } elseif ($null -ne $avgDone) {
-            $imageEstimate = $avgDone
+        if ($hiresActive) {
+            # Two-pass run: the remaining time = the base pass's unfinished
+            # part + the highres pass, weighted with the benchmark-store
+            # parts. The naive elapsed/progress extrapolation explodes at
+            # every pass change (the step bar restarts) and must not be used.
+            $baseSec = 0.0; if ($null -ne $st['HiresBaseSec']) { $baseSec = [double]$st['HiresBaseSec'] }
+            $secondSec = 0.0; if ($null -ne $st['HiresSecondSec']) { $secondSec = [double]$st['HiresSecondSec'] }
+            $predTotal = 0.0; if ($null -ne $st['PredictedPerImage']) { $predTotal = [double]$st['PredictedPerImage'] }
+            if ($baseSec -le 0 -and $secondSec -gt 0) { $baseSec = [Math]::Max(0.0, $predTotal - $secondSec) }
+            if ($secondSec -le 0 -and $baseSec -gt 0) { $secondSec = [Math]::Max(0.0, $predTotal - $baseSec) }
+            if ($baseSec -le 0 -and $secondSec -le 0 -and $predTotal -gt 0) {
+                # No benchmark parts at all: split the upfront prediction by
+                # predicted steps (pass 1 samples ChosenSteps, pass 2 the full
+                # engine count).
+                $p1Steps = [double]$(if ([int]$st['HiresPhase1Steps'] -gt 0) { [int]$st['HiresPhase1Steps'] } elseif ($st.Job.PSObject.Properties['ChosenSteps']) { [int]$st.Job.ChosenSteps } else { [int]$st.Job.Steps })
+                $baseSec = $predTotal * ($p1Steps / [Math]::Max(1.0, ($p1Steps + [double]$st.Job.Steps)))
+                $secondSec = [Math]::Max(0.0, $predTotal - $baseSec)
+            }
+            if ($baseSec -gt 0 -or $secondSec -gt 0) {
+                if ([int]$st['HiresPhase'] -eq 2) {
+                    $p2Den = [double][Math]::Max(1, $(if ([int]$st['HiresPhase2Den'] -gt 0) { [int]$st['HiresPhase2Den'] } else { [int]$st.Job.Steps }))
+                    $remaining = [Math]::Max(0.0, $secondSec * (1.0 - ([Math]::Min([double]$st.StepNum, $p2Den) / $p2Den)))
+                } else {
+                    $p1Den = [double][Math]::Max(1, $(if ([int]$st['HiresPhase1Steps'] -gt 0) { [int]$st['HiresPhase1Steps'] } elseif ($st.Job.PSObject.Properties['ChosenSteps']) { [int]$st.Job.ChosenSteps } else { [int]$st.Job.Steps }))
+                    $remaining = [Math]::Max(0.0, $baseSec * (1.0 - ([Math]::Min([double]$st.StepNum, $p1Den) / $p1Den))) + $secondSec
+                }
+            }
+        } else {
+            $avgDone = $null
+            if ($st.ImageDurations.Count -gt 0) { $avgDone = (($st.ImageDurations | Measure-Object -Average).Average) }
+            if ($null -ne $engineProgress -and $engineProgress -gt 0) {
+                $imageEstimate = $imageElapsed * 100.0 / $engineProgress
+                if ($null -ne $avgDone) { $imageEstimate = ($imageEstimate + $avgDone) / 2.0 }
+            } elseif ($null -ne $avgDone) {
+                $imageEstimate = $avgDone
+            } elseif ($null -ne $st['PredictedPerImage']) {
+                # Benchmark-store prediction: no live data yet (batch just started).
+                $imageEstimate = [double]$st['PredictedPerImage']
+            }
+            if ($null -ne $imageEstimate) {
+                $remaining = [Math]::Max(0, $imageEstimate - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $imageEstimate)
+            }
         }
-        if ($null -ne $imageEstimate) {
-            $remaining = [Math]::Max(0, $imageEstimate - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $imageEstimate)
-        }
-        if ($null -ne $remaining) { $etaText = "ETA ~$(Format-MossFixedTime $remaining) (all $($job.Count))" }
+        if ($null -ne $remaining) { $etaText = if ([int]$job.Count -gt 1) { "ETA ~$(Format-MossFixedTime $remaining) (all $($job.Count))" } else { "ETA ~$(Format-MossFixedTime $remaining)" } }
         # Refresh the ETA at most once per second (user: the constant jumping
         # on every 400 ms tick is distracting). The rest of the line keeps
         # updating on every tick; the held value keeps its fixed width.
@@ -2381,10 +3534,17 @@ try {
         # text is padded to a fixed width and the font is monospace.
         $phase = if ($decodingNow) { 'decoding/saving...' }
                  elseif ($savingNow) { 'saving...' }
+                 elseif ($hiresActive -and $st.StepDen -gt 0) { ('pass {0}/2 step {1,3}/{2,3}' -f [int]$st['HiresPhase'], [int]$st.StepNum, [int]$st.StepDen) }
                  elseif ($st.StepDen -gt 0) { ('step {0,3}/{1,3}' -f [int]$st.StepNum, [int]$st.StepDen) }
                  elseif ($null -ne $engineProgress) { ('image {0,3}%' -f [int]$st.ImageProgress) }
                  else { 'warming up...' }
-        $status.Text = ('Image {0,3}/{1,3} | {2,3}% | {3} | elapsed {4} | {5}' -f $currentImage, [int]$job.Count, $overall, $phase.PadRight(17), (Format-MossFixedTime $elapsed), $etaText)
+        # Live power draw: measured (nvidia-smi) or estimated (TDP) - shown
+        # in the fixed-width status line while the engine runs.
+        $powerText = ''
+        if ($null -ne $st.PowerLastW -and [double]$st.PowerLastW -gt 0) {
+            $powerText = ('| ~{0,3} W {1} ' -f [int][Math]::Round([double]$st.PowerLastW, 0), $(if ([bool]$st.PowerLastMeasured) { '(measured)' } else { '(estimate)' }))
+        }
+        $status.Text = ('Image {0,3}/{1,3} | {2,3}% | {3} | elapsed {4} | {5}{6}' -f $currentImage, [int]$job.Count, $overall, $phase.PadRight(17), (Format-MossFixedTime $elapsed), $etaText, $powerText)
         # Drive the progress bar from the step counter (same numbers as the
         # status text above; the old right-side numeric readout duplicated it
         # and is gone).
@@ -2401,6 +3561,8 @@ try {
         Stop-MossGen
         $generate.Enabled = $true
         $cancel.Enabled = $false
+        $btnPause.Enabled = $false; $btnPause.Text = 'Pause'
+        $script:GenState.Paused = $false; $script:GenState.PausedAt = $null
         if ($FinalStatus) { $status.Text = $FinalStatus }
         if ($script:GenState.JobStartedAt) { $status.Text += " | total elapsed $(Format-MossDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds)" }
         # Progress bar: full on success, hidden on failures (a full bar next
@@ -2423,8 +3585,9 @@ try {
         $job = $st.Job
 
         $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
-        # Refined (image-to-image) outputs carry an easy-to-spot tag in the name:
-        # ..._hq_01.png (same size, native quality) or ..._hq2x_01.png (2x size).
+        # Refined (image-to-image) outputs carry an easy-to-spot tag in the
+        # name: ..._hq_01.png - every improve mode uses it; the sidecar
+        # records the actual output size and which mode made it.
         $refineSuffix = if ($job.RefineTag) { '_' + [string]$job.RefineTag } else { '' }
         # Braces are required: "$refineSuffix_" would be parsed as a variable
         # named 'refineSuffix_' and the tag would silently disappear.
@@ -2438,8 +3601,34 @@ try {
         $argsList.Add('--tokenizer'); $argsList.Add((Quote-ProcessArgument $job.Tokenizer))
         $argsList.Add('--cfg-scale'); $argsList.Add((ConvertFrom-MossDouble ([double]$job.Cfg)))
         $argsList.Add('--steps'); $argsList.Add([string]$job.Steps)
-        $argsList.Add('-H'); $argsList.Add([string]$job.Height)
-        $argsList.Add('-W'); $argsList.Add([string]$job.Width)
+        # DETAIL REGENERATION (highres fix) for improve jobs: the job carries
+        # HiresScale (from the improve dialog). The base img2img pass runs at
+        # the image's OWN size (composition, all chosen steps), then the
+        # engine's highres fix upscales the latent and re-synthesizes sharp
+        # detail at HiresScale x - verified: 1360 x 768 draft -> sharp
+        # 2720 x 1536, composition kept. VAE tiling is always on for the
+        # enlarged second pass (the base 4.18 MP render needed it on 12 GB).
+        $jobProps = $job.PSObject.Properties
+        $hiresScale = 0.0
+        if ($jobProps['HiresScale']) { $hiresScale = [double]$job.HiresScale }
+        $hiresActive = $false
+        $renderW = [int]$job.Width; $renderH = [int]$job.Height
+        if ($hiresScale -ge 1.5) {
+            $srcW = 0; $srcH = 0
+            if ($jobProps['SrcW']) { $srcW = [int]$job.SrcW }
+            if ($jobProps['SrcH']) { $srcH = [int]$job.SrcH }
+            if ($srcW -ge 64 -and $srcH -ge 64) {
+                $argsList.Add('-H'); $argsList.Add([string]$srcH)
+                $argsList.Add('-W'); $argsList.Add([string]$srcW)
+                $argsList.Add('--hires'); $argsList.Add('--hires-scale'); $argsList.Add(([string]$hiresScale).Replace(',', '.'))
+                $renderW = $srcW; $renderH = $srcH
+                $hiresActive = $true
+            }
+        }
+        if (-not $hiresActive) {
+            $argsList.Add('-H'); $argsList.Add([string]$job.Height)
+            $argsList.Add('-W'); $argsList.Add([string]$job.Width)
+        }
         $argsList.Add('-s'); $argsList.Add([string]$job.Seed)
         $argsList.Add('--batch-count'); $argsList.Add([string]$job.Count)
         $argsList.Add('--output-begin-idx'); $argsList.Add('1')
@@ -2452,7 +3641,16 @@ try {
         # MOSS upscales the finished image in pixel space. No second sampling
         # pass runs at all, so nothing can introduce distorted detail - the
         # result is a faithful, possibly grainy enlargement of a small render.
-        $speedScale = 0.0
+        # VAE tiling for large renders: at big sizes the VAE encode/decode needs
+# more GPU memory than the card has (live case: 18 GB requested for the
+# VAE graph at 2720 x 1536 on a 12 GB card - the whole run died there,
+# before a single sampling step). --vae-tiling processes encode and
+# decode in spatial tiles with overlap, which cuts the VAE peak memory
+# drastically with no visible effect on the image. Applied whenever the
+# RENDER size exceeds about 3 megapixels (sizes up to ~2 MP are verified
+# to work un-tiled); it only changes HOW the VAE runs, not the result.
+$speedScale = 0.0
+if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height }
         switch ([string]$job.SpeedMode) {
             '2x' { $speedScale = 0.7 }
             '4x' { $speedScale = 0.5 }
@@ -2466,8 +3664,39 @@ try {
             if ($smallW -lt $job.Width -and $smallH -lt $job.Height) {
                 $argsList.Add('-W'); $argsList.Add([string]$smallW)
                 $argsList.Add('-H'); $argsList.Add([string]$smallH)
+                $renderW = $smallW; $renderH = $smallH
                 $st.UpscaleTarget = @{ W = [int]$job.Width; H = [int]$job.Height; FromW = $smallW; FromH = $smallH }
             }
+        }
+        if (([double]$renderW * [double]$renderH) / 1000000.0 -gt 3.0) {
+            $argsList.Add('--vae-tiling')
+            $log.AppendText(("`r`nNote: {0} x {1} render - VAE tiling is on, so the encode/decode runs in memory-safe tiles instead of asking the GPU for one huge buffer." -f $renderW, $renderH))
+        }
+        if ($hiresActive) {
+            # The highres second pass runs at HiresScale x the base size -
+            # that enlarged render needs VAE tiling regardless of the base
+            # size (verified: 1360x768 base -> 2720x1536 second pass).
+            $argsList.Add('--vae-tiling')
+            $log.AppendText(("`r`nNote: detail regeneration is ON - the composition pass renders at {0} x {1}, then the highres second pass re-synthesizes sharp detail at {2} x {3} (scale {4}x). This takes about 3-4x the normal improve time." -f $renderW, $renderH, [int]($renderW*$hiresScale), [int]($renderH*$hiresScale), $hiresScale))
+        }
+        # FAST SHARPEN: after the render, the ESRGAN upscaler model THE USER
+        # PICKED sharpens/enlarges the finished image in pixel space - a
+        # single sampling pass (at HALF the source size) plus seconds of
+        # upscaling, instead of the hires second pass. The model choice is
+        # never overridden; the output size follows the model (the default
+        # x4 model sharpens the half-size render back to 2x the source).
+        $upscaleModel = ''
+        if ($jobProps['UpscaleModel']) { $upscaleModel = [string]$job.UpscaleModel }
+        if ($upscaleModel -and -not (Test-Path -LiteralPath $upscaleModel -PathType Leaf)) {
+            # Last-resort safety: render without the upscaler rather than
+            # failing the whole run (the queue already falls back to detail
+            # regeneration when it can).
+            $log.AppendText(("`r`nNote: the selected upscaler model file was not found ({0}) - rendering WITHOUT it (the copy keeps its native render size)." -f $upscaleModel))
+            $upscaleModel = ''
+        }
+        if ($upscaleModel) {
+            $argsList.Add('--upscale-model'); $argsList.Add((Quote-ProcessArgument $upscaleModel))
+            $log.AppendText(("`r`nNote: fast sharpen is ON - the render runs at {0} x {1}, then the upscaler model {2} sharpens/enlarges the result in pixel space (output size follows the model; no second sampling pass)." -f $renderW, $renderH, (Split-Path -Leaf $upscaleModel)))
         }
         $argsList.Add('-p'); $argsList.Add((Quote-ProcessArgument $job.Prompt))
         $argsList.Add('-o'); $argsList.Add((Quote-ProcessArgument $pattern))
@@ -2481,9 +3710,20 @@ try {
         # so the engine keeps its model-specific choice.
         if ($job.SamplingMethod) { $argsList.Add('--sampling-method'); $argsList.Add([string]$job.SamplingMethod) }
         if ($job.Scheduler) { $argsList.Add('--scheduler'); $argsList.Add([string]$job.Scheduler) }
-        # Negative prompt (engine flag -n), flattened to a single line like the
-        # positive prompt.
-        if ($job.NegativePrompt) { $argsList.Add('-n'); $argsList.Add((Quote-ProcessArgument ([string]$job.NegativePrompt))) }
+        # Negative prompt (engine flag -n), flattened to a single line like
+        # the positive prompt.
+        $effectiveNegative = [string]$job.NegativePrompt
+        if ([bool]$script:Settings.SafeMode) {
+            # Safe mode: also steer the SAMPLING away from sexual content with
+            # concept words, in case a clean prompt still drifts that way.
+            # Concept words only - a negative prompt cannot censor or follow
+            # instructions (the real block is the prompt gate above).
+            if ($effectiveNegative -notmatch '(?i)\b(nsfw|nude|naked)\b') {
+                $effectiveNegative = ($effectiveNegative.Trim(', ') + ', nsfw, nude, naked, explicit, gore').Trim(', ')
+                $log.AppendText("`r`nSafe mode: safety terms (nsfw, nude, naked, explicit, gore) added to the negative prompt.")
+            }
+        }
+        if ($effectiveNegative) { $argsList.Add('-n'); $argsList.Add((Quote-ProcessArgument $effectiveNegative)) }
 
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $job.Engine
@@ -2500,9 +3740,18 @@ try {
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         # Target a specific physical GPU when the user selected one in setup.
+        # Every vendor gets its own selection mechanism: CUDA_VISIBLE_DEVICES
+        # (NVIDIA), HIP_VISIBLE_DEVICES (AMD ROCm), GGML_VK_VISIBLE_DEVICES
+        # (Vulkan, any GPU) and ONEAPI_DEVICE_SELECTOR (Intel SYCL builds,
+        # which take a 'backend:index' value rather than a bare index - it
+        # was silently ignored before, so the selected card never applied).
         if ($job.GpuIndex -ge 0) {
-            $deviceEnv = switch -Regex ([string]$job.Backend) { '^CUDA' { 'CUDA_VISIBLE_DEVICES'; break } '^HIP' { 'HIP_VISIBLE_DEVICES'; break } 'Vulkan' { 'GGML_VK_VISIBLE_DEVICES'; break } default { $null } }
-            if ($deviceEnv) { $psi.EnvironmentVariables[$deviceEnv] = [string]$job.GpuIndex }
+            $deviceEnv = switch -Regex ([string]$job.Backend) { '^CUDA' { 'CUDA_VISIBLE_DEVICES'; break } '^HIP' { 'HIP_VISIBLE_DEVICES'; break } 'Vulkan' { 'GGML_VK_VISIBLE_DEVICES'; break } '^SYCL' { 'ONEAPI_DEVICE_SELECTOR'; break } default { $null } }
+            if ($deviceEnv) {
+                $deviceValue = [string]$job.GpuIndex
+                if ($deviceEnv -eq 'ONEAPI_DEVICE_SELECTOR') { $deviceValue = 'level_zero:' + $deviceValue }
+                $psi.EnvironmentVariables[$deviceEnv] = $deviceValue
+            }
         }
 
         $proc = New-Object System.Diagnostics.Process
@@ -2551,6 +3800,7 @@ try {
             $st.ImageProgress = 0
             $st.StepNum = 0; $st.StepDen = 0
             $st.CurrentImageIndex = 0
+            $st.Paused = $false; $st.PausedAt = $null
             $status.Text = ("Rendering {0} image(s) in one run (base seed {1})..." -f $job.Count, $job.Seed)
             if ($up) { $status.Text = ("Fast mode: rendering {0} image(s) small (will upscale after render)..." -f $job.Count) }
         } catch {
@@ -2598,6 +3848,12 @@ try {
         $patternBase = ([string]$st.CurrentFile) -replace '%02d','{0:D2}'
         $file = $patternBase -f $i
         if (-not (Test-Path -LiteralPath $file)) { return $false }
+        if (-not (Test-MossPngValid $file)) {
+            # File exists but is not a decodable PNG (truncated write: disk
+            # full, power loss, antivirus interference). Never list it.
+            [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = 0; Seed = $thisSeed; Output = 'Image file is corrupt or incomplete (write interrupted?) - not added to the list; the file stays on disk' })
+            return $false
+        }
         $upscaledNote = $null
         if ($up) {
             try {
@@ -2606,14 +3862,32 @@ try {
             } catch {
                 $upscaledNote = ('kept at engine size {0} x {1} (resize failed: {2})' -f $up.FromW, $up.FromH, $_.Exception.Message)
             }
+        } elseif ($job.PSObject.Properties['UpscaleModel'] -and [string]$job.UpscaleModel) {
+            # Fast-sharpen run: the engine upscaled the result with the
+            # user-selected ESRGAN model - record it (the sidecar is the
+            # only record of how the image was made).
+            $upscaledNote = ('fast sharpen ({0})' -f (Split-Path -Leaf ([string]$job.UpscaleModel)))
         }
         try {
+            # The sidecar must record the ACTUAL saved size: for a speed-mode
+            # run the pixel upscaler resizes the file first, and a detail-
+            # regeneration (hires) run saves at 2x the base size - the job's
+            # own W/H would then be wrong (live case: the sidecar said
+            # 1360 x 768 for a 2720 x 1536 hires output, which would mislead
+            # a later improve/info of that image).
+            $realW = [int]$job.Width; $realH = [int]$job.Height
+            try {
+                $imgDim = [System.Drawing.Image]::FromFile($file)
+                $realW = $imgDim.Width; $realH = $imgDim.Height
+                $imgDim.Dispose()
+            } catch {}
             $meta = [ordered]@{
-                Width = $job.Width; Height = $job.Height
+                Width = $realW; Height = $realH
                 Steps = $job.Steps; CfgScale = $job.Cfg; Seed = $thisSeed
                 Backend = $job.Backend
                 SpeedMode = [string]$job.SpeedMode
                 UpscaledFrom = $upscaledNote
+                HiresScale = $(if ($job.PSObject.Properties['HiresScale'] -and [double]$job.HiresScale -ge 1.5) { [double]$job.HiresScale } else { $null })
                 InitImage = $(if($job.InitImage){ [System.IO.Path]::GetFileName([string]$job.InitImage) }else{ $null })
                 InitStrength = $(if($job.InitImage){ [double]$job.InitStrength }else{ $null })
                 Sampler = $(if($job.SamplingMethod){ [string]$job.SamplingMethod }else{ $null })
@@ -2627,7 +3901,11 @@ try {
                 $meta.Prompt = [string]$job.Prompt
                 if ($job.NegativePrompt) { $meta.NegativePrompt = [string]$job.NegativePrompt }
             }
-            $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath ([System.IO.Path]::ChangeExtension($file, '.json')) -Encoding UTF8
+            # Sidecar goes into the 'metadata' subfolder (see Get-MossSidecarPath)
+            $sidePath = Get-MossSidecarPath $file
+            $sideDir = [System.IO.Path]::GetDirectoryName($sidePath)
+            if (-not (Test-Path -LiteralPath $sideDir)) { New-Item -ItemType Directory -Path $sideDir -Force | Out-Null }
+            $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $sidePath -Encoding UTF8
         } catch {}
         [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = 0; Seed = $thisSeed; Output = 'OK' })
         [void]$fileList.Items.Add($file)
@@ -2639,6 +3917,13 @@ try {
     function On-MossGenTimerTick {
         $st = $script:GenState
         if ($null -eq $st.Process) { return }
+        # Paused: the engine process is frozen, so no new output appears and
+        # progress/ETA/power updates would only lie - skip them entirely. If
+        # the process died while paused, fall through to normal handling.
+        if ($st.Paused) {
+            if (-not $st.Process.HasExited) { return }
+            $st.Paused = $false; $st.PausedAt = $null
+        }
         if (-not $st.Process.HasExited) { Update-MossLiveProgress; return }
 
         # The whole batch has finished (one process rendered every image).
@@ -2692,13 +3977,14 @@ try {
         $patternBase = ([string]$st.CurrentFile) -replace '%02d','{0:D2}'
         $ok = 0
         $missing = New-Object System.Collections.Generic.List[string]
+        $corrupt = New-Object System.Collections.Generic.List[string]
         for ($i = 1; $i -le $job.Count; $i++) {
             # Already upscaled + registered live while the engine was still
             # rendering the rest (CPU/GPU overlap) - just count it.
             if ($st.LiveCompletedImages -contains $i) { $ok++; continue }
             $file = $patternBase -f $i
             $thisSeed = if ($seedMap.ContainsKey($i)) { $seedMap[$i] } else { $job.Seed + ($i - 1) }
-            if ($exitCode -eq 0 -and (Test-Path -LiteralPath $file)) {
+            if ($exitCode -eq 0 -and (Test-Path -LiteralPath $file) -and (Test-MossPngValid $file)) {
                 $ok++
                 $upscaledNote = $null
                 if ($up) {
@@ -2708,14 +3994,35 @@ try {
                     } catch {
                         $upscaledNote = ('kept at engine size {0} x {1} (resize failed: {2})' -f $up.FromW, $up.FromH, $_.Exception.Message)
                     }
+                } elseif ($job.PSObject.Properties['UpscaleModel'] -and [string]$job.UpscaleModel) {
+                    # Fast-sharpen run (same record as the live path): the
+                    # engine upscaled the result with the user-selected ESRGAN
+                    # model. Improves are single-image jobs and end up HERE
+                    # (the engine has usually already exited when the image is
+                    # processed), so this is the branch that normally runs.
+                    $upscaledNote = ('fast sharpen ({0})' -f (Split-Path -Leaf ([string]$job.UpscaleModel)))
                 }
+                # The sidecar must record the ACTUAL saved size (same rule as
+                # the live path): a fast-sharpen output is the engine's ESRGAN
+                # result (~2x the job's own W/H) and a hires run saves at 2x
+                # the base size. Regression note: this readback existed in
+                # v0.1.84 but was lost from THIS path in a later edit round -
+                # every single-image improve then recorded its render size
+                # (real case: a sidecar said 1280 x 720 for a 5120 x 2880 file).
+                $realW = [int]$job.Width; $realH = [int]$job.Height
+                try {
+                    $imgDim = [System.Drawing.Image]::FromFile($file)
+                    $realW = $imgDim.Width; $realH = $imgDim.Height
+                    $imgDim.Dispose()
+                } catch {}
                 try {
                     $meta = [ordered]@{
-                        Width = $job.Width; Height = $job.Height
+                        Width = $realW; Height = $realH
                         Steps = $job.Steps; CfgScale = $job.Cfg; Seed = $thisSeed
                         Backend = $job.Backend
                         SpeedMode = [string]$job.SpeedMode
                         UpscaledFrom = $upscaledNote
+                        HiresScale = $(if ($job.PSObject.Properties['HiresScale'] -and [double]$job.HiresScale -ge 1.5) { [double]$job.HiresScale } else { $null })
                         InitImage = $(if($job.InitImage){ [System.IO.Path]::GetFileName([string]$job.InitImage) }else{ $null })
                         InitStrength = $(if($job.InitImage){ [double]$job.InitStrength }else{ $null })
                         Sampler = $(if($job.SamplingMethod){ [string]$job.SamplingMethod }else{ $null })
@@ -2738,12 +4045,19 @@ try {
                         $meta.Prompt = [string]$job.Prompt
                         if ($job.NegativePrompt) { $meta.NegativePrompt = [string]$job.NegativePrompt }
                     }
-                    $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath ([System.IO.Path]::ChangeExtension($file, '.json')) -Encoding UTF8
+                    # Sidecar goes into the 'metadata' subfolder (see Get-MossSidecarPath)
+                    $sidePath = Get-MossSidecarPath $file
+                    $sideDir = [System.IO.Path]::GetDirectoryName($sidePath)
+                    if (-not (Test-Path -LiteralPath $sideDir)) { New-Item -ItemType Directory -Path $sideDir -Force | Out-Null }
+                    $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $sidePath -Encoding UTF8
                 } catch {}
                 [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = $exitCode; Seed = $thisSeed; Output = 'OK' })
                 [void]$fileList.Items.Add($file)
                 [void]$script:GeneratedFiles.Add($file)
                 $fileList.SelectedIndex = $fileList.Items.Count - 1
+            } elseif (Test-Path -LiteralPath $file) {
+                $corrupt.Add($file)
+                [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = $exitCode; Seed = $thisSeed; Output = 'Image file is corrupt or incomplete (write interrupted?) - not added to the list; the file stays on disk' })
             } else {
                 $missing.Add($file)
                 [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = $exitCode; Seed = $thisSeed; Output = 'Image file was not created' })
@@ -2756,6 +4070,10 @@ try {
             $outputText = "ERROR: Engine process returned exit code $exitCode.`r`n" + $outputText
             [void](Write-MossErrorLog ("MOSS generation error - batch of {0} image(s) (exit {1})" -f $job.Count, $exitCode) $outputText)
             $finalMsg = if ($ok -gt 0) { "Partially completed - $ok of $($job.Count) image(s) generated (engine exit $exitCode)" } else { "Generation failed - engine returned exit code $exitCode" }
+        } elseif ($corrupt.Count -gt 0) {
+            $outputText = ("ERROR: {0} expected image file(s) exist but are CORRUPT or incomplete (the write was interrupted - often a full disk, power loss or antivirus interference). They are NOT in the list; the broken files stay on disk so you can look at them:`r`n" -f $corrupt.Count) + (($corrupt | ForEach-Object { '  ' + $_ }) -join "`r`n") + "`r`n" + $outputText
+            [void](Write-MossErrorLog ("MOSS generation error - {0} of {1} image(s) corrupt/incomplete" -f $corrupt.Count, $job.Count) $outputText)
+            $finalMsg = "Partially completed - $ok of $($job.Count) image(s) generated; $($corrupt.Count) corrupt file(s) not listed"
         } elseif ($missing.Count -gt 0) {
             $outputText = ("ERROR: Engine returned exit code 0 but {0} expected image file(s) were not created:`r`n" -f $missing.Count) + (($missing | ForEach-Object { '  ' + $_ }) -join "`r`n") + "`r`n" + $outputText
             [void](Write-MossErrorLog ("MOSS generation error - {0} of {1} image(s) missing" -f $missing.Count, $job.Count) $outputText)
@@ -2806,12 +4124,51 @@ try {
                     }
                 }
                 if ($retryMode) {
-                    [void]$script:RefineQueue.Insert(0,[pscustomobject]@{ File=[string]$job.InitImage; W=[int]$job.Width; H=[int]$job.Height; Seed=[long]$job.Seed; Prompt=[string]$job.Prompt; NegativePrompt=[string]$job.NegativePrompt; SamplingMethod=$job.SamplingMethod; Scheduler=$job.Scheduler; Strength=[double]$job.InitStrength; Steps=[int]$job.ChosenSteps; Cfg=[double]$job.Cfg; Tag='hq'; SrcW=[int]$job.SrcW; SrcH=[int]$job.SrcH; ForcedSpeed=$retryMode })
+                    [void]$script:RefineQueue.Insert(0,[pscustomobject]@{ File=[string]$job.InitImage; W=[int]$job.Width; H=[int]$job.Height; Seed=[long]$job.Seed; Prompt=[string]$job.Prompt; NegativePrompt=[string]$job.NegativePrompt; SamplingMethod=$job.SamplingMethod; Scheduler=$job.Scheduler; Strength=[double]$job.InitStrength; Steps=[int]$job.ChosenSteps; Cfg=[double]$job.Cfg; Tag='hq'; SrcW=[int]$job.SrcW; SrcH=[int]$job.SrcH; ForcedSpeed=$retryMode; UpscaleModel=$(if($job.PSObject.Properties['UpscaleModel']){[string]$job.UpscaleModel}else{$null}) })
                     $oomHint += "`r`n`r`nMOSS will now AUTOMATICALLY RETRY this improvement with a SMALLER render size ($retryMode speed mode: rendered small with all steps, then enlarged to the full target) - the composition still comes from your image."
+                    $jobHires = 0.0; if ($job.PSObject.Properties['HiresScale']) { $jobHires = [double]$job.HiresScale }
+                    if ($jobHires -ge 1.5) {
+                        # The retry deliberately DROPS detail regeneration:
+                        # the enlarged second pass is exactly what ran out of
+                        # memory, so retrying with it would fail the same way.
+                        # Say so - the retried copy can stay soft.
+                        $oomHint += "`r`n`r`nThe retry runs WITHOUT detail regeneration (retrying the enlarged second pass would run out of memory the same way), so this copy can stay soft. Right-click it afterwards and use 'Improve this image' with detail regeneration for a sharp version."
+                    }
                 }
                 $log.AppendText($oomHint)
             }
         }
+        # Scheduler rejected by the engine (v0.1.86): the engine logs
+        # '[E] ... not compatible with X scheduler' and CONTINUES - the
+        # saved image can be blank white (verified: ays + dpm++2m). Exit
+        # code and file count look normal, so this must be checked on its
+        # own - otherwise the user silently gets a blank picture.
+        $rejectedSched = Get-MossSchedulerReject ($stdout + "`n" + $stderr)
+        if ($rejectedSched) {
+            $log.AppendText(("`r`nWARNING: the engine REJECTED the scheduler '{0}' and rendered WITHOUT it - the saved image(s) can be BLANK or wrong. Pick a different scheduler in Generation options (verified working on this model with all samplers: karras, discrete, exponential, sgm_uniform, simple, smoothstep, kl_optimal, logit_normal, beta, flux, bong_tangent, ltx2, flux2; note: 'ays' fails with second-order samplers like dpm++2m)." -f $rejectedSched))
+            [void](Write-MossErrorLog ('MOSS scheduler rejected by engine - ' + $rejectedSched) ($stdout + "`n" + $stderr))
+            $finalMsg = ($finalMsg -replace ' - scheduler was REJECTED.*$', '') + ' - scheduler was REJECTED by the engine (see the log above)'
+        }
+        # Record the measured speed for the benchmark system (actual seconds
+        # per image, from the live per-image durations) AND the integrated
+        # energy for the power ledger (v0.1.87: session / day / all time).
+        try {
+            $bmAvg = $null
+            if ($st.ImageDurations.Count -gt 0) { $bmAvg = (($st.ImageDurations | Measure-Object -Average).Average) }
+            if ($ok -gt 0 -and $bmAvg) { Add-MossBenchmarkEntry -Job $job -SecondsPerImage ([double]$bmAvg) -Images ([int]$ok) }
+        } catch {}
+        try {
+            # Energy ledger: the integrated draw of THIS engine run (measured
+            # via nvidia-smi where available, TDP estimate otherwise). The
+            # run counts once even when 0 images landed - the GPU still drew
+            # the power.
+            $pSec = [double]$st.PowerSeconds; $pJ = [double]$st.PowerJoules; $pMJ = [double]$st.PowerMeasuredJoules
+            if ($pSec -gt 0.5 -and $pJ -gt 0) {
+                Add-MossEnergyUsage -Joules $pJ -MeasuredJoules $pMJ -Seconds $pSec -Images ([int]$ok)
+                $pMethod = if ($st.PowerSmi -and $pMJ -gt 0) { 'measured (nvidia-smi)' } else { 'estimated from the GPU rating' }
+                $log.AppendText(("`r`nPower: this run used about {0:N2} kWh of GPU power over {1} ({2}; day and all-time totals in the Benchmarks dialog)." -f ($pJ / 3600000.0), (Format-MossDuration $pSec), $pMethod))
+            }
+        } catch {}
         $batchTimeText = ''
         if ($st.JobStartedAt) { $batchTimeText = ' | total time ' + (Format-MossDuration ((Get-Date) - $st.JobStartedAt).TotalSeconds) }
         # The log is a persistent record: the total time stays here after the
@@ -2833,6 +4190,19 @@ try {
     function Start-MossGeneration {
         param($Job,[switch]$ForRefine)
         if ($script:GenState.IsRunning) { return }
+        # Safe mode: one central gate for EVERY generation path - the main
+        # Generate button, improve dialogs, re-render and the automatic OOM
+        # retry. A blocked refine item is counted as failed and the queue
+        # continues with the next image, so an 'Improve ALL' batch never
+        # stalls on a blocked prompt.
+        if (-not (Test-MossPromptSafe ([string]$Job.Prompt))) {
+            $log.AppendText("`r`nSafe mode: this prompt was BLOCKED - it contains sexual or gore/violence terms. Nothing was generated.`r`nIf you meant to run this prompt: open Options... (next to the image settings) and UNTICK 'Safe mode', then Save and try again.")
+            $status.Text = 'Blocked by Safe mode - untick Safe mode in Options... to allow this prompt'
+            $generate.Enabled = $true
+            $cancel.Enabled = $false
+            if ($ForRefine) { $script:RefineFailCount += 1; Start-MossNextRefine }
+            return
+        }
         $script:GenState.IsRunning = $true
         $script:GenState.CancelRequested = $false
         $script:GenState.Job = $Job
@@ -2848,6 +4218,37 @@ try {
         $script:GenState.LiveCompletedImages = New-Object System.Collections.ArrayList
         $script:GenState.EtaShown = $null
         $script:GenState.EtaUpdatedAt = $null
+        # Seed the ETA from the benchmark store so it is meaningful from the
+        # first second (falls back to 'ETA calculating' when no data exists).
+        $script:GenState['PredictedPerImage'] = $null
+        # Detail-regeneration state: reset for EVERY run (stale phase data
+        # from a previous hires run would corrupt the next one). Power meter
+        # state: reset per job too, and resolve the measurement tool once
+        # per run (nvidia-smi when present, TDP estimate otherwise).
+        foreach ($hk in @('HiresPhase','HiresLastNum','HiresLastDen','HiresPhase1Steps','HiresPhase2Den','HiresLoggedPhase2','HiresBaseSec','HiresSecondSec')) { $script:GenState[$hk] = $null }
+        $script:GenState.PowerJoules = 0.0; $script:GenState.PowerMeasuredJoules = 0.0; $script:GenState.PowerSeconds = 0.0
+        $script:GenState.PowerLastSample = Get-Date; $script:GenState.PowerLastW = 250.0; $script:GenState.PowerLastMeasured = $false
+        $script:GenState.PowerSmi = Get-MossNvidiaSmiPath
+        $gpuNameEst = ''; try { $g0est = @($script:Inventory | Where-Object { -not $_.IsVirtual } | Select-Object -First 1); if ($g0est) { $gpuNameEst = [string]$g0est.Name } } catch {}
+        $script:GenState.PowerEstimateW = Get-MossPowerEstimateWatts (Get-MossGpuTdp $gpuNameEst)
+        try {
+            # Detail-regeneration jobs: estimate base pass + highres second
+            # pass from the SOURCE size - a plain estimate at the job's own
+            # W/H would predict only the base pass and undershoot badly.
+            $seedHires = 0.0; $seedSrcW = 0; $seedSrcH = 0
+            if ($Job.PSObject.Properties['HiresScale']) { $seedHires = [double]$Job.HiresScale }
+            if ($Job.PSObject.Properties['SrcW']) { $seedSrcW = [int]$Job.SrcW }
+            if ($Job.PSObject.Properties['SrcH']) { $seedSrcH = [int]$Job.SrcH }
+            $bmEst = Get-MossBenchmarkEstimate ([int]$Job.Width) ([int]$Job.Height) ([string]$Job.SpeedMode) ([int]$Job.Steps) ($null -ne $Job.InitImage) -HiresScale $seedHires -SrcW $seedSrcW -SrcH $seedSrcH
+            if ($bmEst) {
+                $script:GenState['PredictedPerImage'] = [double]$bmEst.Sec
+                # The two-pass parts power the phase-aware live ETA.
+                if ($seedHires -ge 1.5) {
+                    $script:GenState['HiresBaseSec'] = $(if ($bmEst.BaseSec) { [double]$bmEst.BaseSec } else { 0.0 })
+                    $script:GenState['HiresSecondSec'] = $(if ($bmEst.SecondSec) { [double]$bmEst.SecondSec } else { 0.0 })
+                }
+            }
+        } catch {}
 
         $timer = New-Object System.Windows.Forms.Timer
         $timer.Interval = 400
@@ -2874,9 +4275,32 @@ try {
         # bicubic upscale (sidecar notes UpscaledFrom). The soft look is baked
         # into the pixels, so image-to-image from this file inherits the blur.
         # True when the file should be re-rendered from scratch instead.
-        $side=[System.IO.Path]::ChangeExtension($file,'.json')
+        $side=Get-MossSidecarReadPath $file
         if (Test-Path -LiteralPath $side -PathType Leaf) {
             try { $sc = Get-Content -LiteralPath $side -Raw | ConvertFrom-Json; if ($sc.UpscaledFrom) { return $true }; if ($sc.SpeedMode -and [string]$sc.SpeedMode -ne 'Exact') { return $true } } catch {}
+        }
+        return $false
+    }
+
+    function Test-MossUltraSoftDraft([string]$file) {
+        # TRUE for the weakest class of fast drafts: rendered at a tiny size
+        # (Fastest = 128-px side, 8x = 35%) and pixel-enlarged. Measured limit:
+        # NO improve mode can create first-run detail from these - fast
+        # sharpen keeps the composition's softness at 50 AND at 100 chosen
+        # steps (controlled A/B on the user's own draft: both runs landed at
+        # the draft's softness), because a plain img2img inherits the blur
+        # baked into the pixels. Used to warn honestly in the improve dialog
+        # instead of letting the user expect a sharp copy.
+        $side=Get-MossSidecarReadPath $file
+        if (Test-Path -LiteralPath $side -PathType Leaf) {
+            try {
+                $sc = Get-Content -LiteralPath $side -Raw | ConvertFrom-Json
+                if ($sc.SpeedMode -and ([string]$sc.SpeedMode -eq '8x' -or [string]$sc.SpeedMode -eq 'Fast')) { return $true }
+                if ($sc.UpscaledFrom -and ([string]$sc.UpscaledFrom) -match 'upscaled from (\d+) x (\d+)') {
+                    $fromMax = [Math]::Max([int]$Matches[1],[int]$Matches[2])
+                    if ($fromMax -gt 0 -and $fromMax -le 320) { return $true }
+                }
+            } catch {}
         }
         return $false
     }
@@ -2885,7 +4309,7 @@ try {
         # How many times the stored image was enlarged from its original small
         # render (sidecar note 'upscaled from W x H'). Returns 1.0 when the
         # file is not a fast preview.
-        $side=[System.IO.Path]::ChangeExtension($file,'.json')
+        $side=Get-MossSidecarReadPath $file
         if (Test-Path -LiteralPath $side -PathType Leaf) {
             try {
                 $sc = Get-Content -LiteralPath $side -Raw | ConvertFrom-Json
@@ -2923,7 +4347,7 @@ try {
         # (decrypted only if the history code was entered), negative prompt,
         # sampler, scheduler and adaptive strength.
         $d = [pscustomobject]@{ File=[string]$selFile; TW=0; TH=0; Seed=[long]-1; Prompt=''; NegativePrompt=[string]$script:Settings.NegativePrompt; SamplingMethod=$null; Scheduler=$null; Strength=0.45; Error='' }
-        $sidecar = [System.IO.Path]::ChangeExtension($selFile, '.json')
+        $sidecar = Get-MossSidecarReadPath $selFile
         if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
             try { $sc = Get-Content -LiteralPath $sidecar -Raw | ConvertFrom-Json; if($sc.Width){$d.TW=[int]$sc.Width}; if($sc.Height){$d.TH=[int]$sc.Height} } catch {}
         }
@@ -2965,6 +4389,7 @@ try {
             [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (left-click it), then right-click to re-render it.','Re-render from seed')|Out-Null;return
         }
         $script:GenState.CancelRequested = $false
+        Approve-MossSidecarAdoption $selFile | Out-Null
         $d = Get-MossImproveDefaults $selFile 1
         if ($d.Error -eq 'size') { [System.Windows.Forms.MessageBox]::Show('Could not determine the image size.','Re-render from seed')|Out-Null;return }
         # Without the image's original prompt a fresh re-render from its seed
@@ -2983,7 +4408,7 @@ try {
         # loudly and point at the improve action instead.
         if (Test-MossFastPreview $selFile) {
             $upNote=''
-            try { $scP = Get-Content -LiteralPath ([System.IO.Path]::ChangeExtension($selFile,'.json')) -Raw | ConvertFrom-Json; if ($scP.UpscaledFrom) { $upNote=('It was upscaled from a small render ({0}). ' -f ([string]$scP.UpscaledFrom -replace '^upscaled from ','')) } } catch {}
+            try { $scP = Get-Content -LiteralPath (Get-MossSidecarReadPath $selFile) -Raw | ConvertFrom-Json; if ($scP.UpscaledFrom) { $upNote=('It was upscaled from a small render ({0}). ' -f ([string]$scP.UpscaledFrom -replace '^upscaled from ','')) } } catch {}
             $warnAnswer=[System.Windows.Forms.MessageBox]::Show(("This image is an upscaled fast DRAFT. {0}A fresh re-render at {1} x {2} with the same seed will NOT look like this picture - the seed does not preserve the composition across render sizes (the small draft and the full-size canvas are different noise patterns).`r`n`r`nIf you want a FULL-QUALITY VERSION OF THIS PICTURE, choose 'No' and use 'Improve this image' instead - it keeps the composition.`r`n`r`nContinue with the fresh re-render anyway?" -f $upNote,$d.TW,$d.TH),'Fresh re-render of a fast draft',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
             if($warnAnswer -ne [System.Windows.Forms.DialogResult]::Yes){return}
         }
@@ -3006,12 +4431,13 @@ try {
             [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (left-click it), then right-click to improve it.','Improve image')|Out-Null;return
         }
         $script:GenState.CancelRequested = $false
+        Approve-MossSidecarAdoption $selFile | Out-Null
         $cPrompt=($prompt.Text -replace "(\r?\n)+",' ').Trim()
         if(-not $cPrompt){
             # The prompt box is empty: fall back to the image's own prompt from
             # its sidecar (decrypted only when the history code was entered),
             # and prefill the box so the user can see what will be used.
-            $side=[System.IO.Path]::ChangeExtension($selFile,'.json')
+            $side=Get-MossSidecarReadPath $selFile
             if (Test-Path -LiteralPath $side -PathType Leaf) {
                 try {
                     $sc = Get-Content -LiteralPath $side -Raw | ConvertFrom-Json
@@ -3027,7 +4453,7 @@ try {
             # Distinguish WHY no prompt is available: the most common case is
             # an ENCRYPTED sidecar prompt with no history code entered. Give
             # a specific, actionable error instead of a generic one.
-            $sideNow=[System.IO.Path]::ChangeExtension($selFile,'.json')
+            $sideNow=Get-MossSidecarReadPath $selFile
             $encryptedNoCode=$false
             if (Test-Path -LiteralPath $sideNow -PathType Leaf) {
                 try { $scN = Get-Content -LiteralPath $sideNow -Raw | ConvertFrom-Json; if ($scN.PromptProtected) { $encryptedNoCode=$true } } catch {}
@@ -3043,7 +4469,7 @@ try {
         # noise pattern aligned (same-seed improves are sharp, random-seed
         # improves are muddy - verified with real runs).
         $imgSeed=[long]-1
-        $sideForSeed=[System.IO.Path]::ChangeExtension($selFile,'.json')
+        $sideForSeed=Get-MossSidecarReadPath $selFile
         if (Test-Path -LiteralPath $sideForSeed -PathType Leaf) {
             try { $scS = Get-Content -LiteralPath $sideForSeed -Raw | ConvertFrom-Json; if ($scS.Seed) { $imgSeed=[long]$scS.Seed } } catch {}
         }
@@ -3058,7 +4484,7 @@ try {
         # window and editable. The result is a NEW file - the original is
         # never touched.
         $g=New-Object System.Windows.Forms.Form
-        $g.Text='Improve this image'; $g.Size=New-Object System.Drawing.Size(600,466); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false; $g.MinimizeBox=$false
+        $g.Text='Improve this image'; $g.Size=New-Object System.Drawing.Size(600,614); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false; $g.MinimizeBox=$false
         $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
         $ttl=New-Object System.Windows.Forms.Label; $ttl.Text=('Improve  ' + [System.IO.Path]::GetFileName($selFile)); $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',11,[System.Drawing.FontStyle]::Bold); $ttl.Location=New-Object System.Drawing.Point(14,10); $ttl.AutoSize=$true; $g.Controls.Add($ttl)
         $sub=New-Object System.Windows.Forms.Label; $sub.Text=('Same picture, your chosen quality. Composition and seed come from this image (source {0} x {1}). The result is saved as a NEW file - the original is never modified.' -f $csW,$csH); $sub.Location=New-Object System.Drawing.Point(14,42); $sub.Size=New-Object System.Drawing.Size(556,46); $sub.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($sub)
@@ -3070,14 +4496,53 @@ try {
         $twoBtn=New-Object System.Windows.Forms.Button; $twoBtn.Text='2x'; $twoBtn.Location=New-Object System.Drawing.Point(378,92); $twoBtn.Size=New-Object System.Drawing.Size(56,30); $g.Controls.Add($twoBtn)
         $fourBtn=New-Object System.Windows.Forms.Button; $fourBtn.Text='4x'; $fourBtn.Location=New-Object System.Drawing.Point(442,92); $fourBtn.Size=New-Object System.Drawing.Size(56,30); $g.Controls.Add($fourBtn)
         $szNote=New-Object System.Windows.Forms.Label; $szNote.Text="Default: the image's own size. 2x/4x enlarge it. Above ~4.5 MP the render runs at HALF SIZE with all steps and is enlarged automatically - never distorted. If the native render runs out of memory, MOSS retries at half size automatically."; $szNote.Location=New-Object System.Drawing.Point(14,132); $szNote.Size=New-Object System.Drawing.Size(556,48); $szNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($szNote)
-        $stLab=New-Object System.Windows.Forms.Label; $stLab.Text='Steps'; $stLab.Location=New-Object System.Drawing.Point(14,192); $stLab.AutoSize=$true; $g.Controls.Add($stLab)
-        $stIn=New-Object System.Windows.Forms.TextBox; $stIn.Text=([string]$script:Settings.Steps); $stIn.Location=New-Object System.Drawing.Point(110,188); $stIn.Size=New-Object System.Drawing.Size(70,26); $g.Controls.Add($stIn)
-        $cfLab=New-Object System.Windows.Forms.Label; $cfLab.Text='CFG scale'; $cfLab.Location=New-Object System.Drawing.Point(210,192); $cfLab.AutoSize=$true; $g.Controls.Add($cfLab)
-        $cfIn=New-Object System.Windows.Forms.TextBox; $cfIn.Text=([string]$script:Settings.CfgScale); $cfIn.Location=New-Object System.Drawing.Point(290,188); $cfIn.Size=New-Object System.Drawing.Size(70,26); $g.Controls.Add($cfIn)
-        $cfTip=New-Object System.Windows.Forms.Label; $cfTip.Text='(from the main window - editable)'; $cfTip.Location=New-Object System.Drawing.Point(376,192); $cfTip.AutoSize=$true; $cfTip.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($cfTip)
-        $sdLab=New-Object System.Windows.Forms.Label; $sdLab.Text='Seed'; $sdLab.Location=New-Object System.Drawing.Point(14,232); $sdLab.AutoSize=$true; $g.Controls.Add($sdLab)
-        $sdIn=New-Object System.Windows.Forms.TextBox; $sdIn.Text=([string]$imgSeed); $sdIn.Location=New-Object System.Drawing.Point(110,228); $sdIn.Size=New-Object System.Drawing.Size(130,26); $g.Controls.Add($sdIn)
-        $sdNote=New-Object System.Windows.Forms.Label; if($imgSeed -ge 0){ $sdNote.Text=" (the image's own seed - keeps the result aligned; -1 = random)" } else { $sdNote.Text=' (no stored seed - a random seed will be used)' }; $sdNote.Location=New-Object System.Drawing.Point(256,232); $sdNote.Size=New-Object System.Drawing.Size(300,32); $sdNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($sdNote)
+        # QUALITY MODE (three choices, replaces the old detail-regeneration
+        # checkbox): plain same-size improve, FAST SHARPEN (single sampling
+        # pass + the ESRGAN upscaler model - much faster than detail
+        # regeneration), or DETAIL REGENERATION (the engine's highres fix:
+        # base pass + a full second sampling pass at 2x - slowest, best
+        # composition fidelity). Verified: a plain img2img from an upscaled
+        # draft cannot sharpen it - a sharp mode is needed for drafts.
+        # The USER picks the upscaler model (any .pth in models\upscalers) -
+        # MOSS never overrides that choice. FALLBACK: without an upscaler
+        # model file the fast option is disabled and drafts default to
+        # detail regeneration - the path that worked before - so MOSS keeps
+        # working offline or when the download is unavailable.
+        $upscaleModels = Get-MossUpscalerModels
+        $upscalePath = Get-MossDefaultUpscaleModel
+        $rSame=New-Object System.Windows.Forms.RadioButton; $rSame.Text='Same size (fastest) - plain improve'; $rSame.Location=New-Object System.Drawing.Point(14,184); $rSame.Size=New-Object System.Drawing.Size(556,22); $rSame.ForeColor=$g.ForeColor; $g.Controls.Add($rSame)
+        $rFast=New-Object System.Windows.Forms.RadioButton; $rFast.Text='Sharp - fast upscaler (recommended for drafts: renders at half size in ONE pass, then the upscaler sharpens to 2x)'; $rFast.Location=New-Object System.Drawing.Point(14,206); $rFast.Size=New-Object System.Drawing.Size(556,22); $rFast.ForeColor=$g.ForeColor; $rFast.Enabled=($null -ne $upscalePath); $g.Controls.Add($rFast)
+        $umLab=New-Object System.Windows.Forms.Label; $umLab.Text='Upscaler model (yours to pick):'; $umLab.Location=New-Object System.Drawing.Point(14,232); $umLab.Size=New-Object System.Drawing.Size(180,20); $umLab.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($umLab)
+        $umCombo=New-Object System.Windows.Forms.ComboBox; $umCombo.DropDownStyle='DropDownList'; $umCombo.Location=New-Object System.Drawing.Point(200,228); $umCombo.Size=New-Object System.Drawing.Size(370,24); foreach($m in $upscaleModels){ [void]$umCombo.Items.Add((Split-Path -Leaf $m)) }; if($upscalePath){ $umCombo.SelectedIndex=[Math]::Max(0,@($upscaleModels).IndexOf($upscalePath)) }; $umCombo.ForeColor=$g.ForeColor; $umCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $g.Controls.Add($umCombo)
+        $rHires=New-Object System.Windows.Forms.RadioButton; $rHires.Text='Sharp - detail regeneration (slowest: about 3-4x the plain render time)'; $rHires.Location=New-Object System.Drawing.Point(14,258); $rHires.Size=New-Object System.Drawing.Size(556,22); $rHires.ForeColor=$g.ForeColor; $g.Controls.Add($rHires)
+        if(-not $rFast.Enabled){ $rFast.Text='Sharp - fast upscaler (unavailable: no upscaler model file in models\upscalers - restart MOSS to download it)' }
+        # Drafts default to fast sharpen (user request: make improves faster);
+        # falls back to detail regeneration when the upscaler is not installed.
+        if($isPreview){ if($rFast.Enabled){ $rFast.Checked=$true } else { $rHires.Checked=$true } } else { $rSame.Checked=$true }
+        # The current quality mode, used by the steps note and the estimate
+        # (defined EARLY: the steps-note scriptblock below reads it at
+        # construction time, dynamic scoping only helps inside handlers).
+        $currentMode={ if($rFast.Checked){2}elseif($rHires.Checked){1}else{0} }
+        # FAST SAMPLER DEFAULT (v0.1.86, verified on the real engine):
+        # dpm++2m + karras needs about HALF the euler steps for the same
+        # detail (euler 67 steps 40.9 s vs dpm++2m+karras 34 steps 24.3 s at
+        # 1360 x 768, same seed, detail equal or better). Default ON unless
+        # the user picked a sampler or scheduler in Generation options -
+        # that explicit choice is then used verbatim.
+        $fastChk=New-Object System.Windows.Forms.CheckBox; $fastChk.Text='Fast sampler (recommended): dpm++2m + karras - half the steps for plain improves, FULL steps for sharp modes'; $fastChk.Location=New-Object System.Drawing.Point(14,282); $fastChk.Size=New-Object System.Drawing.Size(556,22); $fastChk.ForeColor=$g.ForeColor; $g.Controls.Add($fastChk)
+        $fastChk.Checked=$true
+        if(([string]$script:Settings.SamplingMethod -ne 'Default (model)') -or ([string]$script:Settings.Scheduler -ne 'Default (model)')){
+            $fastChk.Checked=$false; $fastChk.Enabled=$false
+            $fastChk.Text='Fast sampler off: you picked a sampler/scheduler in Generation options - it is used exactly as chosen'
+        }
+        $stLab=New-Object System.Windows.Forms.Label; $stLab.Text='Steps'; $stLab.Location=New-Object System.Drawing.Point(14,322); $stLab.AutoSize=$true; $g.Controls.Add($stLab)
+        $stIn=New-Object System.Windows.Forms.TextBox; $stIn.Text=([string]$script:Settings.Steps); $stIn.Location=New-Object System.Drawing.Point(110,318); $stIn.Size=New-Object System.Drawing.Size(70,26); $g.Controls.Add($stIn)
+        $cfLab=New-Object System.Windows.Forms.Label; $cfLab.Text='CFG scale'; $cfLab.Location=New-Object System.Drawing.Point(210,322); $cfLab.AutoSize=$true; $g.Controls.Add($cfLab)
+        $cfIn=New-Object System.Windows.Forms.TextBox; $cfIn.Text=([string]$script:Settings.CfgScale); $cfIn.Location=New-Object System.Drawing.Point(290,318); $cfIn.Size=New-Object System.Drawing.Size(70,26); $g.Controls.Add($cfIn)
+        $cfTip=New-Object System.Windows.Forms.Label; $cfTip.Text='(from the main window - editable)'; $cfTip.Location=New-Object System.Drawing.Point(376,322); $cfTip.AutoSize=$true; $cfTip.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($cfTip)
+        $sdLab=New-Object System.Windows.Forms.Label; $sdLab.Text='Seed'; $sdLab.Location=New-Object System.Drawing.Point(14,360); $sdLab.AutoSize=$true; $g.Controls.Add($sdLab)
+        $sdIn=New-Object System.Windows.Forms.TextBox; $sdIn.Text=([string]$imgSeed); $sdIn.Location=New-Object System.Drawing.Point(110,356); $sdIn.Size=New-Object System.Drawing.Size(130,26); $g.Controls.Add($sdIn)
+        $sdNote=New-Object System.Windows.Forms.Label; if($imgSeed -ge 0){ $sdNote.Text=" (the image's own seed - keeps the result aligned; -1 = random)" } else { $sdNote.Text=' (no stored seed - a random seed will be used)' }; $sdNote.Location=New-Object System.Drawing.Point(256,360); $sdNote.Size=New-Object System.Drawing.Size(300,32); $sdNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($sdNote)
         $stNoteBase=('Strength {0} (from Options). Image-to-image: the composition comes from the image - low strength = very faithful, high = more changes.{1}' -f $cStrength,($(if($isPreview){' This is an upscaled fast draft, so a raised strength is used automatically: detail is regenerated instead of the blurry enlargement.'}else{''})))
         # ALL chosen steps always run: img2img would skip early steps (about
         # steps x strength), so MOSS raises the ENGINE step count to
@@ -3085,13 +4550,49 @@ try {
         # steps at strength 0,6148 -> t_enc 49 -> exactly 50 sampling steps.
         $stepsEffText={
             $n=0
-            if([int]::TryParse($stIn.Text,[ref]$n) -and $cStrength -gt 0.01 -and $cStrength -lt 1){ (' All {0} denoising steps run at this strength (MOSS raises the engine step count to {1} for that, since the strength alone would skip the early ones).' -f $n, [Math]::Ceiling(($n - 1) / $cStrength)) } else { '' }
+            if(-not [int]::TryParse($stIn.Text,[ref]$n)){ return '' }
+            if($fastChk.Checked -and $n -ge 2){
+                if((& $currentMode) -eq 0){
+                    $half=Get-MossFastImproveSteps $n
+                    $engHalf=[Math]::Ceiling(($half - 1) / $cStrength)
+                    return (' Fast sampler ON (plain mode): dpm++2m + karras runs {0} of your {1} steps (verified equal detail at ~40% less time) - the engine step count is {2} so all of them run at this strength.' -f $half,$n,$engHalf)
+                }
+                $engFull=[Math]::Ceiling(($n - 1) / $cStrength)
+                return (' Fast sampler ON (sharp mode): dpm++2m + karras runs ALL {0} steps at FULL count (verified: sharp-mode detail scales with the step count) - the engine step count is {1}.' -f $n,$engFull)
+            }
+            if($cStrength -gt 0.01 -and $cStrength -lt 1){ (' All {0} denoising steps run at this strength (MOSS raises the engine step count to {1} for that, since the strength alone would skip the early ones).' -f $n, [Math]::Ceiling(($n - 1) / $cStrength)) } else { '' }
         }
-        $stNote=New-Object System.Windows.Forms.Label; $stNote.Text=($stNoteBase + (& $stepsEffText)); $stNote.Location=New-Object System.Drawing.Point(14,274); $stNote.Size=New-Object System.Drawing.Size(556,66); $stNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($stNote)
+        $stNote=New-Object System.Windows.Forms.Label; $stNote.Text=($stNoteBase + (& $stepsEffText)); $stNote.Location=New-Object System.Drawing.Point(14,394); $stNote.Size=New-Object System.Drawing.Size(556,62); $stNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($stNote)
         $stIn.Add_TextChanged({ $stNote.Text = ($stNoteBase + (& $stepsEffText)) })
-        $pNote=New-Object System.Windows.Forms.Label; $pNote.Text='Prompt: the text in the main window prompt box (change it there first).'; $pNote.Location=New-Object System.Drawing.Point(14,346); $pNote.Size=New-Object System.Drawing.Size(556,32); $pNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($pNote)
-        $impBtn=New-Object System.Windows.Forms.Button; $impBtn.Text='Improve'; $impBtn.Location=New-Object System.Drawing.Point(320,388); $impBtn.Size=New-Object System.Drawing.Size(120,32); $g.Controls.Add($impBtn)
-        $cnBtn=New-Object System.Windows.Forms.Button; $cnBtn.Text='Cancel'; $cnBtn.Location=New-Object System.Drawing.Point(452,388); $cnBtn.Size=New-Object System.Drawing.Size(100,32); $g.Controls.Add($cnBtn)
+        $fastChk.Add_CheckedChanged({ $stNote.Text = ($stNoteBase + (& $stepsEffText)) })
+        # LIVE TIME ESTIMATE for the CURRENT dialog values (quality mode,
+        # target size, steps), extrapolated from the benchmark store - the
+        # popup texts below reuse the same numbers instead of a hardcoded
+        # 'about 15 minutes' claim that ignored the image size and steps.
+        $estLbl=New-Object System.Windows.Forms.Label; $estLbl.Location=New-Object System.Drawing.Point(14,460); $estLbl.Size=New-Object System.Drawing.Size(556,28); $estLbl.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $g.Controls.Add($estLbl)
+        $updateEst={
+            try {
+                $ew=0; $eh=0; $es=0
+                $okW=[int]::TryParse($wIn.Text,[ref]$ew); $okH=[int]::TryParse($hIn.Text,[ref]$eh); $okS=[int]::TryParse($stIn.Text,[ref]$es)
+                if(-not ($okW -and $okH -and $okS)){ $estLbl.Text='Enter valid sizes and steps to see a time estimate.'; return }
+                if($fastChk.Checked -and (& $currentMode) -eq 0){ $es=Get-MossFastImproveSteps $es }   # halving is plain-mode only; sharp modes run FULL steps
+                $est=Get-MossImproveTimeEstimate $csW $csH $ew $eh $cStrength $es (& $currentMode)
+                if($est.Known){
+                    $m = & $currentMode
+                    if($m -eq 1){ $estLbl.Text=('Estimated: ~{0} total (base pass + highres second pass, from your measured runs).' -f (Format-MossDuration ([double]$est.Sec))) }
+                    elseif($m -eq 2){ $estLbl.Text=('Estimated: ~{0} + a few seconds of upscaling (single pass, from your measured runs).' -f (Format-MossDuration ([double]$est.Sec))) }
+                    else { $estLbl.Text=('Estimated: ~{0} (from your measured runs).' -f (Format-MossDuration ([double]$est.Sec))) }
+                } else { $estLbl.Text='No benchmark data yet for a time estimate - measured runs fill this in automatically.' }
+            } catch { $estLbl.Text='' }
+        }
+        & $updateEst
+        $wIn.Add_TextChanged({ & $updateEst }); $hIn.Add_TextChanged({ & $updateEst })
+        $stIn.Add_TextChanged({ & $updateEst })
+        $fastChk.Add_CheckedChanged({ & $updateEst })
+        $rSame.Add_CheckedChanged({ & $updateEst }); $rFast.Add_CheckedChanged({ & $updateEst }); $rHires.Add_CheckedChanged({ & $updateEst })
+        $pNote=New-Object System.Windows.Forms.Label; $pNote.Text='Prompt: the text in the main window prompt box (change it there first).'; $pNote.Location=New-Object System.Drawing.Point(14,492); $pNote.Size=New-Object System.Drawing.Size(556,32); $pNote.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($pNote)
+        $impBtn=New-Object System.Windows.Forms.Button; $impBtn.Text='Improve'; $impBtn.Location=New-Object System.Drawing.Point(320,530); $impBtn.Size=New-Object System.Drawing.Size(120,32); $g.Controls.Add($impBtn)
+        $cnBtn=New-Object System.Windows.Forms.Button; $cnBtn.Text='Cancel'; $cnBtn.Location=New-Object System.Drawing.Point(452,530); $cnBtn.Size=New-Object System.Drawing.Size(100,32); $g.Controls.Add($cnBtn)
         $g.AcceptButton=$impBtn; $g.CancelButton=$cnBtn
         $sameBtn.Add_Click({ $wIn.Text=[string]$csW; $hIn.Text=[string]$csH })
         $twoBtn.Add_Click({ $wIn.Text=[string][Math]::Min(8192,([int]$csW*2)); $hIn.Text=[string][Math]::Min(8192,([int]$csH*2)) })
@@ -3103,20 +4604,216 @@ try {
             if(-not [int]::TryParse($stIn.Text,[ref]$cst) -or $cst -lt 1 -or $cst -gt 200){[System.Windows.Forms.MessageBox]::Show($g,'Steps must be between 1 and 200.','Invalid steps')|Out-Null;return}
             if(-not (ConvertTo-MossDouble $cfIn.Text ([ref]$ccf)) -or $ccf -le 0 -or $ccf -gt 30){[System.Windows.Forms.MessageBox]::Show($g,'CFG scale must be greater than 0 and no more than 30 (dot or comma both work, e.g. 3.5 or 3,5).','Invalid CFG')|Out-Null;return}
             if(-not [int]::TryParse($sdIn.Text,[ref]$csd) -or $csd -lt -1){[System.Windows.Forms.MessageBox]::Show($g,'Seed must be -1 (random) or a non-negative integer.','Invalid seed')|Out-Null;return}
-            $finalMP=[Math]::Round((([double]$cw*[double]$chh)/1000000.0),1)
-            $bigNote=''; $aspectNote=''
-            if($finalMP -gt 4.5){ $bigNote=("`r`n`r`nNote: {0} MP is above what most GPUs render natively - it will be rendered at HALF SIZE with all {1} steps and enlarged automatically. If the native render runs out of memory, MOSS automatically retries at half size." -f $finalMP,$cst) }
-            if($csW -gt 0 -and $csH -gt 0){ $srcA=[double]$csW/[double]$csH; $tgtA=[double]$cw/[double]$chh; if($tgtA -gt 0 -and [Math]::Abs($srcA/$tgtA-1) -gt 0.02){ $aspectNote=("`r`n`r`nNote: the target size has a different aspect ratio than the image ({0} x {1} -> {2} x {3}) - the composition will be squashed or stretched and the result can look worse. Use matching proportions for the best quality." -f $csW,$csH,$cw,$chh) } }
-            if($bigNote -or $aspectNote){ $ans=[System.Windows.Forms.MessageBox]::Show($g,("Start the improve with {0} x {1} ({2} MP)?{3}{4}" -f $cw,$chh,$finalMP,$bigNote,$aspectNote),'Improve this image',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question); if($ans -ne [System.Windows.Forms.DialogResult]::Yes){return} }
+            $mode = & $currentMode
+            # Fast sampler (v0.1.90, mode-aware): the step HALVING applies to
+            # PLAIN improves only - verified equal detail at half the steps.
+            # For the SHARP modes the steps stay FULL: detail scales strongly
+            # with the step count (real draft, matched scale: fast sharpen
+            # 58 engine steps = laplacian 387, 134 steps = 1308; the hires
+            # second pass 58 steps = 30, 165 steps = 387). dpm++2m+karras
+            # still applies as the sampler (its speed advantage is real).
+            if($fastChk.Checked -and $mode -eq 0){ $cst=Get-MossFastImproveSteps $cst }
+            if($mode -eq 0){
+                # Plain improve at the chosen size: the size warnings apply.
+                $finalMP=[Math]::Round((([double]$cw*[double]$chh)/1000000.0),1)
+                $bigNote=''; $aspectNote=''
+                if($finalMP -gt 4.5){ $bigNote=("`r`n`r`nNote: {0} MP is above what most GPUs render natively - it will be rendered at HALF SIZE with all {1} steps and enlarged automatically. If the native render runs out of memory, MOSS automatically retries at half size." -f $finalMP,$cst) }
+                if($csW -gt 0 -and $csH -gt 0){ $srcA=[double]$csW/[double]$csH; $tgtA=[double]$cw/[double]$chh; if($tgtA -gt 0 -and [Math]::Abs($srcA/$tgtA-1) -gt 0.02){ $aspectNote=("`r`n`r`nNote: the target size has a different aspect ratio than the image ({0} x {1} -> {2} x {3}) - the composition will be squashed or stretched and the result can look worse. Use matching proportions for the best quality." -f $csW,$csH,$cw,$chh) } }
+                if($bigNote -or $aspectNote){
+                    $bEst=Get-MossImproveTimeEstimate $csW $csH $cw $chh $cStrength $cst 0
+                    $estLine=$(if($bEst.Known){("`r`n`r`nEstimated render time: ~{0}." -f (Format-MossDuration ([double]$bEst.Sec)))}else{''})
+                    $ans=[System.Windows.Forms.MessageBox]::Show($g,("Start the improve with {0} x {1} ({2} MP)?{3}{4}{5}" -f $cw,$chh,$finalMP,$bigNote,$aspectNote,$estLine),'Improve this image',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question); if($ans -ne [System.Windows.Forms.DialogResult]::Yes){return}
+                }
+            }
             $useSampler=$null; if([string]$script:Settings.SamplingMethod -ne 'Default (model)'){ $useSampler=[string]$script:Settings.SamplingMethod }
             $useSched=$null; if([string]$script:Settings.Scheduler -ne 'Default (model)'){ $useSched=[string]$script:Settings.Scheduler }
-            [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$cw; H=$chh; Seed=$csd; Prompt=$cPrompt; NegativePrompt=[string]$script:Settings.NegativePrompt; SamplingMethod=$useSampler; Scheduler=$useSched; Strength=$cStrength; Steps=$cst; Cfg=$ccf; Tag='hq'; SrcW=$csW; SrcH=$csH })
+            if($fastChk.Checked){ $useSampler='dpm++2m'; $useSched='karras' }   # verified fast+equal-detail default; explicit user choices above win
+            $hiresScale=0; $upModel=$null
+            if($mode -eq 1){
+                # Detail regeneration: the size inputs are IGNORED - the base
+                # pass runs at the image's OWN size and the highres second
+                # pass doubles it (verified sharp: 1360x768 draft -> 2720x1536).
+                $hiresScale=2
+                $hEst=Get-MossImproveTimeEstimate $csW $csH $cw $chh $cStrength $cst 1
+                $hTimeLine=$(if($hEst.Known){('Estimated from your measured runs: about {0} total (the highres second pass is the slow part).' -f (Format-MossDuration ([double]$hEst.Sec)))}else{'This takes roughly 3-4x the normal improve time.'})
+                $hrAnswer=[System.Windows.Forms.MessageBox]::Show($g,("Detail regeneration ON: the render first keeps the composition at {0} x {1}, then re-synthesizes sharp detail at {2} x {3}.`r`n`r`n{4}`r`n`r`nStart now?" -f $csW,$csH,(2*$csW),(2*$csH),$hTimeLine),'Improve this image',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Information); if($hrAnswer -ne [System.Windows.Forms.DialogResult]::Yes){return}
+            } elseif($mode -eq 2){
+                # Fast sharpen: single sampling pass at the image's own size,
+                # then the ESRGAN upscaler model THE USER PICKED sharpens it
+                # in pixel space - no second sampling pass, much faster than
+                # detail regeneration. The model choice is never overridden.
+                # FALLBACK: if the upscaler model file vanished (download
+                # unavailable?), MOSS falls back to detail regeneration -
+                # the path that always worked.
+                $upModel=$null; $umName=''
+                if($umCombo.SelectedIndex -ge 0){ $umName=[string]$umCombo.SelectedItem; $upModel=[string]$upscaleModels[$umCombo.SelectedIndex] }
+                if(-not $upModel -or -not (Test-Path -LiteralPath $upModel -PathType Leaf)){
+                    $fbAnswer=[System.Windows.Forms.MessageBox]::Show($g,"The fast upscaler model file is missing (it may not have been downloaded yet).`r`n`r`nMOSS can use the slower DETAIL REGENERATION instead (about 3-4x the render time, output also 2x). Use it now?",'Upscaler unavailable',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+                    if($fbAnswer -ne [System.Windows.Forms.DialogResult]::Yes){return}
+                    $hiresScale=2
+                } else {
+                    $fEst=Get-MossImproveTimeEstimate $csW $csH $csW $csH $cStrength $cst 2
+                    $fTimeLine=$(if($fEst.Known){('Estimated from your measured runs: about {0} plus a few seconds of upscaling.' -f (Format-MossDuration ([double]$fEst.Sec)))}else{'This takes about the plain improve time plus a few seconds of upscaling.'})
+                    # Ultra-soft drafts (v0.1.92): fast sharpen cannot rescue
+                    # the smallest fast drafts - measured, no step count
+                    # helps. Say so BEFORE the run instead of delivering a
+                    # predictable disappointment (the user's own A/B proved
+                    # it: 50 and 100 chosen steps, same softness).
+                    $softLine=''
+                    if (Test-MossUltraSoftDraft $selFile) { $softLine="`r`n`r`nNOTE: this image is an ULTRA-soft draft (its original render was tiny, then enlarged - see the image info). Fast sharpen keeps that composition and the copy will stay soft: NO improve mode can create first-run detail from it (measured: 50 and 100 chosen steps land at the same softness). For a sharp image, render fresh at full quality instead." }
+                    $fAnswer=[System.Windows.Forms.MessageBox]::Show($g,("Fast sharpen ON with upscaler model '{0}': the render runs at {1} x {2} (half the image's size) in ONE pass, then the upscaler sharpens/enlarges it in pixel space to about {3} x {4} - much faster than detail regeneration.`r`n`r`n{5}{6}`r`n`r`nStart now?" -f $umName,$qW,$qH,(2*$csW),(2*$csH),$fTimeLine,$softLine),'Improve this image',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Information); if($fAnswer -ne [System.Windows.Forms.DialogResult]::Yes){return}
+                }
+            } else {
+                # A plain img2img cannot make an upscaled draft sharp (verified);
+                # if the source is a soft draft and the user picked the plain
+                # mode, say so once rather than delivering a predictably soft copy.
+                if($isPreview){
+                    $pEst=Get-MossImproveTimeEstimate $csW $csH $cw $chh $cStrength $cst 0
+                    $pTimeLine=$(if($pEst.Known){('`r`n`r`nEstimated from your measured runs: about {0}.' -f (Format-MossDuration ([double]$pEst.Sec)))}else{''})
+                    $softAnswer=[System.Windows.Forms.MessageBox]::Show($g,("This image is an upscaled fast draft. Without a sharp mode the improved copy will keep the draft's softness (the composition cannot gain detail it was never given).`r`n`r`nPick 'Sharp 2x' for a much sharper result (slower), or continue with the soft copy anyway?{0}" -f $pTimeLine),'Improve this image',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question); if($softAnswer -ne [System.Windows.Forms.DialogResult]::Yes){return}
+                }
+            }
+            # Sharp modes render at fixed sizes and save scaled: detail
+            # regeneration runs the base pass at the image's OWN size; fast
+            # sharpen renders at HALF the image's size and the x4 upscaler
+            # sharpens it back to 2x. The size inputs above are IGNORED for
+            # those modes.
+            $qW=$cw; $qH=$chh
+            if($mode -eq 1){ $qW=$csW; $qH=$csH }
+            elseif($mode -eq 2){ $qW=[Math]::Max(128,[int][Math]::Floor($csW/2)); $qH=[Math]::Max(128,[int][Math]::Floor($csH/2)) }
+            [void]$script:RefineQueue.Add([pscustomobject]@{ File=$selFile; W=$qW; H=$qH; Seed=$csd; Prompt=$cPrompt; NegativePrompt=[string]$script:Settings.NegativePrompt; SamplingMethod=$useSampler; Scheduler=$useSched; Strength=$cStrength; Steps=$cst; Cfg=$ccf; Tag='hq'; SrcW=$csW; SrcH=$csH; HiresScale=$hiresScale; UpscaleModel=$upModel })
             $script:RefineTotal = $script:RefineQueue.Count
             $g.Close()
             Start-MossNextRefine
         })
         [void]$g.ShowDialog($f)
         $g.Dispose()
+    }
+
+    function Get-MossFastImproveSteps([int]$ChosenSteps) {
+        # Fast-sampler default for improves: dpm++2m + karras converges in
+        # about HALF the euler steps (verified on the real engine, same seed
+        # and settings: euler 67 steps 40.9 s vs dpm++2m+karras 34 steps
+        # 24.3 s at 1360 x 768, detail equal or better - laplacian variance
+        # 30.1 vs 26.9). Pure helper so the dialogs, the bulk plan and the
+        # queue all agree on one rule. Minimum 2 steps.
+        if ($ChosenSteps -lt 2) { return $ChosenSteps }
+        return [Math]::Max(2, [Math]::Ceiling($ChosenSteps / 2.0))
+    }
+
+    function Get-MossSchedulerReject([string]$EngineOutput) {
+        # The engine REJECTS an unsupported scheduler with an [E] line and
+        # then CONTINUES RENDERING - the result can be a blank white image
+        # (verified: --scheduler ays + --sampling-method dpm++2m rendered a
+        # fully white 480 x 270 file, exit code 0). Detect the line so the
+        # user is told instead of silently getting garbage. Returns the
+        # rejected scheduler name, or $null when the output is clean.
+        if (-not $EngineOutput) { return $null }
+        $m = [regex]::Match($EngineOutput, '(?m)^\[E\][^\r\n]*not compatible with ([A-Za-z0-9_]+) scheduler')
+        if ($m.Success) { return $m.Groups[1].Value }
+        return $null
+    }
+
+    function Get-MossImproveTimeEstimate([int]$SrcW,[int]$SrcH,[int]$TargetW,[int]$TargetH,[double]$Strength,[int]$ChosenSteps,[int]$Mode = 0) {
+        # Rough render time for ONE improve job, extrapolated from the
+        # benchmark store. Mode 0 = plain img2img at the target size;
+        # Mode 1 = detail regeneration (base pass at the source size + the
+        # highres second pass at 2x); Mode 2 = fast sharpen (base pass at
+        # the source size + ESRGAN upscaler to 2x - single sampling pass,
+        # the upscaling itself adds only seconds). Engine steps follow the
+        # same rule the queue applies (ceil((chosen-1)/strength)) so ALL
+        # chosen steps are counted.
+        # Returns Sec/Known/BaseSec/SecondSec/Based - Known $false without data.
+        if ($SrcW -lt 64 -or $SrcH -lt 64) { return [pscustomobject]@{ Sec=$null; Known=$false; BaseSec=$null; SecondSec=$null; Based='' } }
+        $engSteps = $ChosenSteps
+        if ($Strength -gt 0.01 -and $Strength -lt 1 -and $ChosenSteps -gt 1) { $engSteps = [Math]::Min(1000, [Math]::Ceiling(($ChosenSteps - 1) / $Strength)) }
+        try {
+            if ($Mode -eq 1) {
+                $est = Get-MossBenchmarkEstimate $TargetW $TargetH 'Exact' $engSteps $true -HiresScale 2.0 -SrcW $SrcW -SrcH $SrcH
+                if ($est) { return [pscustomobject]@{ Sec=[double]$est.Sec; Known=$true; BaseSec=$(if($est.BaseSec){[double]$est.BaseSec}else{0.0}); SecondSec=$(if($est.SecondSec){[double]$est.SecondSec}else{0.0}); Based=[string]$est.Based } }
+            } elseif ($Mode -eq 2) {
+                # Fast sharpen renders at HALF the source size (the x4 upscaler
+                # then sharpens it back to 2x the source) - the estimate is
+                # the plain base pass at that size; the upscaling adds only
+                # seconds.
+                $estW = [Math]::Max(128, [int][Math]::Floor($SrcW / 2)); $estH = [Math]::Max(128, [int][Math]::Floor($SrcH / 2))
+                $est = Get-MossBenchmarkEstimate $estW $estH 'Exact' $engSteps $true
+                if ($est) { return [pscustomobject]@{ Sec=[double]$est.Sec; Known=$true; BaseSec=$null; SecondSec=$null; Based=[string]$est.Based } }
+            } else {
+                $est = Get-MossBenchmarkEstimate $TargetW $TargetH 'Exact' $engSteps $true
+                if ($est) { return [pscustomobject]@{ Sec=[double]$est.Sec; Known=$true; BaseSec=$null; SecondSec=$null; Based=[string]$est.Based } }
+            }
+        } catch {}
+        return [pscustomobject]@{ Sec=$null; Known=$false; BaseSec=$null; SecondSec=$null; Based='' }
+    }
+
+    function Update-MossHiresPhases($st, [double]$Numerator, [double]$Denominator) {
+        # Phase tracker for detail-regeneration (hires) runs. The engine
+        # samples TWICE in one process; the second pass's step bar RESTARTS
+        # at 1/N, which previously made the progress bar fall back to ~0% and
+        # the naive ETA extrapolation explode (user saw 'ETA ~30 min' right
+        # after the base pass had finished). Called ONLY for hires jobs with
+        # a live SAMPLING bar - never for the tiled VAE decode bar (the
+        # caller filters that by text position).
+        if ($null -eq $st['HiresPhase']) {
+            $st['HiresPhase'] = 1
+            $st['HiresLastNum'] = 0.0
+            $st['HiresLastDen'] = 0
+            $st['HiresPhase1Steps'] = 0
+            $st['HiresPhase2Den'] = 0
+        }
+        if ([int]$st['HiresPhase'] -eq 1 -and $Numerator + 3 -lt [double]$st['HiresLastNum']) {
+            # The step bar restarted: pass 1 is done, the highres pass began.
+            $st['HiresPhase'] = 2
+            # Pass 1's step TOTAL = the denominator of its last bar.
+            $st['HiresPhase1Steps'] = [int][Math]::Max([double]$st['HiresPhase1Steps'], [double]$st['HiresLastDen'])
+        }
+        if ([int]$st['HiresPhase'] -eq 2 -and [int]$st['HiresPhase2Den'] -le 0 -and $Denominator -gt 0) {
+            # Pass 2's step total, locked at its FIRST bar (a later tiled-VAE
+            # decode bar must not corrupt it).
+            $st['HiresPhase2Den'] = [int]$Denominator
+        }
+        $st['HiresLastNum'] = $Numerator
+        $st['HiresLastDen'] = [int]$Denominator
+    }
+
+    function Get-MossBulkImprovePlan([object[]]$Items, [int]$SharpMode, [int]$ChosenSteps, [string]$UpscaleModel = $null, [bool]$FastSampler = $false) {
+        # Pure decision logic for the bulk-improve confirm dialog: which
+        # quality mode each item gets - SharpMode is applied ONLY to soft
+        # fast-mode drafts (an img2img from an upscaled draft cannot sharpen
+        # it, v0.1.81; native renders with fewer steps or a smaller size are
+        # not soft and stay plain) - plus a rough total-time estimate from
+        # the benchmark store. SharpMode: 0 = plain, 1 = detail
+        # regeneration (highres 2x), 2 = fast sharpen (ESRGAN upscaler,
+        # $UpscaleModel = the model path THE USER selected). Kept
+        # free of any UI so it can be tested.
+        # FastSampler (v0.1.86, step rule v0.1.90): items WITHOUT an explicit
+        # sampler AND scheduler get dpm++2m + karras. The step HALVING applies
+        # to PLAIN mode only (verified equal detail at half the steps); the
+        # SHARP modes keep the FULL chosen steps - sharp-mode detail scales
+        # with the step count (fast sharpen 58 engine steps = laplacian 387,
+        # 134 steps = 1308 on a real draft, matched measurement scale).
+        # Items with an explicit choice are never touched.
+        $out = New-Object System.Collections.ArrayList
+        $sharpCount = 0
+        $estTotal = 0.0; $estKnown = $true
+        foreach ($e in $Items) {
+            $mode = 0
+            if ($SharpMode -gt 0 -and [string]$e.Reason -eq 'soft preview (fast mode)') { $mode = [int]$SharpMode; $sharpCount++ }
+            $useSampler = $e.SamplingMethod; $useSched = $e.Scheduler; $chosen = [int]$ChosenSteps
+            $stepsOnItem = $null
+            if ($FastSampler -and (-not $useSampler -or [string]$useSampler -eq 'Default (model)') -and (-not $useSched -or [string]$useSched -eq 'Default (model)')) {
+                $useSampler = 'dpm++2m'; $useSched = 'karras'
+                if ($mode -eq 0) { $chosen = Get-MossFastImproveSteps $chosen; $stepsOnItem = $chosen }
+            }
+            # The queue runs ALL chosen steps by raising the ENGINE step count
+            # (ceil((chosen-1)/strength)) - estimate with the engine count, the
+            # same rule Start-MossNextRefine applies.
+            $est = Get-MossImproveTimeEstimate ([int]$e.SrcW) ([int]$e.SrcH) ([int]$e.W) ([int]$e.H) ([double]$e.Strength) $chosen $mode
+            if ($est.Known -and [double]$est.Sec -gt 0) { $estTotal += [double]$est.Sec } else { $estKnown = $false }
+            [void]$out.Add([pscustomobject]@{ File=[string]$e.File; W=$(if($mode -eq 2){[Math]::Max(128,[int][Math]::Floor([int]$e.SrcW/2))}else{$e.W}); H=$(if($mode -eq 2){[Math]::Max(128,[int][Math]::Floor([int]$e.SrcH/2))}else{$e.H}); Seed=$e.Seed; Prompt=[string]$e.Prompt; NegativePrompt=[string]$e.NegativePrompt; SamplingMethod=$useSampler; Scheduler=$useSched; Strength=[double]$e.Strength; Steps=$stepsOnItem; Cfg=$null; Tag='hq'; Reason=[string]$e.Reason; SrcW=[int]$e.SrcW; SrcH=[int]$e.SrcH; HiresScale=$(if($mode -eq 1){2.0}else{0.0}); UpscaleModel=$(if($mode -eq 2){ [string]$UpscaleModel }else{ $null }); Mode=$mode })
+        }
+        return [pscustomobject]@{ Queue=$out; SharpCount=$sharpCount; EstimateSec=$(if($estKnown){[Math]::Round($estTotal,0)}else{$null}) }
     }
 
     function Start-MossRefineAll {
@@ -3132,7 +4829,7 @@ try {
         $bulkStrength=0.6; $t=0.0; if (ConvertTo-MossDouble ([string]$script:Settings.ImproveStrength) ([ref]$t)) { if($t -ge 0.05 -and $t -le 0.95){ $bulkStrength=$t } }
         $improvedSources=New-Object System.Collections.Generic.List[string]
         foreach($f in @($script:GeneratedFiles)){
-            $j=[System.IO.Path]::ChangeExtension([string]$f,'.json')
+            $j=Get-MossSidecarReadPath ([string]$f)
             if(Test-Path -LiteralPath $j){ try { $sc=Get-Content -LiteralPath $j -Raw|ConvertFrom-Json; if($sc.InitImage){ $improvedSources.Add([string]$sc.InitImage) } } catch {} }
         }
         $eligible=New-Object System.Collections.ArrayList
@@ -3143,7 +4840,7 @@ try {
             $d = Get-MossImproveDefaults ([string]$f) 1
             if($d.Error -ne ''){ $skippedBroken++; continue }
             $speedMode='Exact'; $upscaled=$false; $oldSteps=0
-            $sidecar=[System.IO.Path]::ChangeExtension([string]$f,'.json')
+            $sidecar=Get-MossSidecarReadPath ([string]$f)
             if(Test-Path -LiteralPath $sidecar){
                 try { $sc=Get-Content -LiteralPath $sidecar -Raw|ConvertFrom-Json
                       if($sc.SpeedMode){$speedMode=[string]$sc.SpeedMode}
@@ -3182,12 +4879,84 @@ try {
         if($skippedQuality -gt 0){ $skipNote+=("`r`n{0} are already at full quality and will be skipped." -f $skippedQuality) }
         if($skippedBroken -gt 0){ $skipNote+=("`r`n{0} could not be read and will be skipped." -f $skippedBroken) }
         if($skippedLocked -gt 0){ $skipNote+=("`r`n{0} have an unreadable (encrypted) prompt and will be skipped - enter your history code in MOSS to include them." -f $skippedLocked) }
-        $answer=[System.Windows.Forms.MessageBox]::Show(("{0} of {1} file(s) qualify for improvement ({2} rendered in a fast mode, with fewer steps, or smaller than the current size).{3}`r`n`r`nThey are improved one after another with the current settings (steps {4}), each using its own seed, prompt and strength - fast previews automatically get a higher strength so detail is regenerated instead of the blurry enlargement. Cancel stops the queue. Start?" -f $eligible.Count,$script:GeneratedFiles.Count,(($eligible | ForEach-Object { $_.Reason } | Select-Object -Unique) -join ', '),$skipNote,$curSteps),'Improve all',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
-        if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
-        foreach($e in $eligible){ [void]$script:RefineQueue.Add($e) }
-        $script:RefineTotal = $script:RefineQueue.Count
-        $log.AppendText(("`r`nBulk improvement: {0} file(s) queued." -f $eligible.Count))
-        Start-MossNextRefine
+        # Sharp modes for soft drafts: an img2img from an upscaled draft
+        # CANNOT sharpen it (v0.1.81, verified). The bulk dialog offers the
+        # same three modes as the single-image dialog (plain / fast upscaler /
+        # detail regeneration) - the sharp mode applies ONLY to the soft
+        # drafts in the batch, and the USER picks the upscaler model (never
+        # overridden). Fast sharpen is default (much faster); it falls back
+        # to detail regeneration when no upscaler model is installed.
+        $draftCount = @($eligible | Where-Object { [string]$_.Reason -eq 'soft preview (fast mode)' }).Count
+        $upscaleModels = Get-MossUpscalerModels
+        $upscalePath = Get-MossDefaultUpscaleModel
+        # Fast sampler (v0.1.86): OFF when the user picked a sampler or
+        # scheduler in Generation options (that explicit choice wins),
+        # otherwise the checkbox below decides. Plans are recomputed when
+        # the checkbox changes so the estimate always matches the run.
+        $bulkFastAllowed = (([string]$script:Settings.SamplingMethod -eq 'Default (model)') -and ([string]$script:Settings.Scheduler -eq 'Default (model)'))
+        $bulkFastChk=New-Object System.Windows.Forms.CheckBox; $bulkFastChk.Text='Fast sampler: dpm++2m + karras at HALF the steps - verified equal detail, ~40% faster'; $bulkFastChk.Location=New-Object System.Drawing.Point(14,296); $bulkFastChk.Size=New-Object System.Drawing.Size(596,22); $bulkFastChk.ForeColor=$g.ForeColor; $g.Controls.Add($bulkFastChk)
+        if($bulkFastAllowed){ $bulkFastChk.Checked=$true } else { $bulkFastChk.Checked=$false; $bulkFastChk.Enabled=$false; $bulkFastChk.Text='Fast sampler off: you picked a sampler/scheduler in Generation options - it is used exactly as chosen' }
+        $replan={
+            $fastFlag = $false; if($bulkFastAllowed -and $bulkFastChk.Checked){ $fastFlag = $true }
+            $script:bulkPlan0 = Get-MossBulkImprovePlan $eligible 0 $curSteps $upscalePath $fastFlag
+            $script:bulkPlan1 = Get-MossBulkImprovePlan $eligible 1 $curSteps $upscalePath $fastFlag
+            $script:bulkPlan2 = Get-MossBulkImprovePlan $eligible 2 $curSteps $upscalePath $fastFlag
+        }
+        & $replan
+        $plan0 = $script:bulkPlan0; $plan1 = $script:bulkPlan1; $plan2 = $script:bulkPlan2
+        $summary = ("{0} of {1} file(s) qualify for improvement ({2}).{3}`r`n`r`nThey are improved one after another with the current settings (steps {4}), each using its own seed, prompt and strength - fast previews automatically get a higher strength so detail is regenerated instead of the blurry enlargement." -f $eligible.Count,$script:GeneratedFiles.Count,(($eligible | ForEach-Object { $_.Reason } | Select-Object -Unique) -join ', '),$skipNote,$curSteps)
+        $g=New-Object System.Windows.Forms.Form
+        $g.Text='Improve all'; $g.Size=New-Object System.Drawing.Size(640,500); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false; $g.MinimizeBox=$false
+        $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
+        $sum=New-Object System.Windows.Forms.Label; $sum.Text=$summary; $sum.Location=New-Object System.Drawing.Point(14,10); $sum.Size=New-Object System.Drawing.Size(596,140); $g.Controls.Add($sum)
+        $est=New-Object System.Windows.Forms.Label; $est.Location=New-Object System.Drawing.Point(14,158); $est.Size=New-Object System.Drawing.Size(596,32); $est.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $g.Controls.Add($est)
+        $rPlain=New-Object System.Windows.Forms.RadioButton; $rPlain.Text='Plain improve (drafts stay soft)'; $rPlain.Location=New-Object System.Drawing.Point(14,196); $rPlain.Size=New-Object System.Drawing.Size(596,22); $rPlain.ForeColor=$g.ForeColor; $g.Controls.Add($rPlain)
+        $rFast=New-Object System.Windows.Forms.RadioButton; $rFast.Text=('Sharp - fast upscaler for the {0} soft draft(s) (recommended)' -f $draftCount); $rFast.Location=New-Object System.Drawing.Point(14,218); $rFast.Size=New-Object System.Drawing.Size(596,22); $rFast.ForeColor=$g.ForeColor; $rFast.Enabled=($draftCount -gt 0 -and $null -ne $upscalePath); $g.Controls.Add($rFast)
+        $umLab=New-Object System.Windows.Forms.Label; $umLab.Text='Upscaler model (yours to pick):'; $umLab.Location=New-Object System.Drawing.Point(14,244); $umLab.Size=New-Object System.Drawing.Size(180,20); $umLab.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($umLab)
+        $umCombo=New-Object System.Windows.Forms.ComboBox; $umCombo.DropDownStyle='DropDownList'; $umCombo.Location=New-Object System.Drawing.Point(200,240); $umCombo.Size=New-Object System.Drawing.Size(410,24); foreach($m in $upscaleModels){ [void]$umCombo.Items.Add((Split-Path -Leaf $m)) }; if($upscalePath){ $umCombo.SelectedIndex=[Math]::Max(0,@($upscaleModels).IndexOf($upscalePath)) }; $umCombo.ForeColor=$g.ForeColor; $umCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $g.Controls.Add($umCombo)
+        $rHires=New-Object System.Windows.Forms.RadioButton; $rHires.Text=('Sharp - detail regeneration for the {0} soft draft(s) (slowest, about 3-4x the render time)' -f $draftCount); $rHires.Location=New-Object System.Drawing.Point(14,272); $rHires.Size=New-Object System.Drawing.Size(596,22); $rHires.ForeColor=$g.ForeColor; $rHires.Enabled=($draftCount -gt 0); $g.Controls.Add($rHires)
+        if(-not $rFast.Enabled){ $rFast.Text='Sharp - fast upscaler (unavailable: no upscaler model file in models\upscalers - restart MOSS to download it)' }
+        if($rFast.Enabled){ $rFast.Checked=$true } elseif($rHires.Enabled){ $rHires.Checked=$true } else { $rPlain.Checked=$true }
+        $note=New-Object System.Windows.Forms.Label; $note.Location=New-Object System.Drawing.Point(14,324); $note.Size=New-Object System.Drawing.Size(596,64); $note.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($note)
+        $currentPlan={ if($rHires.Checked){$script:bulkPlan1}elseif($rFast.Checked){$script:bulkPlan2}else{$script:bulkPlan0} }
+        $updateEst={
+            $plan = & $currentPlan
+            $est.Text = $(if($null -ne $plan.EstimateSec){('Roughly {0} total for all {1} image(s) at the current settings{2}.' -f (Format-MossDuration ([double]$plan.EstimateSec)),$plan.Queue.Count,$(if($plan.SharpCount -gt 0){(', ' + $plan.SharpCount + ' sharpened')}else{''}))}else{'No benchmark data yet for a time estimate - a few measured runs fill this in automatically.'})
+            if($rHires.Checked){
+                $note.Text='Detail regeneration: each draft keeps its composition at its own size, then a second pass re-synthesizes sharp detail at 2x (verified). Large batches can run for many hours - Cancel stops the queue at any time.'
+            } elseif($rFast.Checked){
+                $note.Text='Fast sharpen: each draft renders in ONE pass at its own size, then the selected upscaler model sharpens it in pixel space - much faster than detail regeneration.'
+            } else {
+                $note.Text=$(if($draftCount -gt 0){'Without a sharp mode the soft drafts STAY SOFT: an img2img from an upscaled draft cannot add the detail it was never given (verified).'}else{''})
+            }
+        }
+        & $updateEst
+        $rPlain.Add_CheckedChanged({ & $updateEst }); $rFast.Add_CheckedChanged({ & $updateEst }); $rHires.Add_CheckedChanged({ & $updateEst })
+        $bulkFastChk.Add_CheckedChanged({ & $replan; & $updateEst })
+        $goBtn=New-Object System.Windows.Forms.Button; $goBtn.Text='Start all'; $goBtn.Location=New-Object System.Drawing.Point(330,400); $goBtn.Size=New-Object System.Drawing.Size(120,32); $g.Controls.Add($goBtn)
+        $cnBtn=New-Object System.Windows.Forms.Button; $cnBtn.Text='Cancel'; $cnBtn.Location=New-Object System.Drawing.Point(462,400); $cnBtn.Size=New-Object System.Drawing.Size(100,32); $g.Controls.Add($cnBtn)
+        $g.AcceptButton=$goBtn; $g.CancelButton=$cnBtn
+        $goBtn.Add_Click({
+            $plan = & $currentPlan
+            # The USER's upscaler model choice wins: re-apply the currently
+            # selected model to every fast-sharpen item (the plans were
+            # precomputed before the selection could change).
+            $bulkModel=$null
+            if($umCombo.SelectedIndex -ge 0){ $bulkModel=[string]$upscaleModels[$umCombo.SelectedIndex] }
+            if(-not ($rHires.Checked -or $rFast.Checked) -and $draftCount -gt 0){
+                $softAnswer=[System.Windows.Forms.MessageBox]::Show($g,("Start anyway? The {0} soft draft(s) in this batch will keep their softness - pick a 'Sharp' mode for much sharper copies (slower)." -f $draftCount),'Improve all',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
+                if($softAnswer -ne [System.Windows.Forms.DialogResult]::Yes){return}
+            }
+            foreach($e0 in $plan.Queue){ if($e0.Mode -eq 2){ $e0.UpscaleModel = $bulkModel }; [void]$script:RefineQueue.Add($e0) }
+            $script:RefineTotal = $script:RefineQueue.Count
+            $modeText=$(if($rHires.Checked){'detail regeneration (highres fix)'}elseif($rFast.Checked){'fast sharpen (upscaler model)'}else{'plain'})
+            $log.AppendText(("`r`nBulk improvement: {0} file(s) queued ({1}){2}." -f $plan.Queue.Count,$modeText,$(if($plan.SharpCount -gt 0){(', ' + $plan.SharpCount + ' sharpened')}else{''})))
+            $g.Close()
+            Start-MossNextRefine
+        })
+        $cnBtn.Add_Click({ $g.Close() })
+        [void]$g.ShowDialog($f)
+        $g.Dispose()
     }
 
     function Remove-MossSelectedFiles([bool]$All) {
@@ -3203,7 +4972,7 @@ try {
         $files=@($files | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) })
         if($files.Count -eq 0){ [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (Ctrl+click or Shift+click for several).','Delete files')|Out-Null;return }
         $totalBytes=0
-        foreach($f in $files){ try { $totalBytes+=(Get-Item -LiteralPath $f).Length; $side=[System.IO.Path]::ChangeExtension($f,'.json'); if(Test-Path -LiteralPath $side){ $totalBytes+=(Get-Item -LiteralPath $side).Length } } catch {} }
+        foreach($f in $files){ try { $totalBytes+=(Get-Item -LiteralPath $f).Length; $side=Get-MossSidecarReadPath $f; if(Test-Path -LiteralPath $side){ $totalBytes+=(Get-Item -LiteralPath $side).Length } } catch {} }
         $nameLine=if($files.Count -eq 1){$files[0]}else{($files[0]+'  ... and '+($files.Count-1)+' more')}
         $answer=[System.Windows.Forms.MessageBox]::Show(("Delete {0} image(s) permanently?`r`n{1}`r`n`r`nAbout {2} MB will be freed (images + sidecars).`r`nThis cannot be undone." -f $files.Count,$nameLine,[Math]::Round($totalBytes/1MB,1)),'Delete files',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
         if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
@@ -3213,8 +4982,11 @@ try {
         foreach($f in $files){
             try {
                 Remove-Item -LiteralPath $f -Force
-                $side=[System.IO.Path]::ChangeExtension($f,'.json')
-                if(Test-Path -LiteralPath $side){ try { Remove-Item -LiteralPath $side -Force } catch {} }
+                # The sidecar may sit in the metadata subfolder (new) or next
+                # to the image (older versions) - clean up both locations.
+                foreach($side in @((Get-MossSidecarPath $f),([System.IO.Path]::ChangeExtension($f,'.json')))){
+                    if(Test-Path -LiteralPath $side){ try { Remove-Item -LiteralPath $side -Force } catch {} }
+                }
                 $idx=-1; for($i=0;$i -lt $fileList.Items.Count;$i++){ if([string]$fileList.Items[$i] -eq $f){ $idx=$i; break } }
                 if($idx -ge 0){ $fileList.Items.RemoveAt($idx) }
                 [void]$script:GeneratedFiles.Remove($f)
@@ -3222,7 +4994,10 @@ try {
             } catch { $failed++ }
         }
         $script:SelectedFile=$null
-        if($fileList.Items.Count -gt 0){ $fileList.SelectedIndex=$fileList.Items.Count-1 }
+        # User request: after a delete the preview goes BLANK - the deleted
+        # picture must not stay on screen, and no other image is auto-shown.
+        try { $old=$preview.Image; $preview.Image=$null; if($old){ $old.Dispose() } } catch {}
+        $fileList.ClearSelected()
         $status.Text=('Deleted {0} file(s).{1}' -f $deleted,$(if($failed){' '+$failed+' could not be deleted.'}else{''}))
     }
 
@@ -3240,7 +5015,7 @@ try {
         $lines=New-Object System.Collections.Generic.List[string]
         $lines.Add(('File: ' + [System.IO.Path]::GetFileName($selFile)))
         if($imgW -gt 0){ $lines.Add(('Size: ' + $imgW + ' x ' + $imgH)) }
-        $side=[System.IO.Path]::ChangeExtension($selFile,'.json')
+        $side=Get-MossSidecarReadPath $selFile
         if (Test-Path -LiteralPath $side -PathType Leaf) {
             try {
                 $sc = Get-Content -LiteralPath $side -Raw | ConvertFrom-Json
@@ -3282,7 +5057,7 @@ try {
                 $lines.Add('Info file could not be read: ' + $_.Exception.Message)
             }
         } else {
-            $lines.Add('No info file (.json) was found next to this image.')
+            $lines.Add('No info file (.json) was found for this image (MOSS stores them in the metadata subfolder of the output folder).')
         }
         $g=New-Object System.Windows.Forms.Form
         $g.Text='Image info'; $g.Size=New-Object System.Drawing.Size(660,540); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false; $g.MinimizeBox=$false
@@ -3291,7 +5066,7 @@ try {
         $pBox=New-Object System.Windows.Forms.TextBox; $pBox.Multiline=$true; $pBox.ReadOnly=$true; $pBox.ScrollBars='Vertical'; $pBox.WordWrap=$true; $pBox.Text=$(if($prompt){$prompt}else{$promptLockedNote}); $pBox.Location=New-Object System.Drawing.Point(12,30); $pBox.Size=New-Object System.Drawing.Size(620,120); $pBox.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $pBox.ForeColor=$cText; $pBox.BorderStyle='FixedSingle'; $g.Controls.Add($pBox)
         $ln=New-Object System.Windows.Forms.Label; $ln.Text='Negative prompt'; $ln.Location=New-Object System.Drawing.Point(12,158); $ln.Size=New-Object System.Drawing.Size(400,18); $ln.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($ln)
         $nBox=New-Object System.Windows.Forms.TextBox; $nBox.Multiline=$true; $nBox.ReadOnly=$true; $nBox.ScrollBars='Vertical'; $nBox.WordWrap=$true; $nBox.Text=$(if($neg){$neg}else{'(none)'}); $nBox.Location=New-Object System.Drawing.Point(12,178); $nBox.Size=New-Object System.Drawing.Size(620,48); $nBox.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $nBox.ForeColor=$cText; $nBox.BorderStyle='FixedSingle'; $g.Controls.Add($nBox)
-        $ls=New-Object System.Windows.Forms.Label; $ls.Text='Settings and origin (also stored in the .json file next to the image)'; $ls.Location=New-Object System.Drawing.Point(12,234); $ls.Size=New-Object System.Drawing.Size(560,18); $ls.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($ls)
+        $ls=New-Object System.Windows.Forms.Label; $ls.Text='Settings and origin (also stored in the metadata subfolder of the output folder)'; $ls.Location=New-Object System.Drawing.Point(12,234); $ls.Size=New-Object System.Drawing.Size(560,18); $ls.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($ls)
         $sBox=New-Object System.Windows.Forms.TextBox; $sBox.Multiline=$true; $sBox.ReadOnly=$true; $sBox.ScrollBars='Vertical'; $sBox.Text=($lines -join "`r`n"); $sBox.Location=New-Object System.Drawing.Point(12,254); $sBox.Size=New-Object System.Drawing.Size(620,190); $sBox.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $sBox.ForeColor=$cText; $sBox.BorderStyle='FixedSingle'; $g.Controls.Add($sBox)
         $copyBtn=New-Object System.Windows.Forms.Button; $copyBtn.Text='Copy prompt'; $copyBtn.Location=New-Object System.Drawing.Point(400,456); $copyBtn.Size=New-Object System.Drawing.Size(110,30); $copyBtn.Enabled=[bool]$prompt; $g.Controls.Add($copyBtn)
         $closeBtn=New-Object System.Windows.Forms.Button; $closeBtn.Text='Close'; $closeBtn.Location=New-Object System.Drawing.Point(522,456); $closeBtn.Size=New-Object System.Drawing.Size(110,30); $g.Controls.Add($closeBtn)
@@ -3355,7 +5130,11 @@ try {
         $forcedSpeed = $null; if ($item.PSObject.Properties['ForcedSpeed']) { $forcedSpeed = [string]$item.ForcedSpeed }
         $refineSpeed = 'Exact'
         $targetMP = ([double]$item.W * [double]$item.H) / 1000000.0
-        if ($targetMP -gt 4.5 -and -not $forcedSpeed) {
+        $hiresScale = 0.0
+        if ($item.PSObject.Properties['HiresScale']) { $hiresScale = [double]$item.HiresScale }
+        # The 4.5 MP half-size demotion must not touch detail-regeneration
+        # jobs: their base pass runs at the image's own (small) size already.
+        if ($targetMP -gt 4.5 -and -not $forcedSpeed -and $hiresScale -lt 1.5) {
             $refineSpeed = '4x'
             $log.AppendText(("`r`nNote: {0} x {1} is too large for a native render on most GPUs - rendering at half size with all {2} steps and enlarging to full size (fast-mode pipeline, never distorted)." -f $item.W, $item.H, $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})))
         }
@@ -3365,6 +5144,13 @@ try {
         }
         $refineSteps = $(if($null -ne $item.Steps){[int]$item.Steps}else{[int]$script:Settings.Steps})
         $refineStrength = $(if($item.PSObject.Properties['Strength']){[double]$item.Strength}else{0.6})
+        # For detail-regeneration jobs the job's own W/H is IGNORED by the args
+        # builder (the base pass runs at the source size): log the size the
+        # finished file will actually have.
+        $finalW = [int]$item.W; $finalH = [int]$item.H
+        if ($hiresScale -ge 1.5 -and $item.PSObject.Properties['SrcW'] -and [int]$item.SrcW -ge 64) {
+            $finalW = [int][Math]::Round([int]$item.SrcW * $hiresScale); $finalH = [int][Math]::Round([int]$item.SrcH * $hiresScale)
+        }
         # ALL CHOSEN STEPS ALWAYS RUN (user: 'if i want the quality at 50 it
         # should do the 50'). Img2img would skip early steps (about steps x
         # strength), so MOSS raises the ENGINE step count to
@@ -3377,15 +5163,29 @@ try {
             $engineSteps = [Math]::Min(1000, [Math]::Ceiling(($refineSteps - 1) / $refineStrength))
             $log.AppendText(("`r`nNote: running ALL {0} denoising steps at strength {1} - the engine step count is raised to {2} (the strength alone would run only about {3})." -f $refineSteps, $refineStrength, $engineSteps, ([Math]::Floor($refineSteps*$refineStrength)+1)))
         }
-        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$engineSteps;ChosenSteps=$refineSteps;Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode=$refineSpeed;InitImage=$(if($isFresh){$null}else{[string]$item.File});InitStrength=$(if($isFresh){0.0}else{[double]$item.Strength});RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler;SrcW=$(if($item.PSObject.Properties['SrcW']){[int]$item.SrcW}else{0});SrcH=$(if($item.PSObject.Properties['SrcH']){[int]$item.SrcH}else{0})}
+        $job=[pscustomobject]@{Engine=$refinePaths[0];Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$refinePaths[1];Llm=$refinePaths[2];Vae=$refinePaths[3];Tokenizer=$refinePaths[4];OutputPath=(Get-AbsoluteAppPath ([string]$script:Settings.OutputPath));Steps=$engineSteps;ChosenSteps=$refineSteps;Cfg=$(if($null -ne $item.Cfg){[double]$item.Cfg}else{[double]$script:Settings.CfgScale});Width=[int]$item.W;Height=[int]$item.H;Count=1;Seed=[long]$item.Seed;Prompt=[string]$item.Prompt;GpuIndex=$gpuIdx;SpeedMode=$refineSpeed;InitImage=$(if($isFresh){$null}else{[string]$item.File});InitStrength=$(if($isFresh){0.0}else{[double]$item.Strength});RefineTag=[string]$item.Tag;NegativePrompt=$item.NegativePrompt;SamplingMethod=$item.SamplingMethod;Scheduler=$item.Scheduler;SrcW=$(if($item.PSObject.Properties['SrcW']){[int]$item.SrcW}else{0});SrcH=$(if($item.PSObject.Properties['SrcH']){[int]$item.SrcH}else{0});HiresScale=$hiresScale;UpscaleModel=$(if($item.PSObject.Properties['UpscaleModel']){[string]$item.UpscaleModel}else{$null})}
+        # Quick benchmark runs (Tag 'bench') write into the benchmarks folder
+        # instead of outputs, so test renders never pollute the file list.
+        if ($item.PSObject.Properties['Tag'] -and [string]$item.Tag -eq 'bench') {
+            $benchDir = Join-Path $script:AppRoot 'benchmarks'
+            if (-not (Test-Path -LiteralPath $benchDir)) { New-Item -ItemType Directory -Path $benchDir -Force | Out-Null }
+            $job = $job.PSObject.Copy(); $job.OutputPath = $benchDir
+            $log.AppendText(("`r`nQuick benchmark run {0} of {1}: {2} x {3} at {4} engine steps..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H, $job.Steps))
+        }
         $status.Text = ("Improving image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
+        # The log notes below reference the upscaler model; it is carried on
+        # the item (and now on the job itself - the v0.1.85-89 bug: the job
+        # builder DROPPED UpscaleModel, so fast sharpen silently ran as a
+        # HALF-SIZE plain improve with no sharpening at all).
+        $upscaleModel = $null
+        if ($item.PSObject.Properties['UpscaleModel']) { $upscaleModel = [string]$item.UpscaleModel }
         if ($isFresh) {
             $status.Text = ("Re-rendering image {0} of {1} at {2} x {3}..." -f ($script:RefineTotal - $script:RefineQueue.Count), $script:RefineTotal, $item.W, $item.H)
             $log.AppendText(("`r`nRe-rendering from the same seed: {0}, same prompt, fresh full-quality sampling at {1} x {2} (no image-to-image - like a new generation; the composition can differ from the draft)" -f $item.Seed, $item.W, $item.H))
         } elseif (Test-MossFastPreview ([string]$item.File)) {
-            $log.AppendText(("`r`nImproving: seed {0}, image-to-image from {1} ({2} x {3}) -> final {4} x {5} (strength {6} - fast preview, detail regenerated over the enlarged draft, composition kept from the image; ALL {7} denoising steps run at this strength - the engine step count was raised to {8} to get them)" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $(if($item.SrcW){[int]$item.SrcW}else{0}), $(if($item.SrcH){[int]$item.SrcH}else{0}), $item.W, $item.H, $item.Strength, $refineSteps, $engineSteps))
+            $log.AppendText(("`r`nImproving: seed {0}, image-to-image from {1} ({2} x {3}) -> final {4} x {5} (strength {6} - fast preview, detail regenerated over the enlarged draft, composition kept from the image; ALL {7} denoising steps run at this strength - the engine step count was raised to {8} to get them){9}" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $(if($item.SrcW){[int]$item.SrcW}else{0}), $(if($item.SrcH){[int]$item.SrcH}else{0}), $finalW, $finalH, $item.Strength, $refineSteps, $engineSteps, $(if($hiresScale -ge 1.5){(" - detail regeneration ON: base pass at {0} x {1}, highres second pass re-synthesizes sharp detail at {2} x {3}" -f [int]$item.SrcW,[int]$item.SrcH,$finalW,$finalH)}elseif($upscaleModel){(" - fast sharpen ON: single render pass at {0} x {1} (half size), then the upscaler model {2} sharpens/enlarges it to about {3} x {4} (an x4 model; output size follows the model)" -f $finalW,$finalH,(Split-Path -Leaf $upscaleModel),[int]($item.SrcW*2),[int]($item.SrcH*2))}else{''})))
         } else {
-            $log.AppendText(("`r`nImproving: same seed {0}, same prompt, image-to-image from {1} ({2} x {3}) -> final {4} x {5} (strength {6}; ALL {7} denoising steps run at this strength - the engine step count was raised to {8} to get them)" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $(if($item.SrcW){[int]$item.SrcW}else{0}), $(if($item.SrcH){[int]$item.SrcH}else{0}), $item.W, $item.H, $item.Strength, $refineSteps, $engineSteps))
+            $log.AppendText(("`r`nImproving: same seed {0}, same prompt, image-to-image from {1} ({2} x {3}) -> final {4} x {5} (strength {6}; ALL {7} denoising steps run at this strength - the engine step count was raised to {8} to get them){9}" -f $item.Seed, [System.IO.Path]::GetFileName([string]$item.File), $(if($item.SrcW){[int]$item.SrcW}else{0}), $(if($item.SrcH){[int]$item.SrcH}else{0}), $finalW, $finalH, $item.Strength, $refineSteps, $engineSteps, $(if($hiresScale -ge 1.5){(" - detail regeneration ON: base pass at {0} x {1}, highres second pass re-synthesizes sharp detail at {2} x {3}" -f [int]$item.SrcW,[int]$item.SrcH,$finalW,$finalH)}elseif($upscaleModel){(" - fast sharpen ON: single render pass at {0} x {1} (half size), then the upscaler model {2} sharpens/enlarges it to about {3} x {4} (an x4 model; output size follows the model)" -f $finalW,$finalH,(Split-Path -Leaf $upscaleModel),[int]($item.SrcW*2),[int]($item.SrcH*2))}else{''})))
         }
         Start-MossGeneration -Job $job -ForRefine
     }
@@ -3408,7 +5208,7 @@ try {
         $n=0; if(-not [int]::TryParse(([string]$count.Text).Trim(),[ref]$n) -or $n -lt 1){[System.Windows.Forms.MessageBox]::Show('Number of images must be a whole number of 1 or more.','Invalid image count')|Out-Null;return}
         if($n -gt 200){
             $hours=[Math]::Round($n*0.35/60,1)
-            $bigAnswer=[System.Windows.Forms.MessageBox]::Show(("You are about to render {0} images in one batch. This can run for many hours (rough estimate: {1} h) and needs disk space for {0} images. Cancel stops it at any time. Start now?" -f $n,$hours),'Large batch',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+            $bigAnswer=[System.Windows.Forms.MessageBox]::Show(("You are about to render {0} images in one batch. This can run for many hours (rough estimate: {1} h) and needs disk space for {0} images. Cancel stops it at any time, Pause freezes it and Resume continues later. Start now?" -f $n,$hours),'Large batch',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
             if($bigAnswer -ne [System.Windows.Forms.DialogResult]::Yes){return}
         }
         # Keep the random base seed low enough that base+count stays inside the
@@ -3424,20 +5224,25 @@ try {
         # dropdown already carries it (user saw 'photorealistic, lifelike...'
         # twice in the engine command line).
         $generationPrompt=if($stylePrefix -and -not $p.ToLowerInvariant().StartsWith($stylePrefix.ToLowerInvariant())){"$stylePrefix, $p"}else{$p}
+        # Safe mode: friendly immediate message on the main path (the central
+        # gate in Start-MossGeneration covers every other path).
+        if ([bool]$script:Settings.SafeMode -and -not (Test-MossPromptSafe $generationPrompt)) {
+            [System.Windows.Forms.MessageBox]::Show("Safe mode is ON: this prompt contains sexual or gore/violence terms, so nothing was generated.`r`n`r`nIf you meant to run this prompt: open Options... and UNTICK 'Safe mode', click Save, then generate again.","Blocked by Safe mode",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return
+        }
         $gpuIndex=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIndex=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIndex=-1 } }
-        $speedMode=switch([string]$speedCombo.SelectedItem){'~2x faster (upscale from 70%)'{'2x'}'~4x faster (upscale from 50%)'{'4x'}'~8x faster (upscale from 35%)'{'8x'}'Fastest (upscale from smallest)'{'Fast'}default{'Exact'}}
+        $speedMode=switch([string]$speedCombo.SelectedItem){'~2x faster (70%)'{'2x'}'~4x faster (50%)'{'4x'}default{'Exact'}}
         $negPrompt=[string]$script:Settings.NegativePrompt
         $samplingMethod=$null; if([string]$script:Settings.SamplingMethod -and [string]$script:Settings.SamplingMethod -ne 'Default (model)'){ $samplingMethod=[string]$script:Settings.SamplingMethod }
         $scheduler=$null; if([string]$script:Settings.Scheduler -and [string]$script:Settings.Scheduler -ne 'Default (model)'){ $scheduler=[string]$script:Settings.Scheduler }
-        $initImg=$null; if($script:PendingInitImage){ $initImg=[string]$script:PendingInitImage; $script:PendingInitImage=$null }
-        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Prompt=$generationPrompt;GpuIndex=$gpuIndex;SpeedMode=$speedMode;InitImage=$initImg;InitStrength=0.45;NegativePrompt=$negPrompt;SamplingMethod=$samplingMethod;Scheduler=$scheduler}
-        $generate.Enabled=$false;$cancel.Enabled=$true;$log.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
+        $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Prompt=$generationPrompt;GpuIndex=$gpuIndex;SpeedMode=$speedMode;InitImage=$null;InitStrength=0.45;NegativePrompt=$negPrompt;SamplingMethod=$samplingMethod;Scheduler=$scheduler}
+        $generate.Enabled=$false;$cancel.Enabled=$true;$btnPause.Enabled=$true;$btnPause.Text='Pause';$log.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
     })
     $cancel.Add_Click({
         if ($script:GenState.IsRunning) {
             $script:GenState.CancelRequested = $true
             $cancel.Enabled = $false
             $generate.Enabled = $false
+            $btnPause.Enabled = $false
             $status.Text = 'Cancelling generation...'
             $log.AppendText("`r`nCancellation requested. Stopping the engine and any child processes...")
             $f.Refresh()

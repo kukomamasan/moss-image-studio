@@ -14,4 +14,9 @@ If Not fso.FileExists(powershell) Then
 End If
 
 command = Chr(34) & powershell & Chr(34) & " -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File " & Chr(34) & fso.BuildPath(root, "MOSS-Image-Studio.ps1") & Chr(34)
-shell.Run command, 1, True
+' Window style 0 = the PowerShell console is hidden from the very first
+' moment (previously style 1 showed it for a second or more until MOSS's
+' own Hide-MossConsoleWindow ran after the GUI window appeared - users saw
+' a flashing console during the hardware scan). MOSS never reads from or
+' writes to the console - its dialogs are WinForms - so hiding is safe.
+shell.Run command, 0, True

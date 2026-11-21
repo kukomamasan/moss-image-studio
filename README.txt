@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.58)
+MOSS Image Studio - portable build (v0.1.99)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -46,14 +46,13 @@ Image generation
   then upscale the finished image in pixel space (high-quality bicubic).
   No second sampling pass runs, so results are faithful - possibly grainy or
   soft at high speeds, but never distorted. Measured on an RTX 3080 Ti at
-  2K portrait, 50 steps: Exact about 4 minutes; ~4x (upscale from 50%) about
-  1 minute; Fastest (upscale from the smallest render, 128-pixel side) a few
-  seconds. 'Fastest' and '~8x' are draft quality: good enough to see what
-  the picture is, and 'Fastest' can be visibly soft at large sizes - right-click
-  it and choose Improve to re-render it sharp with the same seed. Use Exact
-  when detail matters. Multipliers are approximate
-  and vary with size and step count. Works the same on NVIDIA, AMD, Intel and
-  CPU builds.
+  2K portrait, 50 steps: Exact about 4 minutes; ~2x (upscale from 70%)
+  about 2 minutes; ~4x (upscale from 50%) about 1 minute. Draft modes are
+  good enough to see what the picture is; at ~4x the result can be visibly
+  soft - right-click it and choose Improve (the sharp modes there produce
+  first-run-level detail on native sources). Use Exact when detail matters.
+  Multipliers are approximate and vary with size and step count. Works the
+  same on NVIDIA, AMD, Intel and CPU builds.
 - Weight placement (GPU, then RAM, then disk as needed) is decided by the
   engine's built-in auto-fit system, which works the same way for NVIDIA, AMD,
   Intel and CPU builds. MOSS no longer forces a CPU-offload mode itself.
@@ -65,29 +64,40 @@ Image generation
 
 Improving generated images (right-click)
 ----------------------------------------
-- In the "Generated files" list, right-click any image to improve it:
-  MOSS re-renders exactly that picture (same seed and prompt, read from the
-  image's sidecar) at full quality using image-to-image - the composition
-  (same apple, same table) stays, the detail becomes genuinely native.
-- "Improve this image (full quality)" re-renders at the image's current size
-  with full detail (about as long as a native render of that size).
-  "Improve this image (2x bigger)" doubles width and height (e.g. 768x1024
-  becomes 1536x2048): more resolution to work with, but it takes about four
-  times as long because the pixel count quadruples.
-- "Improve using the settings in the main window..." renders the selected
-  file with the values you currently see (size, steps, CFG, seed, prompt
-  box, Options values). A confirmation shows exactly which settings apply
-  to that file before anything starts.
+- In the "Generated files" list, right-click any image:
+  "Improve this image (same seed and composition)..." opens the improve
+  dialog: MOSS re-renders exactly that picture (same seed and prompt, read
+  from the image's sidecar) with image-to-image - the composition stays,
+  the detail is reworked. Three quality modes:
+  * "Same size (fastest) - plain improve": re-renders at the image's own
+    size. Good for refreshing a native render; it cannot add detail that
+    an upscaled draft never had.
+  * "Sharp - fast upscaler" (default for drafts): renders at HALF the
+    image's size in ONE pass, then the ESRGAN upscaler model sharpens and
+    enlarges to about 2x - the fastest sharp result (needs the upscaler
+    model file; MOSS offers the download).
+  * "Sharp - detail regeneration" (slowest, 3-4x): the composition pass at
+    the image's size, then a full second sampling pass at 2x.
+  The target size (Same/2x/4x buttons) applies to the plain mode; steps,
+  CFG and seed are prefilled from the image and editable, and the time
+  estimate in the dialog comes from your own measured runs.
+  Note: images that were rendered TINY and enlarged (drafts of the very
+  soft speed modes that were removed in v0.1.93) cannot be made first-run
+  sharp by any improve mode - the dialog says so when it detects one.
 - "Improve ALL files that can be improved..." queues every generated image
   that still has quality headroom: soft fast-mode previews, renders with
   fewer steps than the current setting, or images smaller than the current
   size (scaled up with the aspect preserved). Files already at full quality
   or with an improved copy are skipped and reported in the confirmation.
+- "Re-render with this image's OWN seed..." is a brand-new full-quality
+  render from the image's seed, prompt and settings - a related look, but
+  the composition can differ from the draft.
+- "Show image info (prompt, seed, settings)..." displays what the image's
+  sidecar recorded.
 - The improve strength is set in Options ("Improve strength"): 0.45 keeps
   the look, 0.6 refreshes detail, 0.8 re-renders strongly.
-- Improved files are easy to spot in the output folder: ..._hq_01.png for
-  same-size improvement, ..._hq2x_01.png for the 2x version.
-- The "Improve last image" button does the same for the most recent image.
+- Improved files carry ..._hq_01.png in the name; the sidecar records the
+  actual output size and which improve mode made it.
 - A typical workflow: render a fast preview batch with the speed selector,
   right-click "Improve ALL files that can be improved" and let MOSS work
   through the good ones while you look at something else.
@@ -96,8 +106,8 @@ Improving generated images (right-click)
 
 - Right-clicking a file in the list selects it automatically, so Improve
   always acts on the file you clicked.
-- "Delete this file" removes the image (and its sidecar) from disk and the
-  list after a confirmation.
+- "Delete selected file(s)..." removes the image(s) (and their sidecars)
+  from disk and the list after a confirmation.
 
 Generated files list
 --------------------
@@ -120,14 +130,665 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
-What is new in v0.1.58----------------------- The automatic memory retry now steps down gradually: Exact -> 4x ->  8x -> Fast, so very large improvements (e.g. 5440 x 3072, where even  the half-size render was too much) still land a picture. Each retry  renders smaller with all steps and enlarges to the full target.- The visual style prefix is no longer doubled when the prompt already  starts with it (e.g. a prompt picked from the history dropdown).
-What is new in v0.1.57----------------------- The 'Improve this image' dialog was re-laid-out: every explanation  label now has room for its text (no more clipped/overlapping lines),  shorter wording, taller dialog with the buttons in their own row.
-What is new in v0.1.56----------------------- Automatic half-size retry for improvements: if a native image-to-image  render dies instantly with no output (almost always out of GPU or  system memory, e.g. 2720 x 1536 on a 12 GB card), MOSS now retries  the same improvement at HALF SIZE with all steps and enlarges the  result to the full target - composition still kept from the image.  The log explains the retry. Previously this just failed.
-What is new in v0.1.55----------------------- The progress bar is now pinned to the very bottom edge of the left  panel (it used to float mid-panel when the window was taller or  maximized), with a numeric readout to its right showing the overall  percentage and the engine's step counter (e.g. '38%  step 17/50',  or 'starting...' while the engine warms up). The status line sits  directly above and stays with it.
-What is new in v0.1.54----------------------- Layout fix: the progress bar sits in its own thin strip at the very  bottom of the left panel (below the status line), so it no longer  overlaps the GENERATE / Cancel / Open output button row.
-What is new in v0.1.53----------------------- The 'History code...' button is now a small menu: 'Enter code to  unlock the prompt history...' (shown when the code has not been  entered), 'Set a NEW code (clears the saved history)...' and 'Turn  off prompt history...'. Previously the button only RESET the code -  there was no way to enter the existing code after skipping it at  startup. Skipping the startup prompt now also says where to enter  the code later.
-What is new in v0.1.52----------------------- Better progress display: a slim progress bar above the status line -  marquee while the engine starts, then driven by the engine's STEP  COUNTER, full when the batch completes. The status line now shows  'step 17/50' from the engine's step counter together with the overall  percentage and the ETA.- Time taken is no longer lost when a job completes: 'Improvement  finished' keeps the total elapsed time in the status line, and the  generation log now records the total time of every batch and of the  whole improvement queue (persistent record).
-What is new in v0.1.51----------------------- Trying to improve (or re-render) an image whose prompt is stored  ENCRYPTED while no history code is entered now shows a specific,  actionable error: what happened, and the two ways forward - enter  the code via 'History code...' so MOSS reads the stored prompt, or  type a new prompt in the main window and use that instead. Nothing  is generated and the image is never changed in this case.
+What is new in v0.1.99
+-----------------------
+- RESOLUTION NOW SITS UNDER VISUAL STYLE (your tidy-up): the two selectors
+  are stacked in one column on the left; Width/Height keep their place to
+  the right of them. Same snug widths as before.
+- NORMAL-CASE TEXTS: 'PROMPT' -> Prompt, 'VISUAL STYLE' -> Visual style,
+  'OUTPUT PREVIEW' -> Output preview, 'GENERATED FILES' -> Generated
+  files, and the render button is 'Generate' instead of 'GENERATE'.
+  (The header title 'MOSS / IMAGE STUDIO' and its uppercase tagline stay
+  as branding - say the word if you want those normal case too.)
+- VISUAL ARTIFACT HUNT (button texts measured against their widths with
+  real text metrics, not eyeballed): 'Open output' was clipped to
+  'Open outpu' at 84 px - widened to 92 px. Every other button and label
+  now provably fits its control.
+- 47 checks in test_v0196.ps1 pin the stacking, the casing and the
+  measured button widths; all suites green: 239 tests.
+
+What is new in v0.1.98
+-----------------------
+- THE HEADER OPTIONS MENU IS NOW THE HOME FOR APP-LEVEL ENTRIES (your
+  tidying): Output folder..., Model files..., Benchmarks... and Error
+  report joined Hardware / Setup, Update engine and Update MOSS in the
+  'Options' dropdown at the top right. The main window now holds ONLY
+  generation controls.
+  * Output folder...: opens the folder picker; the item label shows the
+    current folder's name while the menu is open.
+  * Model files...: opens a dialog with the four model file paths and a
+    live 'all found / N missing' health line; OK applies the changes,
+    Cancel discards. The menu label shows the health count.
+  * The in-panel Output folder row, the Model files section, the Error
+    report button and the Benchmarks button are GONE. Your generation
+    settings (prompt, style, resolution, steps, CFG, images, seed, speed)
+    stay on the main window; generation itself works exactly as before.
+- MUCH SHORTER WINDOW: 1052 x 551 (was 607 tall) - the freed rows no
+  longer exist, and the action row (GENERATE | Cancel | Pause | Open
+  output) sits directly below the speed hint. Minimum window 900 x 550.
+- Also carried in this version: the negative prompt box in Options is the
+  same size as the main prompt box (331 x 96), dropdowns fit their text
+  'but only barely', the in-panel generation button is named 'Generation...'
+  and the IMAGE SETTINGS heading was removed.
+- 45 checks in test_v0196.ps1 pin all of the above; all suites green:
+  237 tests.
+
+What is new in v0.1.97
+-----------------------
+- NARROWER WINDOW (your 'more compact width wise'): 1052 px wide (was
+  1180). The left settings panel shrank from 700 to 620 px and the
+  preview panel from 415 to 380 px; the minimum window is now 900 px
+  (was 1000). The settings grid's second column moved left to use the
+  freed space (Resolution / Width / Height / Seed).
+- HEADER FOLDED INTO ONE OPTIONS MENU (your idea that Update engine /
+  Update MOSS / Hardware Setup 'are really options'): one 'Options'
+  button in the top-right opens a dropdown with Hardware / Setup...,
+  Update engine... and Update MOSS... (tooltips on each item). The
+  three separate header buttons are gone.
+- DROPDOWNS FIT THEIR TEXT, BARELY (your rule): the visual style combo
+  (215 -> 160 px), resolution combo (215 -> 190), speed selector
+  (shortened labels '~2x faster (70%)' / '~4x faster (50%)') and in the
+  Options dialog the sampler (250 -> 130) and scheduler (250 -> 175)
+  combos are only as wide as their longest entry needs. The open list
+  still auto-expands to the longest item, so nothing is hidden.
+- OPTIONS DIALOG: the negative prompt box is no longer huge - it is now
+  the SAME size as the main-window prompt box (331 x 96, scrolls). The
+  in-panel button was renamed 'Generation...' so it cannot be confused
+  with the new header Options menu (it opens negative prompt, sampler
+  and scheduler).
+- 61 unit tests in test_v0196.ps1 (was 49) pin all of the above; all
+  suites green: 253 tests.
+
+What is new in v0.1.96
+-----------------------
+- COMPACT UI, ACTION BUTTONS HALF SIZE (your request): the button row
+  (GENERATE | Cancel | Pause | Open output | Error report | Benchmarks)
+  is now 24 px tall (was 42) with narrower widths, and it FLOWS: it is
+  placed directly below the last visible setting (the Model files
+  section), so the large empty band that used to sit above the buttons
+  is gone. With Model files collapsed the row moves up about 100 px;
+  expanding Model files moves it down again and grows the window only
+  by the space actually needed (collapsing shrinks it back - never
+  more than MOSS itself grew it, your own window resizes are kept).
+- WHOLE WINDOW COMPACTED: default size 1180 x 607 (was 1180 x 850),
+  header 50 px tall with a 13 pt title and 24 px header buttons, all
+  setting rows tightened (23 px fields, 26 px row pitch). Everything
+  fits without dead space; the two-line status line and the progress
+  bar flow right below the action row instead of hanging at a fixed
+  bottom edge.
+- The speed hint under the speed selector is rewritten shorter and no
+  longer clipped (all 3 lines fully visible).
+- Kept unchanged: the 331 x 96 half-width prompt box (v0.1.95), the
+  responsive header placement, and the shrink-to-work-area behavior on
+  small screens.
+- 49 new unit tests (test_v0196.ps1) including a real behavioral test
+  of the flow layout (collapsed/expanded row positions, window grow
+  and shrink). Also repaired two silently broken older checks: the
+  button-overlap loop in test_v0191 aborted on a PowerShell case
+  sensitivity bug ($A vs $a are the same variable - it passed
+  vacuously), and test_v0194's README-body slice included the newer
+  changelog entries, whose own "what changed" wording tripped the
+  no-legacy-_hq2x check. All suites green: 241 tests.
+
+What is new in v0.1.95
+-----------------------
+- PROMPT BOX HALF WIDTH: the prompt editor is now 331 px wide (half of
+  its previous full-panel width) with the same 96 px height (4 lines).
+  It keeps that size when the window grows (no right anchor). Long pasted
+  prompts still work: the box scrolls, and pasted multi-line text is
+  flattened to one line for the engine.
+- Tested with the kept suites; all 192 tests still pass.
+
+What is new in v0.1.94
+-----------------------
+- CLEANUP OF REMOVED-FEATURE LEFTOVERS (your request): no more info about
+  things that were removed or are not used any more.
+  * README manual: the speed-selector section no longer describes the
+    removed 8x/Fastest modes (now Exact / ~2x / ~4x with the measured
+    times); the improve section now describes the ACTUAL right-click menu
+    ("Improve this image (same seed and composition)..." with the three
+    quality modes, "Re-render with this image's OWN seed...", "Show image
+    info") instead of the old two-item menu, and the legacy _hq2x file
+    tag mention is gone (every improved copy is ..._hq_01.png; the
+    sidecar records the actual size and mode).
+  * The speed dropdown's tooltip no longer talks about the removed
+    modes; a stale code comment about the _hq2x tag was corrected.
+  * Kept ON PURPOSE: the internal engine support for old 8x/Fast data
+    (old benchmark entries, old queue items, the OOM auto-retry ladder)
+    and the improve-dialog warning for old ultra-soft files - those are
+    still needed for files that already exist.
+- Tested with 10 new unit tests (test_v0194.ps1) that pin the manual
+  text to the real app; all 182 previous tests still pass.
+
+What is new in v0.1.93
+-----------------------
+- 8x AND FASTEST SPEED MODES REMOVED (your decision, backed by the
+  measurements): their drafts are rendered at only 35% of the size
+  (or a 128-pixel side) and the blur is baked into the pixels - no
+  improve mode can rescue them (proven with the controlled A/B in
+  v0.1.92). The speed dropdown now offers Exact (full quality),
+  ~2x faster (70%) and ~4x faster (50%); the bigger-jobs estimator in
+  the Benchmarks dialog matches. Old benchmark entries and old files
+  made with those modes still display, are still estimated and their
+  info still works - the engine and all internal helpers (including
+  the OOM auto-retry ladder) still support the modes. Old ultra-soft
+  files still get the honest improve-dialog warning.
+- Tested with 15 new unit tests (test_v0193.ps1); all 167 previous
+  tests still pass.
+
+What is new in v0.1.92
+-----------------------
+- THE TRUTH ABOUT 'NOT SHARP' (you were right to be suspicious - the
+  measurements settle it): fast sharpen WAS working - your improves came
+  out at 5120 x 2880 with the ESRGAN model loaded and running. Measured
+  detail (full-image laplacian, matched scale): your improve of the
+  NATIVE planets render reached 1421 - essentially the sharpness of a
+  fresh first-run render (1431). What could NOT be sharpened was the
+  FASTEST draft: it was rendered at only 227 x 128 pixels and enlarged,
+  so the blur is baked into the pixels; a controlled A/B on that exact
+  source (same seed, 50 vs 100 chosen steps) landed at the SAME softness
+  both times (58 vs 58). No improve mode can create first-run detail
+  from an ultra-soft draft - that is a physical limit of image-to-image,
+  now proven twice on real runs.
+- HONEST WARNING FOR ULTRA-SOFT DRAFTS: the improve dialog's fast
+  sharpen confirmation now says up front when the selected image is an
+  ultra-soft draft (rendered tiny, then enlarged): the copy will stay
+  soft, render fresh at full quality for a sharp image. Detection is a
+  new helper (Test-MossUltraSoftDraft): sidecar speed mode Fastest/8x,
+  or a pixel-enlarged source with a side of 320 px or less.
+- SIDECAR BUG FIX (regression): a fast-sharpen improve is a single-image
+  job and its sidecar is written by the BATCH-END path - which had LOST
+  the v0.1.84 fixes in a later edit round: it recorded the RENDER size
+  (e.g. 1280 x 720 in the sidecar of a 5120 x 2880 file), no 'fast
+  sharpen (<model>)' note and no HiresScale field. The batch-end path
+  now records the ACTUAL file size, the fast sharpen note and
+  HiresScale, exactly like the live path. The three improves from
+  today's testing were corrected in place. Verified with a test that
+  runs the exact shipped sidecar code against a real 5120 x 2880 file.
+- Tested with 19 new unit tests (test_v0192.ps1); all 148 previous
+  tests still pass.
+
+What is new in v0.1.91
+-----------------------
+- PAUSE / RESUME FOR RUNNING RENDERS: a new Pause button in the main
+  window freezes the RUNNING engine process mid-batch for real (Windows
+  ntdll NtSuspendProcess - not a fake pause): sampling stops where it
+  is, nothing is lost, images already saved are kept. Resume continues
+  the same run. Made for large batches you want to put on hold (render,
+  pause overnight or while you use the PC for something else, resume
+  later). While paused the status line says so, the ETA and the power
+  meter exclude the paused time (the resumed run's total time stays
+  honest), and VRAM stays allocated - that is inherent to a frozen
+  process. Pause works for fresh renders and for the improve queue
+  alike; Cancel still works while paused; if the engine dies while
+  paused, the run completes normally.
+  Verified on a REAL engine run: 15 steps rendered, frozen for 8 s (the
+  step counter stayed at exactly 15), resumed, the run finished all
+  images. Plus 43 new unit tests.
+- LAYOUT FITS SMALLER SCREENS NOW (2K / 1080p / resized windows):
+  the window used a fixed 1180 x 850 design and the header's BACKEND
+  badge and buttons were anchored to the RIGHT edge - on narrower
+  windows Windows slid them LEFT on top of the MOSS version title
+  (text behind text). The whole header right side (badge + 3 buttons)
+  is now re-placed on every resize: buttons from the right edge, the
+  BACKEND badge between title and buttons, clamped so it can never
+  overlap the title whatever the width. Long GPU names in the header
+  subtitle are shortened with an ellipsis.
+- SMALL SCREENS: on a screen whose work area is smaller than the
+  window (e.g. 1366 x 768 laptops), the window now shrinks to the work
+  area on startup instead of being cut off at the bottom, and the
+  minimum size adapts to what the screen actually offers.
+- COMPACT MAIN WINDOW: the prompt box is 96 px tall (4 lines) instead
+  of 150 px, and everything below moved up accordingly - the whole
+  settings block and the GENERATE row sit 54 px higher, so they stay
+  visible even in short windows. The drop-down lists open with 5-7
+  visible items (scroll for the rest) instead of spanning the screen.
+- TWO-LINE STATUS LINE: the bottom status line (progress %, step N/M,
+  ETA, watts, notes) now wraps over TWO lines instead of truncating
+  with '...' on one line (same position, progress bar below it).
+- The GENERATE row is now GENERATE | Cancel | PAUSE | Open output |
+  Error report | Benchmarks (no overlapping buttons; verified by a
+  layout test that checks every button rectangle).
+- Tested with 43 new unit tests (test_v0191.ps1); all 105 previous
+  tests still pass (32 + 30 + 20 + 5 + 18 kept suites).
+
+What is new in v0.1.90
+-----------------------
+- BUG FIX - FAST SHARPEN ACTUALLY SHARPENS NOW: the improve dialog and
+  'Improve all' selected the upscaler model for the fast-sharpen mode,
+  but the queue runner DROPPED it before starting the engine - every
+  fast sharpen silently ran as a HALF-SIZE plain improve with no
+  sharpening at all (your 688 x 384 result instead of a sharp
+  2720 x 1536). The model now reaches the engine.
+- SHARP MODES RUN FULL STEPS: the fast sampler's step-halving now
+  applies to PLAIN improves only. For the sharp modes (fast sharpen /
+  detail regeneration) ALL chosen steps run - measured on a real draft
+  with a matched measurement scale: fast sharpen at 58 engine steps
+  reached a detail metric of 387, at the full 134 steps it reached 1308
+  (16x the plain improve's 80, the draft itself was 81). The end-to-end
+  fixed fast sharpen took 33 s and produced the sharpest improve of
+  every tested pipeline; the sampler speed advantage is kept.
+  If you picked a sampler yourself in Options it is still used exactly
+  as chosen.
+- Tested with 18 new unit tests; all 87 existing tests still pass.
+
+What is new in v0.1.89
+-----------------------
+- OPTIONS NOW SAVE IMMEDIATELY (bug fix): the Save button in Options
+  updated the running app but did NOT write settings.json - the change
+  only reached disk at the NEXT generation. Deleting the negative
+  prompt and restarting MOSS brought the old text back (user report);
+  the same silent revert affected the sampler, scheduler, improve
+  strength and the Safe mode checkbox. Options changes now persist the
+  moment you click Save: delete the negative prompt, restart, and it
+  stays empty. A deliberately set negative prompt still persists.
+
+What is new in v0.1.88
+-----------------------
+- FASTER, MORE PRECISE DOWNLOAD SPEED MEASUREMENT: the 4 MB probe that
+  estimates 'this download takes about X minutes' no longer makes you
+  wait - it now gives up after 8 s (connect) / 5 s (stalled read) and a
+  hard 5-second wall budget (the old version could block a dialog for
+  20+ seconds on a bad connection). The speed is computed WITHOUT the
+  first 0.5 MB (TCP slow start / TLS ramp-up measure connection setup,
+  not the steady speed a multi-GB download settles at) and reads up to
+  6 MB within the budget.
+- IT LEARNS FROM YOUR REAL DOWNLOADS: every completed model download
+  records its true average speed (config\downloadspeed.json, last 3
+  kept, logged as 'Model download ok (X GB at Y MB/s)'). The next
+  estimate then prefers a real measurement less than 7 days old
+  outright (no probe, dialog opens instantly); otherwise the fresh
+  probe is blended 50/50 with the last real number.
+
+What is new in v0.1.87
+-----------------------
+- POWER METER with cumulative totals: MOSS now measures the GPU's power
+  draw while the engine renders and integrates it over time. The live
+  draw is shown in the status line during a run ('~231 W (measured)')
+  and the Benchmarks dialog gained a Power meter section with
+  SESSION (since app start), TODAY and ALL TIME totals (kWh, hours of
+  rendering, runs, images) plus a reset button for the cumulative
+  numbers.
+- MEASURED where possible: on NVIDIA machines the draw is read from the
+  driver (nvidia-smi, present on this PC) - real measurements. On other
+  vendors (AMD/Intel) or when the tool is absent, the draw is estimated
+  from the GPU's rated board power (75% of TDP, 250 W typical when
+  unknown) and clearly labelled '(estimate)'. Each total shows how much
+  of it was measured directly.
+- The per-run energy lands in config\energy.json as day buckets plus an
+  all-time bucket (730 days kept); every finished run - even a failed or
+  cancelled one - records the power it actually drew, and the generation
+  log notes the kWh per run.
+
+What is new in v0.1.86
+-----------------------
+- FAST SAMPLER DEFAULT FOR IMPROVES (verified on this PC): the improve
+  dialogs now have a 'Fast sampler' checkbox (ON by default). It renders
+  improves with the dpm++2m sampler + karras schedule at HALF the chosen
+  steps: verified same detail at roughly HALF the time (euler 67 steps
+  took 40.9 s; dpm++2m+karras 34 steps took 24.3 s at 1360 x 768, same
+  seed - sharpness metric 30.1 vs 26.9, i.e. equal or slightly better;
+  and the full v0.1.86 default path for 'improve at 100 steps' now takes
+  47 s instead of about 100 s). Uncheck it (or pick a sampler/scheduler
+  in Options) to keep the previous behavior - your explicit choice is
+  always used exactly as picked, and the checkbox disables itself when
+  you have chosen a sampler or scheduler in Options.
+- BLANK-IMAGE BUG SHIELD: the engine REJECTS some scheduler/sampler
+  combinations with an error line and then CONTINUES RENDERING - the
+  saved image comes out blank white (verified: scheduler 'ays' with
+  'dpm++2m' rendered a fully white picture with exit code 0). MOSS now
+  detects that rejection in the engine output, tells you clearly in the
+  log and status line ('scheduler was REJECTED by the engine') and saves
+  a technical report to the logs folder. The scheduler descriptions in
+  Options carry the verified warning for 'ays' and the in-house facts
+  for 'karras' and 'dpm++2m'.
+- Every sampler (21) and scheduler (17) offered in Options was verified
+  against the real engine on this model (each one rendered a valid
+  image); the 'ays' limitation is the only incompatible combination
+  found.
+
+What is new in v0.1.85
+-----------------------
+- FAST SHARPEN - improves are now up to 25x faster when you want a sharp
+  2x copy: the improve dialog offers three quality modes - 'Same size',
+  'Sharp - fast upscaler' (default for drafts) and 'Sharp - detail
+  regeneration' (the previous pipeline, kept for best composition
+  fidelity). Fast sharpen renders at HALF the image's size in ONE pass
+  and the ESRGAN upscaler model then sharpens/enlarges the result to
+  about 2x - verified on this PC: the same improve took 36 s instead of
+  ~14 min, and its sharpness metric (laplacian variance) measured 1016
+  vs 363 for the detail-regeneration output. The 'Improve all' dialog
+  offers the same three modes for the whole batch.
+- YOUR CHOICE OF UPSCALER: the dialogs show every .pth model in
+  models\upscalers and use exactly the one you pick (an anime or
+  black-and-white specialist model works the same way) - MOSS never
+  overrides that choice. Output size follows the model (the standard
+  x4 model gives 2x from a half-size render).
+- THE UPSCALER IS PART OF THE STANDARD INSTALL: on first start (and in
+  'Update engine...') MOSS treats RealESRGAN_x4plus.pth like any other
+  model file - it is offered for download with the rest, and update
+  checks compare local vs remote size to detect new versions. If the
+  download is unavailable (offline / source down), MOSS keeps working:
+  the fast option is disabled and drafts fall back to detail
+  regeneration - the pipeline that always worked (also at render time,
+  if the file vanishes between dialog and render).
+- Notes: the upscaler needs no extra VRAM budget beyond the render; the
+  sidecar records 'fast sharpen (<model>)' and the actual output size;
+  fast runs are recorded in the benchmark table as plain img2img runs at
+  the half-size render (their times are honest estimates for the mode).
+
+What is new in v0.1.84
+-----------------------
+- SIDECARS RECORD THE REAL IMAGE SIZE: the settings file next to an
+  improved image used to store the requested render size - for a detail
+  regeneration (highres) run that is the BASE size, while the actual
+  file is 2x bigger (live case: the sidecar said 1360 x 768 for a
+  2720 x 1536 image, which would mislead a later improve or the image
+  info dialog). The sidecar now always records the ACTUAL saved size
+  (read back from the finished file), plus the hires scale when one ran.
+  The two existing hires sidecars on this PC were corrected in place.
+- NOTE: improving the same image twice with the SAME seed, prompt and
+  settings gives a BIT-IDENTICAL copy - the engine is deterministic
+  (verified: two runs of the same improve produced identical files).
+  That is expected, not a bug: for a different result change the seed
+  (e.g. -1) or the strength, or use 'Re-render from seed'.
+
+What is new in v0.1.83
+-----------------------
+- HONEST PROGRESS FOR DETAIL REGENERATION: a hires improve samples TWICE
+  in one engine run - the base pass keeps the composition (fast), then
+  the highres pass re-synthesizes sharp detail at 2x (the slow part).
+  Previously the second pass's step bar RESTARTED at 1/N, so the progress
+  bar fell back toward 0% and the naive ETA extrapolation exploded (live
+  case: 'ETA ~30 min' right after the base pass had finished). The status
+  line now tracks the two phases separately: it shows 'pass 1/2' /
+  'pass 2/2' with the step counts, the progress bar counts BOTH passes
+  and never runs backwards, a log line says when the base pass is done,
+  and the ETA is computed from the benchmark store's base/second-pass
+  parts (no more extrapolation blow-ups). 42 regression tests.
+- REAL TIME ESTIMATES IN THE IMPROVE DIALOG: the popup no longer claims
+  a hardcoded 'about 15 minutes at 100 steps' that ignored the image
+  size and steps. The dialog now shows a live estimate under the fields
+  (updates with size, steps and the detail-regeneration checkbox), and
+  every start popup quotes the estimate extrapolated from YOUR measured
+  runs (with a plain 'no benchmark data yet' fallback). The bulk improve
+  dialog reuses the same estimator.
+
+What is new in v0.1.82
+-----------------------
+- BENCHMARKS NOW UNDERSTAND DETAIL REGENERATION: a hires improve run used
+  to be recorded as a PLAIN img2img run of the same size and steps - the
+  853-second verify run made every future plain 1360 x 768 estimate
+  about 5x too slow, and a hires job's own ETA only counted the base
+  pass. Now: hires runs are recorded with their scale (and their true
+  source size), get their own row in the benchmark table ('img2img +
+  highres 2x'), are excluded from every plain estimate, and a hires
+  job's ETA is estimated as base pass + highres second pass. The one
+  known hires entry already in the store was re-labelled (it is the
+  documented v0.1.81 verify render). Verified against the real data:
+  plain 1360 x 768 estimates ~3 min again, a hires estimate ~12 min
+  (the real run took ~14).
+- IMPROVE ALL NOW OFFERS DETAIL REGENERATION: the bulk improve dialog
+  shows which files qualify and why, a rough TOTAL time estimate from
+  the benchmark store, and an opt-in 'Detail regeneration (highres
+  fix)' checkbox that applies ONLY to the soft fast-mode drafts (much
+  sharper, output 2x each draft's size, about 3-4x the render time per
+  draft). Files that are merely small or were made with fewer steps are
+  native-quality renders and gain nothing from a hires pass - they are
+  never given one. Without the checkbox the drafts stay soft (MOSS says
+  so and asks once), matching the single-image improve dialog.
+- The improvement log now states the size the finished file will really
+  have for detail-regeneration runs (base x 2), and an out-of-memory
+  auto-retry of a hires run says plainly that the retry runs WITHOUT
+  detail regeneration (the enlarged second pass is what ran out of
+  memory) and how to get a sharp copy afterwards.
+- Verified with a real engine render: bulk-style hires job (640 x 384
+  source, 2x) produced its sharp 1280 x 768 output
+  (benchmarks\repro_bulk_hires82_01.png).
+
+What is new in v0.1.81
+-----------------------
+- IMPROVE QUALITY FIXED: improving an upscaled fast draft no longer
+  delivers a soft copy. Verified cause: a plain img2img CANNOT make an
+  upscaled draft sharp - the blur is part of the structure it follows
+  (measured: the improved copy was no sharper than the draft at strength
+  0.6, 0.75, 0.85 or with higher CFG; only letting the composition drift
+  made it sharp). The improve dialog now offers DETAIL REGENERATION
+  (the engine's own highres fix, ON for fast drafts): a base pass keeps
+  the composition at the image's size, then a second pass re-synthesizes
+  real sharp detail at 2x size - verified: 1360 x 768 draft -> sharp
+  2720 x 1536, same scene, textured rocks, clean rings. Takes about
+  3-4x the normal improve time (roughly 15 min at 100 steps on a 12 GB
+  card); MOSS asks before starting and warns when the option is off for
+  a draft. VAE tiling is always on for the enlarged pass. The 4.5 MP
+  half-size demotion never applies to these runs.
+
+What is new in v0.1.80
+-----------------------
+- Fixed: improving ANY image popped the 'orphaned settings' dialog that
+  claimed 'This image has no stored settings (no sidecar)' even when the
+  image HAD a sidecar. Root cause: the orphan-scan returned an empty
+  list in a way that made the caller always count ONE 'orphan' (the
+  classic PowerShell empty-collection gotcha) - so the offer fired on
+  every improve with a blank file name. The scan now returns its
+  elements directly (zero orphans = zero items), and the offer has a
+  guard: it can only appear for an image that really has no sidecar.
+  17 regression tests including the exact zero-orphan case.
+
+What is new in v0.1.79
+-----------------------
+- Files deleted/renamed/moved OUTSIDE MOSS no longer linger: clicking a
+  list entry whose file no longer exists prunes every dead entry at once
+  (the list matches the disk again) and says how many were removed.
+- ORPHANED SETTINGS RECOVERY: a picture that was RENAMED outside MOSS
+  used to lose its stored settings silently (the sidecar is named after
+  the picture). Now, when improving or re-rendering a picture that has
+  no sidecar, and exactly one orphaned sidecar exists in the output
+  folder, MOSS offers to attach it - showing its seed, size and prompt
+  so you can confirm it belongs to this picture. Yes attaches it, No
+  leaves everything untouched.
+- After deleting images (from inside MOSS or after pruning dead
+  entries), the preview now goes BLANK: the deleted picture no longer
+  stays on screen, and no other image is auto-selected - click a file
+  in the list to view it.
+
+What is new in v0.1.78
+-----------------------
+- SINGLE INSTANCE: starting MOSS a second time (double-clicking the bat
+  while it already runs) now refuses with a message instead of launching
+  a second app. Two instances used to share the same settings.json (the
+  last one to save clobbered the other's settings and history) and
+  compete for the same GPU memory, so renders failed out-of-memory. The
+  guard is a named mutex: Windows releases it automatically when the
+  process exits, even after a crash, so it can never lock the folder
+  permanently. Verified with two real processes.
+- CORRUPT IMAGE PROTECTION: a finished render is only counted as a
+  picture when the file is a complete, decodable PNG (PNG signature +
+  IEND trailer + full decode). A truncated file (disk full, power loss,
+  antivirus interference mid-write) is no longer added to the file list
+  as if it were fine - the batch result says exactly how many files were
+  corrupt and names them in the log; the broken files stay on disk.
+  This closes the case where a half-written image silently passed as
+  'OK' because the file existed.
+
+What is new in v0.1.77
+-----------------------
+- The output folder stays clean: the per-image .json sidecars (seed,
+  prompt, settings - what powers Improve, re-render from seed and the
+  Info dialog) now live in a 'metadata' SUBFOLDER of the output folder,
+  so you only see the pictures. New sidecars are written there; reads
+  fall back to the old location next to the image for existing pictures,
+  and AT STARTUP every MOSS_* sidecar still sitting next to the images
+  is moved into the subfolder automatically (never overwriting anything,
+  foreign .json files are left alone). Deleting images removes their
+  sidecar from BOTH locations. The Info dialog texts no longer claim the
+  file sits 'next to' the image.
+
+What is new in v0.1.76
+-----------------------
+- The bigger-job estimator in the Benchmarks dialog now also calculates
+  POWER: a vendor-neutral table of rated GPU wattages (NVIDIA, AMD and
+  Intel) shows your GPU's draw, how much energy 1 hour (and an 8-hour
+  overnight run) of continuous rendering uses, and how many kWh the
+  whole estimated job costs. Example on the 3080 Ti: 1 hour ~ 0.35 kWh,
+  8 hours ~ 2.8 kWh, job of 100 renders ~ 0.2 kWh (GPU only; the rest of
+  the PC adds roughly 50-150 W). GPUs not in the table say so instead of
+  inventing a number - no NVIDIA-only assumptions.
+
+What is new in v0.1.75
+-----------------------
+- NEW in the Benchmarks dialog: a bigger-job estimator. Type ANY width,
+  height, steps, speed mode and image count and it shows the expected
+  render time per image and the total for the whole job (e.g. '1360 x
+  768 at 25 steps, Exact: ~21 s per image -> ~5:36 for all 16'),
+  extrapolated from the measured data above (scaled by render size x
+  engine steps, the same rule the live ETA uses). It is pre-filled with
+  the main window's current settings, tells you which measured run it
+  based the extrapolation on, and refuses nonsense input politely.
+
+What is new in v0.1.74
+----------------------
+- Fixed: the quick benchmark in the Benchmarks dialog always failed with
+  'unknown argument: (model)' - it passed the options dialog's display
+  label 'Default (model)' into the engine command line as if it were a
+  sampler/scheduler value. Like every other render path, the label now
+  means 'omit the flag so the model keeps its own default'. Verified
+  against the real engine (512 x 512 @ 8 steps renders in about 5 s).
+
+What is new in v0.1.73
+----------------------
+- NEW: Benchmarks button (bottom left, where 'Improve last image' used to
+  be). Every completed render is recorded into config\benchmarks.json and
+  the dialog shows the real measured seconds per image for every size /
+  speed mode / step combination that ran on this PC. It also estimates
+  times for combinations you have not run yet (scaled by render size x
+  engine steps from the nearest recorded run) and has a quick benchmark
+  (3 tiny test renders into a separate benchmarks folder) to fill the
+  table fast. Recorded data can be cleared at any time.
+- The live ETA is now correct from the first second: it starts from the
+  benchmark store's prediction for the current settings instead of
+  showing 'ETA calculating' until the engine reports progress.
+What is new in v0.1.72
+----------------------
+- NEW: Safe mode in Options... - a family-friendly prompt gate, ON BY
+  DEFAULT: prompts containing sexual, gore/violence or self-harm/suicide
+  terms are REFUSED before anything runs (generation, improving,
+  re-render and the automatic retry all go through the same gate), and
+  safety words (nsfw, nude, naked, explicit, gore) are added to the
+  negative prompt. When a prompt is blocked, MOSS says
+  exactly how to allow it: open Options... and untick 'Safe mode' if you
+  want that prompt to run (adult users keep full control - it is a
+  local, opt-out filter, not a server-side policy). Important
+  background: a NEGATIVE PROMPT CANNOT CENSOR - it only steers sampling
+  with concept words and loses against an explicit positive prompt, and
+  instruction-style text such as 'should be censored' does nothing
+  there. The real block has to be in the application, which is what
+  Safe mode is. It is a keyword gate, not a trained image filter -
+  creative wording can still slip past. ALWAYS ON, even with Safe mode
+  unticked: prompts that sexualize minors (a minor-age word combined
+  with a sexual term, plus the known tags like loli/shota/jailbait).
+- Fixed: the setup screen checked the engine path against the working
+  directory instead of the MOSS folder ('Check backend support' could
+  report 'engine executable was not found' purely because of where MOSS
+  was started from). All path checks are now anchored to the app root.
+- Launchers start the engine console hidden from the first moment and
+  the batch host closes itself (no more empty 'E:\Moss>' window).
+What is new in v0.1.71
+----------------------
+- Large renders no longer die in the VAE: for renders above about 3 MP
+  MOSS passes --vae-tiling to the engine, so encode/decode runs in
+  memory-safe tiles (live case: a 2720 x 1536 improve needed 18 GB for
+  the VAE graph on a 12 GB card and failed before step 1 - verified to
+  complete with tiling). Fewer wasted retry cycles on big improvements.
+- The 'Improve last image' button was removed (right-click improve on
+  the file list does everything it did).
+- Removed dead code left behind by earlier features: two unused dialog/
+  check functions, two never-read state variables, and the leftover
+  'start generation from an image' hook.
+- Faster everywhere a code is in use: the 250000-iteration key
+  derivation now runs once per code instead of on EVERY encrypt/
+  decrypt - previously each image sidecar write/read (up to 2 per
+  image), every settings save and every code attempt re-ran it on the
+  UI thread. A 16-image batch with a history code no longer stalls the
+  interface for seconds. Wrong codes are still rejected exactly as
+  before (verified).
+- Portable on every vendor's GPU: the selected graphics card is now
+  applied for ALL backends - Intel SYCL builds used to silently ignore
+  the GPU selection in Hardware / Setup (they need a 'backend:index'
+  style selector, not a bare index). Nothing in MOSS is NVIDIA-locked:
+  detection covers NVIDIA / AMD / Intel / virtual adapters, the engine
+  variant selector offers CUDA, Vulkan, ROCm, SYCL and CPU, and
+  Auto falls back to Vulkan (any GPU) and then CPU when no NVIDIA card
+  is found.
+What is new in v0.1.58
+----------------------
+- The automatic memory retry now steps down gradually: Exact -> 4x ->
+  8x -> Fast, so very large improvements (e.g. 5440 x 3072, where even
+  the half-size render was too much) still land a picture. Each retry
+  renders smaller with all steps and enlarges to the full target.
+- The visual style prefix is no longer doubled when the prompt already
+  starts with it (e.g. a prompt picked from the history dropdown).
+
+What is new in v0.1.57
+----------------------
+- The 'Improve this image' dialog was re-laid-out: every explanation
+  label now has room for its text (no more clipped/overlapping lines),
+  shorter wording, taller dialog with the buttons in their own row.
+
+What is new in v0.1.56
+----------------------
+- Automatic half-size retry for improvements: if a native image-to-image
+  render dies instantly with no output (almost always out of GPU or
+  system memory, e.g. 2720 x 1536 on a 12 GB card), MOSS now retries
+  the same improvement at HALF SIZE with all steps and enlarges the
+  result to the full target - composition still kept from the image.
+  The log explains the retry. Previously this just failed.
+
+What is new in v0.1.55
+----------------------
+- The progress bar is now pinned to the very bottom edge of the left
+  panel (it used to float mid-panel when the window was taller or
+  maximized), with a numeric readout to its right showing the overall
+  percentage and the engine's step counter (e.g. '38%  step 17/50',
+  or 'starting...' while the engine warms up). The status line sits
+  directly above and stays with it.
+
+What is new in v0.1.54
+----------------------
+- Layout fix: the progress bar sits in its own thin strip at the very
+  bottom of the left panel (below the status line), so it no longer
+  overlaps the GENERATE / Cancel / Open output button row.
+
+What is new in v0.1.53
+----------------------
+- The 'History code...' button is now a small menu: 'Enter code to
+  unlock the prompt history...' (shown when the code has not been
+  entered), 'Set a NEW code (clears the saved history)...' and 'Turn
+  off prompt history...'. Previously the button only RESET the code -
+  there was no way to enter the existing code after skipping it at
+  startup. Skipping the startup prompt now also says where to enter
+  the code later.
+
+What is new in v0.1.52
+----------------------
+- Better progress display: a slim progress bar above the status line -
+  marquee while the engine starts, then driven by the engine's STEP
+  COUNTER, full when the batch completes. The status line now shows
+  'step 17/50' from the engine's step counter together with the overall
+  percentage and the ETA.
+- Time taken is no longer lost when a job completes: 'Improvement
+  finished' keeps the total elapsed time in the status line, and the
+  generation log now records the total time of every batch and of the
+  whole improvement queue (persistent record).
+
+What is new in v0.1.51
+----------------------
+- Trying to improve (or re-render) an image whose prompt is stored
+  ENCRYPTED while no history code is entered now shows a specific,
+  actionable error: what happened, and the two ways forward - enter
+  the code via 'History code...' so MOSS reads the stored prompt, or
+  type a new prompt in the main window and use that instead. Nothing
+  is generated and the image is never changed in this case.
 What is new in v0.1.50
 ----------------------
 - If you continue WITHOUT the password (history code) at startup, the
@@ -295,7 +956,6 @@ What is new in v0.1.39
   (2x bigger)" (which used the image's own size) are gone. Improving now
   uses the size, steps, CFG, seed and prompt you set in the main window:
   right-click -> "Improve using the settings in the main window...".
-  The "Improve last image" button does the same for the most recent image.
   New: "Re-render from the same seed (fresh full quality)" - a brand-new
   full-quality generation with the image's own seed and prompt.
 
