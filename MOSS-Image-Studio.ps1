@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.1.99'
+$script:AppVersion = '0.2.3'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1'; SafeMode = $true }
@@ -29,6 +29,83 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# --- v0.2.2: dark theme for the native dropdowns --------------------------------
+# WinForms draws a ComboBox with the WINDOWS theme whenever visual styles are
+# enabled, so BackColor/ForeColor are IGNORED: every dropdown showed up as a
+# bright white box inside the dark MOSS window (Visual style, Resolution,
+# Images, the speed mode and the prompt-history list). The themed drop-down
+# button was also painted by the system itself, and at 175 % scaling that
+# button landed a few pixels off the field, so the combo looked split in two.
+# FlatStyle=Flat makes WinForms paint the whole control itself - dark field,
+# no system button - and the small chevron overlay below takes the place of
+# the pale button that FlatStyle still leaves at the right edge.
+function Set-MossComboTheme([System.Windows.Forms.ComboBox]$Combo,[System.Windows.Forms.Control]$Parent){
+    $field=[System.Drawing.Color]::FromArgb(16,21,30)
+    $text=[System.Drawing.Color]::FromArgb(230,236,245)
+    $line=[System.Drawing.Color]::FromArgb(70,85,110)
+    try {
+        $Combo.FlatStyle=[System.Windows.Forms.FlatStyle]::Flat
+        $Combo.BackColor=$field
+        $Combo.ForeColor=$text
+    } catch { return }
+    # Owner-draw the open list as well: a DropDownList renders its popup
+    # with the system list colours, which would flash a white box over the
+    # dark window every time a dropdown is opened. (The editable Images
+    # combo keeps the standard list - its popup is typed into.)
+    if ($Combo.DropDownStyle -eq [System.Windows.Forms.ComboBoxStyle]::DropDownList) {
+        try {
+            $Combo.DrawMode=[System.Windows.Forms.DrawMode]::OwnerDrawFixed
+            $Combo.ItemHeight=18
+            $Combo.Add_DrawItem({
+                param($sender,$e)
+                $g=$e.Graphics
+                $b=$e.Bounds
+                # The selected row keeps a clear highlight - filling every row
+                # with the field colour would otherwise hide it completely.
+                $isSel=(($e.State -band [System.Windows.Forms.DrawItemState]::Selected) -ne 0)
+                $bg=$field; $fg=$text
+                if($isSel){ $bg=[System.Drawing.Color]::FromArgb(45,112,173); $fg=[System.Drawing.Color]::FromArgb(255,255,255) }
+                $g.FillRectangle((New-Object System.Drawing.SolidBrush($bg)),$b)
+                $txt=''
+                if($e.Index -lt 0){ $txt=[string]$sender.Text } else { $txt=[string]$sender.Items[$e.Index] }
+                $br=New-Object System.Drawing.SolidBrush($fg)
+                $fmt=New-Object System.Drawing.StringFormat
+                $fmt.LineAlignment=[System.Drawing.StringAlignment]::Center
+                $fmt.Trimming=[System.Drawing.StringTrimming]::EllipsisCharacter
+                $fmt.FormatFlags=([System.Drawing.StringFormatFlags]::LineLimit -bor [System.Drawing.StringFormatFlags]::NoWrap)
+                $rect=New-Object System.Drawing.RectangleF(($b.X+4),($b.Y+0.5),($b.Width-8),($b.Height-1))
+                $g.DrawString($txt,$sender.Font,$br,$rect,$fmt)
+                $br.Dispose(); $fmt.Dispose()
+            }.GetNewClosure())
+        } catch {}
+    }
+    if (-not $Parent) { $Parent=$Combo.Parent }
+    if (-not $Parent) { return }
+    $arrowW=22
+    $ov=New-Object System.Windows.Forms.Panel
+    $ov.Name='mossComboChevron'
+    $ov.BackColor=$field
+    $ov.TabStop=$false
+    $ov.Size=New-Object System.Drawing.Size($arrowW,([int]$Combo.Height-1))
+    $ov.Location=New-Object System.Drawing.Point(([int]$Combo.Left+[int]$Combo.Width-$arrowW),[int]$Combo.Top)
+    $ov.Add_Paint({
+        param($s,$e)
+        $g=$e.Graphics
+        $g.FillRectangle((New-Object System.Drawing.SolidBrush($field)),$s.ClientRectangle)
+        $pen=New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(170,188,214),1.6)
+        $cx=[int]($s.ClientRectangle.Width/2); $cy=[int]($s.ClientRectangle.Height/2)
+        $g.DrawLines($pen,@((New-Object System.Drawing.Point(($cx-4),($cy-2))),(New-Object System.Drawing.Point($cx,($cy+3))),(New-Object System.Drawing.Point(($cx+4),($cy-2)))))
+        $pen.Dispose()
+    }.GetNewClosure())
+    $ov.Add_MouseDown({ param($s,$e) $Combo.Focus(); try { $Combo.DroppedDown=$true } catch {} }.GetNewClosure())
+    $Parent.Controls.Add($ov)
+    $Parent.Controls.SetChildIndex($ov,0)
+    $sync={ $ov.Location=New-Object System.Drawing.Point(([int]$Combo.Left+[int]$Combo.Width-[int]$ov.Width),[int]$Combo.Top) }.GetNewClosure()
+    $Combo.Add_LocationChanged($sync)
+    $Combo.Add_SizeChanged($sync)
+}
+
+
 # SINGLE INSTANCE: launching the .bat twice would run two complete MOSS apps
 # against the SAME settings.json and output folder - the instances overwrite
 # each other's settings and compete for the same GPU memory (renders fail
@@ -44,19 +121,19 @@ if (-not $instanceAcquired) {
 }
 
 function Hide-MossConsoleWindow {
-    if(-not ('MossNativeWindow' -as [type])) {
-        Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public static class MossNativeWindow {
+    if(-not ('Moss.MossNativeWindow' -as [type])) {
+        # v0.2.3: -MemberDefinition instead of -TypeDefinition. -TypeDefinition
+        # launches the C# compiler as a separate process: ~310 ms on EVERY
+        # MOSS start. -MemberDefinition compiles the same three P/Invoke
+        # signatures in ~60 ms.
+        Add-Type -Namespace Moss -Name MossNativeWindow -MemberDefinition @'
     [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool SetForegroundWindow(IntPtr hWnd);
-}
-"@
+'@ | Out-Null
     }
-    $consoleHandle=[MossNativeWindow]::GetConsoleWindow()
-    if($consoleHandle -ne [IntPtr]::Zero){[void][MossNativeWindow]::ShowWindow($consoleHandle,0)}
+    $consoleHandle=[Moss.MossNativeWindow]::GetConsoleWindow()
+    if($consoleHandle -ne [IntPtr]::Zero){[void][Moss.MossNativeWindow]::ShowWindow($consoleHandle,0)}
 }
 
 function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history',[System.Windows.Forms.Form]$Owner=$null) {
@@ -322,6 +399,15 @@ function Get-BackendRecommendation([object[]]$inventory) {
 }
 
 Load-Settings
+$script:Inventory = @()
+$script:RecommendedBackend = ''
+
+# ---- HARDWARE SETUP DIALOG (built on demand) ---------------------------------
+# v0.2.3: the setup form (and the GPU scan it needs) used to be built on EVERY
+# launch, even though it is only shown on the first run or when Hardware / Setup
+# is opened. Building it cost ~240 ms + a 155 ms adapter scan of startup time.
+# It is now a function that is called only when the dialog is really needed.
+function Show-MossSetupDialog {
 $script:Inventory = @(Get-GpuInventory)
 $script:RecommendedBackend = Get-BackendRecommendation $script:Inventory
 
@@ -382,7 +468,7 @@ $existing = [string]$script:Settings.Backend
 $selected = switch -Regex ($existing) { '^CUDA' {'CUDA (NVIDIA)';break} '^Vulkan$' {'Vulkan';break} '^HIP' {'HIP/ROCm (AMD)';break} '^SYCL' {'SYCL (Intel)';break} '^CPU' {'CPU only';break} '^Manual' {'Manual / virtual GPU';break} default {'Auto (recommended)'} }
 $backend.SelectedIndex = [Math]::Max(0, $backend.Items.IndexOf($selected))
 # Add the selector to the form (previous build populated it but never displayed it).
-$form.Controls.Add($backend)
+$form.Controls.Add($backend); Set-MossComboTheme $backend
 
 # Multi-GPU support: let the user pick a physical card. Virtual display adapters
 # are never offered as generation hardware.
@@ -400,7 +486,7 @@ $savedGpu=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $savedGp
 $gpuSelectedIndex=0
 for($gi=0;$gi -lt $gpu.Items.Count;$gi++){ if($savedGpu -ge 0 -and ([string]$gpu.Items[$gi]) -match ('^'+$savedGpu+'\s*:')){ $gpuSelectedIndex=$gi;break} }
 $gpu.SelectedIndex=$gpuSelectedIndex
-$form.Controls.Add($gpu)
+$form.Controls.Add($gpu); Set-MossComboTheme $gpu
 
 $engineLabel=New-Object System.Windows.Forms.Label; $engineLabel.Text='Engine executable:'; $engineLabel.Location=New-Object System.Drawing.Point(24,536); $engineLabel.AutoSize=$true; $form.Controls.Add($engineLabel)
 $engine=New-Object System.Windows.Forms.TextBox; $engine.Location=New-Object System.Drawing.Point(145,532); $engine.Size=New-Object System.Drawing.Size(590,26); $engine.Anchor='Top,Left,Right'; $engine.Text=[string]$script:Settings.EnginePath; $form.Controls.Add($engine)
@@ -590,6 +676,8 @@ $save.Add_Click({
 })
 
 $form.Add_Shown({ if (-not $script:Settings.HardwareSetupComplete) { [System.Windows.Forms.MessageBox]::Show('Welcome to MOSS Image Studio. Review the detected adapters and choose the backend that matches your engine build.','First-run setup',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null } })
+[void]$form.ShowDialog()
+}
 
 # ---------------- IMAGE GENERATOR ----------------
 function Test-MossPromptSafe([string]$Prompt) {
@@ -742,12 +830,27 @@ function Add-MossEnergyUsage([double]$Joules, [double]$MeasuredJoules, [double]$
     }
 }
 function Get-MossEnergySummary {
-    # Returns today's bucket, the all-time bucket and today's date.
+    # Returns today's bucket, the all-time bucket, today's date and the
+    # date energy tracking STARTED (the oldest day bucket - day buckets
+    # are appended chronologically and pruned oldest-first, so Days[0]
+    # is the beginning of the recorded history). $null when no day is
+    # recorded yet.
     $today = (Get-Date).ToString('yyyy-MM-dd')
     $ledger = Load-MossEnergy
     $day = $ledger.Days | Where-Object { [string]$_.Date -eq $today } | Select-Object -First 1
     if (-not $day) { $day = New-MossEnergyBucket; $day | Add-Member -NotePropertyName Date -NotePropertyValue $today }
-    return [pscustomobject]@{ Date = $today; Day = $day; AllTime = $ledger.AllTime }
+    $started = $null
+    $dayList = @($ledger.Days)
+    if ($dayList.Count -gt 0) {
+        # The oldest recorded day is the tracking start. Day buckets are
+        # normally appended chronologically (and pruned oldest-first), but
+        # Take the MINIMUM date so an out-of-order entry cannot lie.
+        # NOTE: '@(... | Select-Object -First 1)' yields a 1-element ARRAY
+        # in PS 5.1 - '-f' would render it as 'System.Object[]'. Pipe
+        # directly: the assignment is the scalar object.
+        $started = $dayList | ForEach-Object { [string]$_.Date } | Sort-Object | Select-Object -First 1
+    }
+    return [pscustomobject]@{ Date = $today; Day = $day; AllTime = $ledger.AllTime; Started = $started }
 }
 function Get-MossNvidiaSmiPath {
     # Vendor-neutral: returns the nvidia-smi.exe path when the NVIDIA
@@ -1296,15 +1399,20 @@ function Get-MossProbeSpeed([int64]$TotalBytes, [double]$ElapsedSec, [int64]$Ram
 }
 
 function Measure-MossDownloadSpeed([string]$url) {
-    # Downloads up to 6 MB of the file with a HARD 5-second wall budget and
+    # Downloads up to 2 MB of the file with a HARD 5-second wall budget and
     # returns the steady-state speed in MB/s (0 when it cannot be measured)
     # - used for the download-time estimate. Timeouts are deliberately
-    # short: the probe must NEVER make the user wait - 8 s to connect, 5 s
+    # short: the probe must NEVER make the user wait - 2.5 s to connect, 5 s
     # per stalled read, 5 s total read budget (previous version waited up
-    # to 20+ seconds, which the user rightly found too long).
+    # to 20+ seconds, which the user rightly found too long; the connect
+    # timeout came down from 8 s to 4 s and then to 2.5 s in v0.2.3, and the
+    # sample shrank from 6 MB to 2 MB - the speed math needs 1 MB past the
+    # 512 KB ramp, so 2 MB is enough).
+    # An unreachable server is the NORMAL case on a machine that is offline
+    # or behind a blocking proxy: it must cost ~2.5 s, not 20.
     try {
         $req=[System.Net.HttpWebRequest]::Create($url)
-        $req.Method='GET'; $req.AddRange(0,6291455); $req.Timeout=8000; $req.ReadWriteTimeout=5000; $req.UserAgent='MOSS-Image-Studio'
+        $req.Method='GET'; $req.AddRange(0,2097151); $req.Timeout=2500; $req.ReadWriteTimeout=5000; $req.UserAgent='MOSS-Image-Studio'
         $resp=$req.GetResponse()
         try {
             $sw=[System.Diagnostics.Stopwatch]::StartNew()
@@ -1316,7 +1424,7 @@ function Measure-MossDownloadSpeed([string]$url) {
                 if($r -le 0){ break }
                 $total+=$r
                 if($rampSec -lt 0 -and $total -ge $rampBytes){ $rampSec=$sw.Elapsed.TotalSeconds }
-                if($total -ge 6MB){ break }
+                if($total -ge 2MB){ break }
                 if($sw.Elapsed.TotalSeconds -ge 5.0){ break }
             }
             $sw.Stop()
@@ -1361,6 +1469,21 @@ function Load-MossRealDownloadSpeed {
         if ($best) { return [pscustomobject]@{ MBps = [double]$best.MBps; Date = [string]$best.Date; Bytes = [int64]$best.Bytes } }
     } catch {}
     return $null
+}
+function Get-MossCachedDownloadSpeed([int]$MaxAgeDays = 7) {
+    # The last MEASURED download speed, taken from the CACHE ONLY - this
+    # function never touches the network.
+    # v0.2.3: measuring the speed means downloading 6 MB from the model
+    # server. That is only worth doing when a download is really about to
+    # start. Everywhere else (startup, opening a dialog) MOSS uses this
+    # cached number and says 'depends on your connection' when there is none.
+    try {
+        $real = Load-MossRealDownloadSpeed
+        if ($real) {
+            try { if (((Get-Date) - [datetime]$real.Date) -le [TimeSpan]::FromDays($MaxAgeDays)) { return [double]$real.MBps } } catch {}
+        }
+    } catch {}
+    return 0
 }
 function Get-MossDownloadSpeedEstimate([string]$url, [int]$MaxAgeDays = 7) {
     # The best available download speed (MB/s, 0 when unknown):
@@ -1433,6 +1556,32 @@ function Test-MossOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
     try {
         $enginePath=Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)
         $engineOk=Test-Path -LiteralPath $enginePath -PathType Leaf
+        # v0.2.3: LOCAL FIRST. When the engine and every known model file are
+        # present on disk, NOTHING can be 'not installed', so the remote size
+        # lookup (4 network calls to huggingface.co, ~0.9 s) is not needed at
+        # all - that was the last slow thing left in MOSS's startup.
+        $knownLocal=@(
+            @{ Name='moss_image_sft_int8_convrot.safetensors'; Setting='DiffusionModelPath' },
+            @{ Name='flux2-vae.safetensors'; Setting='VaePath' },
+            @{ Name='Qwen3.5-9B-Q4_K_M.gguf'; Setting='LlmPath' },
+            @{ Name='tokenizer_qwen3.5.json'; Setting='TokenizerPath' },
+            @{ Name='RealESRGAN_x4plus.pth'; Setting='' }
+        )
+        $allLocal=$true
+        foreach($k in $knownLocal){
+            $found=$false
+            if($k.Setting -and $script:Settings.Contains($k.Setting)){
+                $cand=Get-AbsoluteAppPath ([string]$script:Settings[$k.Setting])
+                if($cand -and (Test-Path -LiteralPath $cand -PathType Leaf)){ $found=$true }
+            }
+            if(-not $found){
+                $mdir=Join-Path $script:AppRoot 'models'
+                if(Test-Path -LiteralPath (Join-Path $mdir $k.Name) -PathType Leaf){ $found=$true }
+                elseif(Test-Path -LiteralPath (Join-Path (Join-Path $mdir 'upscalers') $k.Name) -PathType Leaf){ $found=$true }
+            }
+            if(-not $found){ $allLocal=$false; break }
+        }
+        if($engineOk -and $allLocal){ return }
         $missing=@()
         $modelsTotal=0
         $firstMissingUrl=''
@@ -1450,7 +1599,10 @@ function Test-MossOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
             foreach($m in $missing){ $lines+=('  - model '+$m+' is missing') }
             $est=''
             if($modelsTotal -gt 0 -and $firstMissingUrl){
-                $spd=Get-MossDownloadSpeedEstimate $firstMissingUrl
+                # v0.2.3: CACHED speed only - the startup offer must not
+                # download 6 MB just to print an estimate. The real probe
+                # runs later, when a download is actually confirmed.
+                $spd=Get-MossCachedDownloadSpeed
                 if($spd -gt 0){ $est=' At your measured speed ('+[math]::Round($spd,1)+' MB/s) this takes about '+[math]::Round($modelsTotal/1MB/$spd/60,0)+' minutes.' }
             }
             # Not enough room on MOSS's current drive? Suggest a better place
@@ -1542,10 +1694,12 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null) {
     $modelFailed=@($modelInfos | Where-Object { $_.Status -eq 'check failed' -or $_.Status -eq 'no matching file at the source' })
     [void]$log.Add(('Model check: '+$modelInfos.Count+' known sources, '+$script:MossDlgModels.Count+' need attention'))
     foreach($mi in $modelInfos){ [void]$log.Add(('Model '+$mi.Name+': '+$mi.Status)) }
-    # Measure the download speed once (4 MB range request) so the confirm
-    # dialog can give a real time estimate instead of a guess.
-    $measuredSpeed=0
-    foreach($mi in $script:MossDlgModels){ if($mi.RemoteUrl){ $measuredSpeed=Get-MossDownloadSpeedEstimate ([string]$mi.RemoteUrl); break } }
+    # The download speed for the time estimate, from the CACHE only.
+    # v0.2.3: this used to MEASURE the speed (a 6 MB download) as soon as
+    # the dialog opened - even when the user only wanted to LOOK and closed
+    # the dialog again. The real probe now runs only just before a download
+    # is actually confirmed.
+    $measuredSpeed=Get-MossCachedDownloadSpeed
     if($measuredSpeed -gt 0){ [void]$log.Add(('Measured download speed: '+[math]::Round($measuredSpeed,1)+' MB/s')) } else { [void]$log.Add('Download speed could not be measured') }
 
     # Dialog: release list + changelog reader + variant selection + installer.
@@ -1585,7 +1739,7 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null) {
     $releaseList.Add_SelectedIndexChanged($showNotes)
     & $showNotes
     $variantLabel=New-Object System.Windows.Forms.Label; $variantLabel.Text='ENGINE VARIANT (what your current engine becomes)'; $variantLabel.Location=New-Object System.Drawing.Point(12,344); $variantLabel.Size=New-Object System.Drawing.Size(400,20); $variantLabel.ForeColor=$cMuted; $g.Controls.Add($variantLabel)
-    $variant=New-Object System.Windows.Forms.ComboBox; $variant.DropDownStyle='DropDownList'; $variant.Location=New-Object System.Drawing.Point(12,364); $variant.Size=New-Object System.Drawing.Size(280,26); $variant.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $variant.ForeColor=$cText; $g.Controls.Add($variant)
+    $variant=New-Object System.Windows.Forms.ComboBox; $variant.DropDownStyle='DropDownList'; $variant.Location=New-Object System.Drawing.Point(12,364); $variant.Size=New-Object System.Drawing.Size(280,26); $variant.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $variant.ForeColor=$cText; $g.Controls.Add($variant); Set-MossComboTheme $variant $g
     # The CUDA versions offered are read from the selected release itself, so
     # cuda11 / cuda12 / a future cuda13 all appear automatically. The driver's
     # own CUDA capability is read from nvidia-smi so Auto can pick a build the
@@ -1836,6 +1990,13 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null) {
         $modelText=if($modelPlan.Count -gt 0){ ((($modelPlan | ForEach-Object { '  '+$_.Name+'  ('+[math]::Round($_.RemoteSize/1GB,2)+' GB download, current file: '+$(if($_.LocalSize -gt 0){[math]::Round($_.LocalSize/1GB,2)+' GB'}else{'not installed'})+')' }) -join "`r`n")+"`r`n  Old model files: "+$(if($modelBackupCheck.Checked){'kept as <name>.old-<time> (renamed, instant - older backups beyond the newest 3 are deleted automatically)'}else{'overwritten WITHOUT a backup'})) } else { '  (no model updates selected)' }
         $modelText+="`r`n"
         $timeText='depends on your connection'
+        if($measuredSpeed -le 0 -and $modelsTotal -gt 0){
+            # v0.2.3: the user is about to download - this is the ONE moment
+            # where measuring the speed (6 MB range request) is worth it.
+            $probeUrl=''
+            foreach($mi in $modelPlan){ if($mi.RemoteUrl){ $probeUrl=[string]$mi.RemoteUrl; break } }
+            if($probeUrl){ $measuredSpeed=Get-MossDownloadSpeedEstimate $probeUrl }
+        }
         if($measuredSpeed -gt 0 -and $modelsTotal -gt 0){ $timeText='about '+[math]::Round(($modelsTotal/1MB)/$measuredSpeed/60,0)+' minutes for the models at your measured speed ('+[math]::Round($measuredSpeed,1)+' MB/s)' }
         $dlText=''
         foreach($p in $plan){ $a=$engineAssets[$p.Key]; $dlText+=((('  '+$a.name)+'  ('+[math]::Round($a.size/1MB)+' MB)')+"`r`n") }
@@ -2153,29 +2314,46 @@ function Show-GeneratorWindow {
     # (output folder, model files, benchmarks, error report) moved into the
     # header Options menu, so the left panel holds only generation controls
     # and got much shorter. Update-MossLeftActionLayout is static now.
-    $f.Text = "MOSS Image Studio v$($script:AppVersion) (GUI for sd-cli) | Generator"; $f.Size = New-Object System.Drawing.Size(1052,551); $f.MinimumSize = New-Object System.Drawing.Size(900,550); $f.StartPosition='CenterScreen'
+    $f.Text = "MOSS Image Studio v$($script:AppVersion) (GUI for sd-cli) | Generator"; $f.ClientSize = New-Object System.Drawing.Size(1000,500); $f.MinimumSize = New-Object System.Drawing.Size(880,539); $f.StartPosition='CenterScreen'
     # Small screens (v0.1.91): shrink to the work area on first show (the
     # layout is anchored and adapts) and lower the minimum size to what the
     # screen actually offers. The caps track the compact default height.
-    $f.Add_Shown({
-        try {
-            $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-            $mw = [Math]::Min(900, $wa.Width - 16)
-            $mh = [Math]::Min(550, $wa.Height - 16)
-            $f.MinimumSize = New-Object System.Drawing.Size([Math]::Max(600,$mw), [Math]::Max(500,$mh))
-            $nw = [Math]::Min($f.Width, $wa.Width - 16)
-            $nh = [Math]::Min($f.Height, $wa.Height - 16)
-            if ($nw -ne $f.Width -or $nh -ne $f.Height) {
-                $f.Size = New-Object System.Drawing.Size($nw, $nh)
-                $f.Location = New-Object System.Drawing.Point([Math]::Max(0, [int](($wa.Width - $nw) / 2)), [Math]::Max(0, [int](($wa.Height - $nh) / 2)))
-            }
-            # Compact flow (v0.1.96): re-apply the flow layout after any
-            # startup shrink so the action row / status / progress sit right
-            # below the content at the final window size.
-            Update-MossLeftActionLayout
-        } catch {}
-    })
+    # v0.2.3: the window is shown EARLY (frame + header + the two card
+    # panels) and the controls are added while the user already looks at it.
+    # The old code built every control first and only then showed the
+    # window, so MOSS stayed invisible for ~0.8 s. The screen-fit code that
+    # used to run in the Shown event now runs explicitly after the build
+    # (see below) - the Shown event fires far too early for it.
+    # v0.2.3: this lives in a SCRIPT variable, not on the Form: assigning an
+    # unknown property to a .NET object ('$f.ScreenFit = {...}') throws in
+    # PowerShell (the same trap as ComboBox.FlatAppearance).
+    $script:MossScreenFit={
+        $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        $mw = [Math]::Min(880, $wa.Width - 16)
+        $mh = [Math]::Min(539, $wa.Height - 16)
+        $f.MinimumSize = New-Object System.Drawing.Size([Math]::Max(600,$mw), [Math]::Max(500,$mh))
+        $nw = [Math]::Min($f.Width, $wa.Width - 16)
+        $nh = [Math]::Min($f.Height, $wa.Height - 16)
+        if ($nw -ne $f.Width -or $nh -ne $f.Height) {
+            $f.Size = New-Object System.Drawing.Size($nw, $nh)
+            $f.Location = New-Object System.Drawing.Point([Math]::Max(0, [int](($wa.Width - $nw) / 2)), [Math]::Max(0, [int](($wa.Height - $nh) / 2)))
+        }
+    }
     $f.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $f.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $f.Font=New-Object System.Drawing.Font('Segoe UI',9)
+    # v0.2.3: SHOW THE WINDOW AS EARLY AS POSSIBLE. The frame is on screen
+    # within a few hundred milliseconds; the header, panels and controls are
+    # added to the visible window right after this, so MOSS pops up now
+    # instead of after the whole UI has been built (~0.8 s).
+    try { $f.Show(); $f.Activate() } catch {}
+    try { $f.Refresh() } catch {}
+    # v0.2.3: SHOW THE WINDOW AS EARLY AS POSSIBLE. The frame is on screen
+    # within a few hundred milliseconds; the header, panels and controls are
+    # added to the visible window right after this, so MOSS pops up now
+    # instead of after the whole UI has been built (~0.8 s).
+    # v0.2.3: Refresh() paints the window synchronously. Without it the paint
+    # is queued until the message loop starts, so the user would stare at an
+    # empty frame for the whole build.
+    try { $f.Refresh() } catch {}
     $cPanel=[System.Drawing.Color]::FromArgb(25,32,45); $cCard=[System.Drawing.Color]::FromArgb(27,34,47); $cText=[System.Drawing.Color]::FromArgb(230,236,245); $cMuted=[System.Drawing.Color]::FromArgb(145,161,185); $cAccent=[System.Drawing.Color]::FromArgb(45,112,173)
 
     # Compact header (v0.1.96): 68 -> 50 px, title 17 pt -> 13 pt, buttons
@@ -2184,19 +2362,28 @@ function Show-GeneratorWindow {
     $ttl=New-Object System.Windows.Forms.Label; $ttl.Text="MOSS  /  IMAGE STUDIO  v$($script:AppVersion)"; $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',13,[System.Drawing.FontStyle]::Bold); $ttl.AutoSize=$true; $ttl.Location=New-Object System.Drawing.Point(20,5); $head.Controls.Add($ttl)
     $gpuSubtitle='GPU: automatic'
     if($script:Settings.Contains('PreferredGpuIndex') -and [int]$script:Settings.PreferredGpuIndex -ge 0){
-        $gpuSubtitle="GPU: $(Get-MossShortName ([string]$script:Settings.PreferredGpuName) 24)"
+        $gpuSubtitle="GPU: $(Get-MossShortName ([string]$script:Settings.PreferredGpuName) 34)"
         if([string]::IsNullOrWhiteSpace([string]$script:Settings.PreferredGpuName)){ $gpuSubtitle="GPU: device $($script:Settings.PreferredGpuIndex)" }
     } else {
         # Automatic still SHOWS which GPU will be used (user: 'it should
         # instead show what gpu was chosen'). The engine picks the best
         # available device at start; the detected discrete adapter is what it
         # will be in practice.
-        try {
-            $gpusAuto = @(Get-GpuInventory | Where-Object { -not $_.IsVirtual -and $_.Vendor -ne 'Unknown' })
-            if ($gpusAuto.Count -gt 0) { $gpuSubtitle = 'GPU: ' + (Get-MossShortName ([string]$gpusAuto[0].Name) 24) }
-        } catch {}
+        # v0.2.3: the adapter scan takes ~155 ms, so it no longer runs BEFORE
+        # the window is shown. The header starts with 'GPU: detecting...' and
+        # the label is filled in as soon as the window is up (see the Shown
+        # handler below).
+        $gpuSubtitle = 'GPU: detecting...'
     }
     $subt=New-Object System.Windows.Forms.Label; $subt.Text="LOCAL IMAGE GENERATION  -  $gpuSubtitle"; $subt.ForeColor=$cMuted; $subt.AutoSize=$true; $subt.Location=New-Object System.Drawing.Point(23,29); $head.Controls.Add($subt)
+    # v0.2.3: the GPU name is filled in AFTER the window is visible (the scan
+    # costs ~155 ms and must not delay the first paint).
+    # v0.2.3: the truncation is inlined on purpose. Get-MossShortName is a
+    # NESTED function of this one, and GetNewClosure captures variables but
+    # NOT nested function definitions - calling it from the closure ended in
+    # 'Get-MossShortName is not recognized' and the header stayed on
+    # 'GPU: detecting...' forever.
+    $script:RefreshGpuSubtitle={ $all=@(Get-GpuInventory); $script:Inventory=$all; $tryGpus=@($all | Where-Object { -not $_.IsVirtual -and $_.Vendor -ne 'Unknown' }); if($tryGpus.Count -gt 0){ $gname=[string]$tryGpus[0].Name; if($gname.Length -gt 34){ $gname=$gname.Substring(0,33).TrimEnd()+[char]0x2026 }; $subt.Text="LOCAL IMAGE GENERATION  -  GPU: $gname" } else { $subt.Text="LOCAL IMAGE GENERATION  -  GPU: not detected" } }.GetNewClosure()
     $backendText=[string]$script:Settings.Backend; if (-not $script:Settings.BackendSelectionSaved) { $backendText='Not configured' }
     $backendBadge=New-Object System.Windows.Forms.Label; $backendBadge.Text="BACKEND  $backendText"; $backendBadge.AutoSize=$true; $backendBadge.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $backendBadge.Location=New-Object System.Drawing.Point(535,17); $head.Controls.Add($backendBadge)
     # Header OPTIONS MENU (v0.1.97, user: 'these are really options'): the
@@ -2344,15 +2531,22 @@ try {
     # 496 px tall - exactly the collapsed-content height. The action row,
     # status line and progress bar flow below the content instead of being
     # pinned to a fixed bottom edge.
-    $left=New-Object System.Windows.Forms.Panel; $left.Location=New-Object System.Drawing.Point(18,58); $left.Size=New-Object System.Drawing.Size(620,440); $left.Anchor='Top,Bottom,Left'; $left.BackColor=$cCard; $f.Controls.Add($left)
-    $right=New-Object System.Windows.Forms.Panel; $right.Location=New-Object System.Drawing.Point(654,58); $right.Size=New-Object System.Drawing.Size(380,440); $right.Anchor='Top,Bottom,Left,Right'; $right.BackColor=$cCard; $f.Controls.Add($right)
-    function Add-Label($parent,[string]$text,[int]$x,[int]$y,[int]$w=200) { $l=New-Object System.Windows.Forms.Label; $l.Text=$text; $l.Location=New-Object System.Drawing.Point($x,$y); $l.Size=New-Object System.Drawing.Size($w,22); $l.ForeColor=$cMuted; $parent.Controls.Add($l); return $l }
+    $left=New-Object System.Windows.Forms.Panel; $left.Location=New-Object System.Drawing.Point(18,58); $left.Size=New-Object System.Drawing.Size(600,430); $left.Anchor='Top,Bottom,Left'; $left.BackColor=$cCard; $f.Controls.Add($left)
+    $right=New-Object System.Windows.Forms.Panel; $right.Location=New-Object System.Drawing.Point(634,58); $right.Size=New-Object System.Drawing.Size(366,430); $right.Anchor='Top,Bottom,Left,Right'; $right.BackColor=$cCard; $f.Controls.Add($right)
+    # v0.2.3: the frame is already on screen (early Show() above); the
+    # controls now fill the visible panels.
+    # v0.2.2: the label box was 22 px tall for a single 9 pt line, so it
+    # overlapped the widget below it by 4-5 px. WinForms keeps the label on
+    # top (it was added first), which turned that strip into a dead click
+    # zone over the top of the input underneath. A 16 px box clears every
+    # row: the labels sit above their fields without touching them.
+    function Add-Label($parent,[string]$text,[int]$x,[int]$y,[int]$w=200) { $l=New-Object System.Windows.Forms.Label; $l.Text=$text; $l.Location=New-Object System.Drawing.Point($x,$y); $l.Size=New-Object System.Drawing.Size($w,16); $l.ForeColor=$cMuted; $parent.Controls.Add($l); return $l }
     function Add-TextBox($parent,[string]$value,[int]$x,[int]$y,[int]$w,[int]$h=26) { $t=New-Object System.Windows.Forms.TextBox; $t.Text=$value; $t.Location=New-Object System.Drawing.Point($x,$y); $t.Size=New-Object System.Drawing.Size($w,$h); $t.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $t.ForeColor=$cText; $t.BorderStyle='FixedSingle'; $parent.Controls.Add($t); return $t }
     function Add-Button($parent,[string]$text,[int]$x,[int]$y,[int]$w,[int]$h=29) { $b=New-Object System.Windows.Forms.Button; $b.Text=$text; $b.Location=New-Object System.Drawing.Point($x,$y); $b.Size=New-Object System.Drawing.Size($w,$h); $b.FlatStyle='Flat'; $b.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $b.ForeColor=$cText; $parent.Controls.Add($b); return $b }
 
     Add-Label $left 'Prompt' 18 10 180 | Out-Null
-    $historyPick=New-Object System.Windows.Forms.ComboBox; $historyPick.DropDownStyle='DropDownList'; $historyPick.Location=New-Object System.Drawing.Point(275,7); $historyPick.Size=New-Object System.Drawing.Size(150,25); $historyPick.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $historyPick.ForeColor=$cText; $left.Controls.Add($historyPick)
-    $resetHistoryCode=Add-Button $left 'History code...' 431 7 90 25
+    $historyPick=New-Object System.Windows.Forms.ComboBox; $historyPick.DropDownStyle='DropDownList'; $historyPick.Location=New-Object System.Drawing.Point(255,7); $historyPick.Size=New-Object System.Drawing.Size(150,25); $historyPick.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $historyPick.ForeColor=$cText; $left.Controls.Add($historyPick); Set-MossComboTheme $historyPick $left
+    $resetHistoryCode=Add-Button $left 'History code...' 411 7 90 25
     # The button used to RESET the code directly - which DELETES the saved
     # history and gives no way to enter the existing code after skipping the
     # startup prompt (user: 'i dont get an option to enter the prompt
@@ -2378,7 +2572,7 @@ try {
     $resetHistoryCode.Add_Click({ Show-MossHistoryCodeMenu $f })
     $resetHistoryCode.Enabled=$true
     foreach($oldPrompt in @($history | Select-Object -First 10)){[void]$historyPick.Items.Add([string]$oldPrompt)}
-    $paste=Add-Button $left 'Paste' 527 7 75 25
+    $paste=Add-Button $left 'Paste' 507 7 75 25
     $paste.Enabled=$true
     # Prompt box (v0.1.95): HALF WIDTH (331 px), same 96 px height (4 lines)
     # - the full-width editor dominated the panel. Fixed width (no Right
@@ -2441,12 +2635,12 @@ try {
         $optSampler=New-Object System.Windows.Forms.ComboBox; $optSampler.DropDownStyle='DropDownList'; $optSampler.Location=New-Object System.Drawing.Point(12,192); $optSampler.Size=New-Object System.Drawing.Size(130,26); $optSampler.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSampler.ForeColor=$cText
         foreach($s in @('Default (euler)','euler','euler_a','heun','dpm2','dpm++2s_a','dpm++2m','dpm++2mv2','ipndm','ipndm_v','lcm','ddim_trailing','tcd','res_multistep','res_2s','er_sde','euler_cfg_pp','euler_a_cfg_pp','euler_ge','dpm++2m_sde','dpm++2m_sde_bt','lms')){[void]$optSampler.Items.Add($s)}
         $storedSampler=[string]$script:Settings.SamplingMethod; if($storedSampler -eq 'Default (model)'){$storedSampler='Default (euler)'}
-        $optSampler.SelectedItem=$storedSampler; if($optSampler.SelectedIndex -lt 0){$optSampler.SelectedIndex=0}; $g.Controls.Add($optSampler)
+        $optSampler.SelectedItem=$storedSampler; if($optSampler.SelectedIndex -lt 0){$optSampler.SelectedIndex=0}; $g.Controls.Add($optSampler); Set-MossComboTheme $optSampler $g
         Add-Label $g 'Scheduler' 280 170 100 | Out-Null
         $optSched=New-Object System.Windows.Forms.ComboBox; $optSched.DropDownStyle='DropDownList'; $optSched.Location=New-Object System.Drawing.Point(280,192); $optSched.Size=New-Object System.Drawing.Size(175,26); $optSched.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSched.ForeColor=$cText
         foreach($s in @('Default (flux schedule)','discrete','karras','exponential','ays','gits','sgm_uniform','simple','smoothstep','kl_optimal','lcm','bong_tangent','ltx2','logit_normal','flux2','flux','beta','llada_image')){[void]$optSched.Items.Add($s)}
         $storedSched=[string]$script:Settings.Scheduler; if($storedSched -eq 'Default (model)'){$storedSched='Default (flux schedule)'}
-        $optSched.SelectedItem=$storedSched; if($optSched.SelectedIndex -lt 0){$optSched.SelectedIndex=0}; $g.Controls.Add($optSched)
+        $optSched.SelectedItem=$storedSched; if($optSched.SelectedIndex -lt 0){$optSched.SelectedIndex=0}; $g.Controls.Add($optSched); Set-MossComboTheme $optSched $g
         # Plain-language descriptions: shown inline below each dropdown and on
         # hover, updated as the user browses the lists.
         $samplerDescriptions=@{
@@ -2544,13 +2738,13 @@ try {
     $negBtn.Add_Click({ Show-MossGenerationOptionsDialog })
     Add-Label $left 'Visual style' 18 163 130 | Out-Null
     # Snug dropdown (v0.1.97): fits 'Dark fantasy / gothic', barely.
-    $style=New-Object System.Windows.Forms.ComboBox; $style.DropDownStyle='DropDownList'; $style.Location=New-Object System.Drawing.Point(18,181); $style.Size=New-Object System.Drawing.Size(160,23); $style.MaxDropDownItems=7; $style.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $style.ForeColor=$cText; foreach($item in @('None (no style)','Photorealistic','Anime','Digital illustration','Oil painting','Watercolor','3D render','Comic book','Cinematic','Fantasy art','Dark fantasy / gothic','Cyberpunk / sci-fi','Studio portrait','Sketch / pencil drawing','Pixel art','Synthwave / retro 80s','Low poly 3D')){[void]$style.Items.Add($item)}; $style.SelectedItem=[string]$script:Settings.ImageStyle; if($style.SelectedIndex -lt 0){$style.SelectedIndex=0}; $left.Controls.Add($style)
+    $style=New-Object System.Windows.Forms.ComboBox; $style.DropDownStyle='DropDownList'; $style.Location=New-Object System.Drawing.Point(18,181); $style.Size=New-Object System.Drawing.Size(160,23); $style.MaxDropDownItems=7; $style.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $style.ForeColor=$cText; foreach($item in @('None (no style)','Photorealistic','Anime','Digital illustration','Oil painting','Watercolor','3D render','Comic book','Cinematic','Fantasy art','Dark fantasy / gothic','Cyberpunk / sci-fi','Studio portrait','Sketch / pencil drawing','Pixel art','Synthwave / retro 80s','Low poly 3D')){[void]$style.Items.Add($item)}; $style.SelectedItem=[string]$script:Settings.ImageStyle; if($style.SelectedIndex -lt 0){$style.SelectedIndex=0}; $left.Controls.Add($style); Set-MossComboTheme $style $left
     # Resolution sits UNDER Visual style (v0.1.99, user).
     Add-Label $left 'Resolution' 18 209 90 | Out-Null
     # Snug dropdown (v0.1.97): fits 'Landscape 16:9  |  1360 x 768', barely.
     $res=New-Object System.Windows.Forms.ComboBox; $res.DropDownStyle='DropDownList'; $res.Location=New-Object System.Drawing.Point(18,226); $res.Size=New-Object System.Drawing.Size(190,23); $res.MaxDropDownItems=7; $res.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $res.ForeColor=$cText
     $resItems=@('Landscape 16:9  |  1360 x 768','Square  |  1024 x 1024','Portrait 3:4  |  768 x 1024','Landscape 4:3  |  1280 x 960','Portrait 9:16  |  768 x 1360','2K Landscape  |  2560 x 1440','2K Square  |  2048 x 2048','2K Portrait  |  1536 x 2048','2K 4:3  |  2048 x 1536','2K 9:16  |  1440 x 2560','4K Landscape  |  3840 x 2160','4K Square  |  4096 x 4096','4K Portrait  |  3072 x 4096','4K 4:3  |  4096 x 3072','4K 9:16  |  2160 x 3840','Custom dimensions')
-    foreach($ri in $resItems){[void]$res.Items.Add($ri)}; $left.Controls.Add($res)
+    foreach($ri in $resItems){[void]$res.Items.Add($ri)}; $left.Controls.Add($res); Set-MossComboTheme $res $left
     $wBox=Add-TextBox $left ([string]$script:Settings.Width) 232 226 82 23; $hBox=Add-TextBox $left ([string]$script:Settings.Height) 327 226 82 23
     Add-Label $left 'Width' 232 209 80 | Out-Null; Add-Label $left 'Height' 327 209 80 | Out-Null
     $resMap=@(@(1360,768),@(1024,1024),@(768,1024),@(1280,960),@(768,1360),@(2560,1440),@(2048,2048),@(1536,2048),@(2048,1536),@(1440,2560),@(3840,2160),@(4096,4096),@(3072,4096),@(4096,3072),@(2160,3840))
@@ -2562,14 +2756,14 @@ try {
     $cfgHelp.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("CFG scale (Classifier-Free Guidance) controls how strictly the image follows your prompt.`r`n`r`n- Low (1-4): more artistic freedom, softer prompt adherence. This model is tuned for this range - the default 3 suits it well.`r`n- Medium (5-10): stronger prompt following; colors and contrast grow.`r`n- High (15-30): forces the prompt hard - often causes burned, oversaturated or distorted images.`r`n`r`nRule of thumb: raise it only if the image ignores parts of your prompt; lower it if images look overcooked.",'What is CFG scale?',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
     })
-    Add-Label $left 'Images' 202 254 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDown'; $count.Location=New-Object System.Drawing.Point(202,271); $count.Size=New-Object System.Drawing.Size(75,23); foreach($n in @(1,2,4,8,16,32,64,128,256,512,1000)){[void]$count.Items.Add([string]$n)}; $count.Text=[string]$script:Settings.ImageCount; $left.Controls.Add($count)
+    Add-Label $left 'Images' 202 254 70 | Out-Null; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDown'; $count.Location=New-Object System.Drawing.Point(202,271); $count.Size=New-Object System.Drawing.Size(75,23); foreach($n in @(1,2,4,8,16,32,64,128,256,512,1000)){[void]$count.Items.Add([string]$n)}; $count.Text=[string]$script:Settings.ImageCount; $left.Controls.Add($count); Set-MossComboTheme $count $left
     Add-Label $left 'Seed (-1 = random)' 284 254 116 | Out-Null; $seed=Add-TextBox $left ([string]$script:Settings.Seed) 284 271 90 23
     # Speed modes (v0.1.93): 8x and Fastest REMOVED from the UI - measured,
     # their drafts (35% / 128-px side) are too soft to be useful and cannot
     # be rescued by any improve (see Test-MossUltraSoftDraft). The engine
     # and all internal helpers still SUPPORT '8x'/'Fast' for old benchmark
     # data, old queue items and the OOM auto-retry ladder.
-    $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(404,271); $speedCombo.Size=New-Object System.Drawing.Size(130,23); $speedCombo.MaxDropDownItems=3; $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (full quality)','~2x faster (70%)','~4x faster (50%)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo)
+    $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(404,271); $speedCombo.Size=New-Object System.Drawing.Size(130,23); $speedCombo.MaxDropDownItems=3; $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (full quality)','~2x faster (70%)','~4x faster (50%)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo); Set-MossComboTheme $speedCombo $left
     $speedHint=New-Object System.Windows.Forms.Label; $speedHint.Text='Faster modes render the image small and enlarge it - quick drafts. Exact = full size, full steps.'; $speedHint.Location=New-Object System.Drawing.Point(284,296); $speedHint.Size=New-Object System.Drawing.Size(250,46); $speedHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $left.Controls.Add($speedHint)
     # OUTPUT FOLDER (v0.1.98): MOVED INTO THE HEADER OPTIONS MENU (user).
     # The read-only textbox stays as a HIDDEN state holder - the generate
@@ -2598,7 +2792,7 @@ try {
     }
     function Show-MossModelFilesDialog {
         $g=New-Object System.Windows.Forms.Form
-        $g.Text='Model files'; $g.Size=New-Object System.Drawing.Size(560,252); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
+        $g.Text='Model files'; $g.Size=New-Object System.Drawing.Size(560,266); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
         $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
         $hint=New-Object System.Windows.Forms.Label; $hint.Text='The engine and model files MOSS loads. Paths are resolved against the MOSS folder.'; $hint.Location=New-Object System.Drawing.Point(12,10); $hint.Size=New-Object System.Drawing.Size(520,20); $hint.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($hint)
         $dlgBoxes=@{}
@@ -2636,6 +2830,7 @@ try {
     # row is placed by Update-MossLeftActionLayout right below the speed
     # hint; with Output folder / Model files / Error report / Benchmarks in
     # the header Options menu, only the four generation actions remain.
+    try { $f.Refresh() } catch {}
     $generate=Add-Button $left 'Generate' 18 348 96 24; $generate.BackColor=$cAccent; $generate.ForeColor=[System.Drawing.Color]::White; $generate.Font=New-Object System.Drawing.Font('Segoe UI Semibold',9,[System.Drawing.FontStyle]::Bold)
     $cancel=Add-Button $left 'Cancel' 120 348 56 24; $cancel.Enabled=$false
     # Pause/Resume (v0.1.91): freezes the RUNNING engine process for real
@@ -2796,7 +2991,7 @@ try {
         $cbW.Text = [string]$wBox.Text; $cbH.Text = [string]$hBox.Text; $cbS.Text = [string]$steps.Text
         try { $cbN.Text = [string]([int]$count.Text) } catch { $cbN.Text = '16' }
         $cbMLbl = New-Object System.Windows.Forms.Label; $cbMLbl.Text = 'Mode'; $cbMLbl.Location = New-Object System.Drawing.Point(458, 474); $cbMLbl.Size = New-Object System.Drawing.Size(36, 18); $cbMLbl.ForeColor = $cMuted; $g.Controls.Add($cbMLbl)
-        $cbM = New-Object System.Windows.Forms.ComboBox; $cbM.DropDownStyle = 'DropDownList'; [void]$cbM.Items.AddRange(@('Exact', '2x', '4x')); $cbM.SelectedIndex = 0; $cbM.Location = New-Object System.Drawing.Point(496, 470); $cbM.Size = New-Object System.Drawing.Size(86, 23); $g.Controls.Add($cbM)
+        $cbM = New-Object System.Windows.Forms.ComboBox; $cbM.DropDownStyle = 'DropDownList'; [void]$cbM.Items.AddRange(@('Exact', '2x', '4x')); $cbM.SelectedIndex = 0; $cbM.Location = New-Object System.Drawing.Point(496, 470); $cbM.Size = New-Object System.Drawing.Size(86, 23); $g.Controls.Add($cbM); Set-MossComboTheme $cbM $g
         $calcBtn = Add-Button $g 'Estimate time...' 594 468 154 28
         $calcOut = New-Object System.Windows.Forms.Label; $calcOut.Location = New-Object System.Drawing.Point(14, 506); $calcOut.Size = New-Object System.Drawing.Size(734, 88); $calcOut.ForeColor = [System.Drawing.Color]::FromArgb(125, 205, 164); $g.Controls.Add($calcOut)
         $calcBtn.Add_Click({
@@ -2832,10 +3027,23 @@ try {
         $powerClear = Add-Button $g 'Reset all-time...' 142 680 130 28
         $updatePower = {
             $sum = Get-MossEnergySummary
-            $fmt = { param($b) ('{0:N3} kWh over {1} across {2} run(s), {3} image(s)' -f ([double]$b.Wh / 1000.0), (Format-MossDuration [double]$b.Seconds), [int]$b.Runs, [int]$b.Images) }
+            $fmt = { param($b) ('{0:N3} kWh over {1} across {2} run(s), {3} image(s)' -f ([double]$b.Wh / 1000.0), (Format-MossDuration ([double]$b.Seconds)), [int]$b.Runs, [int]$b.Images) }
             $sessLine = ('Session (since this app start):  {0}' -f (& $fmt $script:SessionEnergy))
             $dayLine = ('Today ({0}):  {1}' -f $sum.Date, (& $fmt $sum.Day))
-            $allLine = ('All time:  {0}' -f (& $fmt $sum.AllTime))
+            # All time with its start: the tracking start date, how long ago
+            # that was, and the average watts over the whole history.
+            $allLine = $(if ($sum.Started) {
+                $age = $(if ([string]$sum.Started -eq [string]$sum.Date) { 'started today' } else {
+                    $sd = [datetime]::ParseExact($sum.Started, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+                    $dAgo = [int]([datetime]::Today - $sd.Date).TotalDays
+                    if ($dAgo -le 1) { '1 day ago' } else { ('{0} days ago' -f $dAgo) }
+                })
+                $avgW = ''
+                if ([double]$sum.AllTime.Seconds -gt 0) {
+                    $avgW = (' - ~{0} W average' -f [int][Math]::Round(([double]$sum.AllTime.Wh * 3600.0) / [double]$sum.AllTime.Seconds, 0))
+                }
+                ('All time (since {0} - {1}):  {2}{3}' -f ([string]$sum.Started), ([string]$age), (& $fmt $sum.AllTime), ([string]$avgW))
+            } else { ('All time:  {0}' -f (& $fmt $sum.AllTime)) })
             $methLine = $(if ($sum.AllTime.Wh -gt 0) { ('of which {0:N3} kWh measured directly (nvidia-smi); the rest is estimated from the GPU rating.' -f ([double]$sum.AllTime.MeasuredWh / 1000.0)) } else { 'No energy recorded yet - it fills in automatically as you render.' })
             $liveLine = ''
             $st = $script:GenState
@@ -2872,7 +3080,7 @@ try {
             $c.Location = New-Object System.Drawing.Point($c.Left, $rowY)
         }
         $status.Location = New-Object System.Drawing.Point(18, ($rowY + 28))
-        $prog.Location = New-Object System.Drawing.Point(18, ($rowY + 70))
+        $prog.Location = New-Object System.Drawing.Point(18, ($rowY + 64))
     }
     # (First placement happens after the status line and progress bar are
     # created - see the call directly below $prog.)
@@ -2901,13 +3109,13 @@ try {
     # notes wrap over TWO lines. v0.1.96: the y position is set by
     # Update-MossLeftActionLayout (flows below the action row); the anchor
     # is now Top so the flow layout owns the position.
-    $status=New-Object System.Windows.Forms.Label; $status.Text='Ready'; $status.Location=New-Object System.Drawing.Point(18,376); $status.Size=New-Object System.Drawing.Size(584,40); $status.Anchor='Top,Left,Right'; $status.ForeColor=$cMuted; $status.Font=New-Object System.Drawing.Font('Consolas',9); $left.Controls.Add($status)
+    $status=New-Object System.Windows.Forms.Label; $status.Text='Ready'; $status.Location=New-Object System.Drawing.Point(18,376); $status.Size=New-Object System.Drawing.Size(564,34); $status.Anchor='Top,Left,Right'; $status.ForeColor=$cMuted; $status.Font=New-Object System.Drawing.Font('Consolas',9); $left.Controls.Add($status)
     # Progress bar (v0.1.96): flows below the status line, full panel width.
     # (It used to be pinned to the very bottom edge with a Bottom anchor;
     # the flow layout replaces that.) All the numbers (% overall, step N/M,
     # ETA) live in the status line directly above; the old right-side
     # numeric readout was removed (it duplicated them).
-    $prog=New-Object System.Windows.Forms.ProgressBar; $prog.Location=New-Object System.Drawing.Point(18,418); $prog.Size=New-Object System.Drawing.Size(584,14); $prog.Anchor='Top,Left,Right'; $prog.Style='Blocks'; $prog.Visible=$false; $left.Controls.Add($prog)
+    $prog=New-Object System.Windows.Forms.ProgressBar; $prog.Location=New-Object System.Drawing.Point(18,412); $prog.Size=New-Object System.Drawing.Size(564,14); $prog.Anchor='Top,Left,Right'; $prog.Style='Blocks'; $prog.Visible=$false; $left.Controls.Add($prog)
     Update-MossLeftActionLayout
 
     Add-Label $right 'Output preview' 16 14 200 | Out-Null
@@ -3061,6 +3269,7 @@ try {
     }
     $script:LogVisible = $false
     Update-MossRightLayout
+    try { $f.Refresh() } catch {}
     # No GetNewClosure here: closures run in a module scope that cannot see
     # functions defined inside Show-GeneratorWindow (caused a
     # CommandNotFoundException crash on show/resize in v0.1.19).
@@ -3707,9 +3916,14 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
             $argsList.Add('--strength'); $argsList.Add((ConvertFrom-MossDouble ([double]$job.InitStrength)))
         }
         # Optional sampler/scheduler: 'Default (model)' means the flag is omitted
-        # so the engine keeps its model-specific choice.
-        if ($job.SamplingMethod) { $argsList.Add('--sampling-method'); $argsList.Add([string]$job.SamplingMethod) }
-        if ($job.Scheduler) { $argsList.Add('--scheduler'); $argsList.Add([string]$job.Scheduler) }
+        # so the engine keeps its model-specific choice. Choke-point guard (v0.2.0):
+        # OLD sidecars can still carry the DISPLAY label 'Default (model)' — it
+        # must never reach the engine as --sampling-method 'Default (model)'
+        # (overnight error: unknown argument: (model)).
+        $argSampler=[string]$job.SamplingMethod; if($argSampler -match '^Default \('){ $argSampler=$null }
+        $argSched=[string]$job.Scheduler; if($argSched -match '^Default \('){ $argSched=$null }
+        if ($argSampler) { $argsList.Add('--sampling-method'); $argsList.Add((Quote-ProcessArgument $argSampler)) }
+        if ($argSched) { $argsList.Add('--scheduler'); $argsList.Add((Quote-ProcessArgument $argSched)) }
         # Negative prompt (engine flag -n), flattened to a single line like
         # the positive prompt.
         $effectiveNegative = [string]$job.NegativePrompt
@@ -4361,7 +4575,7 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
             try {
                 $sc = Get-Content -LiteralPath $sidecar -Raw | ConvertFrom-Json
                 if ($sc.Seed) { $d.Seed = [long]$sc.Seed }
-                if ($sc.Sampler) { $d.SamplingMethod = [string]$sc.Sampler }
+                if ($sc.Sampler -and ([string]$sc.Sampler -notmatch '^Default \(')) { $d.SamplingMethod = [string]$sc.Sampler }
                 if ($sc.Scheduler) { $d.Scheduler = [string]$sc.Scheduler }
                 if (-not $script:HistoryLocked -and $script:HistoryPassphrase -and $sc.PromptProtected) {
                     try { $p = Unprotect-MossPayload ([string]$sc.PromptProtected) $script:HistoryPassphrase; if ($p) { $d.Prompt = [string]$p } } catch {}
@@ -4513,7 +4727,7 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
         $rSame=New-Object System.Windows.Forms.RadioButton; $rSame.Text='Same size (fastest) - plain improve'; $rSame.Location=New-Object System.Drawing.Point(14,184); $rSame.Size=New-Object System.Drawing.Size(556,22); $rSame.ForeColor=$g.ForeColor; $g.Controls.Add($rSame)
         $rFast=New-Object System.Windows.Forms.RadioButton; $rFast.Text='Sharp - fast upscaler (recommended for drafts: renders at half size in ONE pass, then the upscaler sharpens to 2x)'; $rFast.Location=New-Object System.Drawing.Point(14,206); $rFast.Size=New-Object System.Drawing.Size(556,22); $rFast.ForeColor=$g.ForeColor; $rFast.Enabled=($null -ne $upscalePath); $g.Controls.Add($rFast)
         $umLab=New-Object System.Windows.Forms.Label; $umLab.Text='Upscaler model (yours to pick):'; $umLab.Location=New-Object System.Drawing.Point(14,232); $umLab.Size=New-Object System.Drawing.Size(180,20); $umLab.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($umLab)
-        $umCombo=New-Object System.Windows.Forms.ComboBox; $umCombo.DropDownStyle='DropDownList'; $umCombo.Location=New-Object System.Drawing.Point(200,228); $umCombo.Size=New-Object System.Drawing.Size(370,24); foreach($m in $upscaleModels){ [void]$umCombo.Items.Add((Split-Path -Leaf $m)) }; if($upscalePath){ $umCombo.SelectedIndex=[Math]::Max(0,@($upscaleModels).IndexOf($upscalePath)) }; $umCombo.ForeColor=$g.ForeColor; $umCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $g.Controls.Add($umCombo)
+        $umCombo=New-Object System.Windows.Forms.ComboBox; $umCombo.DropDownStyle='DropDownList'; $umCombo.Location=New-Object System.Drawing.Point(200,228); $umCombo.Size=New-Object System.Drawing.Size(370,24); foreach($m in $upscaleModels){ [void]$umCombo.Items.Add((Split-Path -Leaf $m)) }; if($upscalePath){ $umCombo.SelectedIndex=[Math]::Max(0,@($upscaleModels).IndexOf($upscalePath)) }; $umCombo.ForeColor=$g.ForeColor; $umCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $g.Controls.Add($umCombo); Set-MossComboTheme $umCombo $g
         $rHires=New-Object System.Windows.Forms.RadioButton; $rHires.Text='Sharp - detail regeneration (slowest: about 3-4x the plain render time)'; $rHires.Location=New-Object System.Drawing.Point(14,258); $rHires.Size=New-Object System.Drawing.Size(556,22); $rHires.ForeColor=$g.ForeColor; $g.Controls.Add($rHires)
         if(-not $rFast.Enabled){ $rFast.Text='Sharp - fast upscaler (unavailable: no upscaler model file in models\upscalers - restart MOSS to download it)' }
         # Drafts default to fast sharpen (user request: make improves faster);
@@ -4800,7 +5014,8 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
         foreach ($e in $Items) {
             $mode = 0
             if ($SharpMode -gt 0 -and [string]$e.Reason -eq 'soft preview (fast mode)') { $mode = [int]$SharpMode; $sharpCount++ }
-            $useSampler = $e.SamplingMethod; $useSched = $e.Scheduler; $chosen = [int]$ChosenSteps
+            $useSampler=$null; if($e.SamplingMethod -and ([string]$e.SamplingMethod -notmatch '^Default \(')){ $useSampler=[string]$e.SamplingMethod }
+            $useSched=$null; if($e.Scheduler -and ([string]$e.Scheduler -notmatch '^Default \(')){ $useSched=[string]$e.Scheduler }; $chosen = [int]$ChosenSteps
             $stepsOnItem = $null
             if ($FastSampler -and (-not $useSampler -or [string]$useSampler -eq 'Default (model)') -and (-not $useSched -or [string]$useSched -eq 'Default (model)')) {
                 $useSampler = 'dpm++2m'; $useSched = 'karras'
@@ -4913,7 +5128,7 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
         $rPlain=New-Object System.Windows.Forms.RadioButton; $rPlain.Text='Plain improve (drafts stay soft)'; $rPlain.Location=New-Object System.Drawing.Point(14,196); $rPlain.Size=New-Object System.Drawing.Size(596,22); $rPlain.ForeColor=$g.ForeColor; $g.Controls.Add($rPlain)
         $rFast=New-Object System.Windows.Forms.RadioButton; $rFast.Text=('Sharp - fast upscaler for the {0} soft draft(s) (recommended)' -f $draftCount); $rFast.Location=New-Object System.Drawing.Point(14,218); $rFast.Size=New-Object System.Drawing.Size(596,22); $rFast.ForeColor=$g.ForeColor; $rFast.Enabled=($draftCount -gt 0 -and $null -ne $upscalePath); $g.Controls.Add($rFast)
         $umLab=New-Object System.Windows.Forms.Label; $umLab.Text='Upscaler model (yours to pick):'; $umLab.Location=New-Object System.Drawing.Point(14,244); $umLab.Size=New-Object System.Drawing.Size(180,20); $umLab.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($umLab)
-        $umCombo=New-Object System.Windows.Forms.ComboBox; $umCombo.DropDownStyle='DropDownList'; $umCombo.Location=New-Object System.Drawing.Point(200,240); $umCombo.Size=New-Object System.Drawing.Size(410,24); foreach($m in $upscaleModels){ [void]$umCombo.Items.Add((Split-Path -Leaf $m)) }; if($upscalePath){ $umCombo.SelectedIndex=[Math]::Max(0,@($upscaleModels).IndexOf($upscalePath)) }; $umCombo.ForeColor=$g.ForeColor; $umCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $g.Controls.Add($umCombo)
+        $umCombo=New-Object System.Windows.Forms.ComboBox; $umCombo.DropDownStyle='DropDownList'; $umCombo.Location=New-Object System.Drawing.Point(200,240); $umCombo.Size=New-Object System.Drawing.Size(410,24); foreach($m in $upscaleModels){ [void]$umCombo.Items.Add((Split-Path -Leaf $m)) }; if($upscalePath){ $umCombo.SelectedIndex=[Math]::Max(0,@($upscaleModels).IndexOf($upscalePath)) }; $umCombo.ForeColor=$g.ForeColor; $umCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $g.Controls.Add($umCombo); Set-MossComboTheme $umCombo $g
         $rHires=New-Object System.Windows.Forms.RadioButton; $rHires.Text=('Sharp - detail regeneration for the {0} soft draft(s) (slowest, about 3-4x the render time)' -f $draftCount); $rHires.Location=New-Object System.Drawing.Point(14,272); $rHires.Size=New-Object System.Drawing.Size(596,22); $rHires.ForeColor=$g.ForeColor; $rHires.Enabled=($draftCount -gt 0); $g.Controls.Add($rHires)
         if(-not $rFast.Enabled){ $rFast.Text='Sharp - fast upscaler (unavailable: no upscaler model file in models\upscalers - restart MOSS to download it)' }
         if($rFast.Enabled){ $rFast.Checked=$true } elseif($rHires.Enabled){ $rHires.Checked=$true } else { $rPlain.Checked=$true }
@@ -5257,8 +5472,22 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
     })
     $openOut.Add_Click({$folder=Get-AbsoluteAppPath $out.Text;if(Test-Path -LiteralPath $folder){Start-Process explorer.exe -ArgumentList (Quote-ProcessArgument $folder)}})
     $f.Add_FormClosing({if($script:GenState.IsRunning){$script:GenState.CancelRequested=$true;Stop-MossGen}})
-    $f.Add_Shown({
+    # v0.2.3: the window was already shown (frame + panels) before the
+    # controls were added, so the Shown event has long passed by now: the
+    # startup work is started explicitly instead of from the Shown event.
+    $script:StartWindowWork={
         Hide-MossConsoleWindow
+        # The history prompt and the startup download offer are opened from a
+        # short one-shot timer, NOT directly: a modal opened while the main
+        # window is still in its first activation sequence gets buried once
+        # the owner finishes activating. 40 ms later the window is fully
+        # activated, so the owned modal sits on a stable foreground owner.
+        # The timer lives on $script: because plain scriptblocks do NOT capture
+        # enclosing locals: the handler's scope is gone by tick time and a
+        # function-local timer was $null inside the tick (live-reproduced:
+        # Stop() threw 'method on a null-valued expression' and nothing
+        # after it ran).
+        $script:StartupDialogTimer=New-Object System.Windows.Forms.Timer
         # The history prompt and the startup download offer are opened from a
         # short one-shot timer, NOT directly inside Shown: a modal opened
         # while the main window is still in its first activation sequence
@@ -5272,12 +5501,22 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
         # Stop() threw 'method on a null-valued expression' every 200 ms and
         # nothing after it ran).
         $script:StartupDialogTimer=New-Object System.Windows.Forms.Timer
-        $script:StartupDialogTimer.Interval=200
+        # v0.2.3: 200 ms -> 40 ms. The pause only existed so the owned dialog
+        # would land on a stable foreground owner; the window is activated
+        # explicitly right before the dialog is shown, so the long wait is not
+        # needed any more.
+        $script:StartupDialogTimer.Interval=40
         $script:StartupDialogTimer.Add_Tick({
             try {
                 $script:StartupDialogTimer.Stop()
+                try { $f.Activate() } catch {}
                 Unlock-MossHistoryAfterShow
                 Test-MossOfferStartupDownload $f
+                try { & $script:RefreshGpuSubtitle } catch {
+                    # v0.2.3: log instead of silently ignoring - the header then
+                    # stays on 'GPU: detecting...' and the cause is invisible.
+                    try { [void](Write-MossErrorLog 'GPU subtitle refresh failed' ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+"`r`n"+$_.Exception.GetType().FullName+': '+$_.Exception.Message+"`r`n"+$_.ScriptStackTrace)) } catch {}
+                }
             } catch {
                 # A failure here must never crash MOSS with the WinForms error
                 # dialog - it is logged instead and startup continues.
@@ -5285,8 +5524,15 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
             }
         })
         $script:StartupDialogTimer.Start()
-    })
-    [void]$f.ShowDialog()
+    }
+    # v0.2.3: run the window's message loop instead of ShowDialog - the form
+    # is already visible from the early Show() above.
+    try { Update-MossLeftActionLayout } catch {}
+    # v0.2.3: start the startup dialogs (history prompt / download offer) and
+    # the post-paint GPU name refresh. This must run BEFORE the message loop:
+    # the winforms timer that drives it only ticks while the loop runs.
+    try { & $script:StartWindowWork } catch { try { [void](Write-MossErrorLog 'Startup work failed' ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+"`r`n"+$_.Exception.GetType().FullName+': '+$_.Exception.Message+"`r`n"+$_.ScriptStackTrace)) } catch {} }
+    [System.Windows.Forms.Application]::Run($f)
     if($preview.Image){$preview.Image.Dispose()}
     if($f.Tag -eq 'SETUP'){
         $psExe=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -5299,8 +5545,7 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
 try { Hide-MossConsoleWindow } catch {}
 try {
     if ($SetupOnly -or -not [bool]$script:Settings.HardwareSetupComplete) {
-        $form.Add_Shown({Hide-MossConsoleWindow}.GetNewClosure())
-        [void]$form.ShowDialog()
+        Show-MossSetupDialog
     }
     if ((-not $SetupOnly -or $ReturnToGenerator) -and [bool]$script:Settings.HardwareSetupComplete) {
         Load-Settings

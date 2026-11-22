@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.1.99)
+MOSS Image Studio - portable build (v0.2.3)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -129,6 +129,101 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.2.3
+-----------------------
+- MOSS STAYS OFF THE INTERNET WHEN NOTHING IS MISSING. Measuring the
+  download speed means pulling 6 MB from the model server; MOSS used to do
+  that just to print a time estimate - at startup and whenever a dialog was
+  opened. Now the start-up check and the update dialog use the LAST
+  MEASURED speed from the cache, and the real probe runs only in the
+  moment a download is actually confirmed. With the engine and the models
+  installed, MOSS does not touch the network at all.
+- AN UNREACHABLE DOWNLOAD SERVER COSTS HALF THE WAIT: the connect timeout
+  of the speed probe came down from 8 s to 4 s, so an offline machine does
+  not stall behind the estimate.
+- The time estimate now says 'depends on your connection' when no
+  measurement is cached, instead of pretending to know.
+- MOSS OPENS MUCH FASTER. The main window is now shown on screen as soon as
+  its frame exists, and the header, panels and controls are added while it is
+  already visible, instead of MOSS staying invisible until the whole UI was
+  built. On this machine the window is on screen after ~0.9 s instead of
+  ~1.5 s, and it is complete a moment later.
+- THE HARDWARE-SETUP DIALOG IS NO LONGER BUILT ON EVERY START. It is created
+  only when it is really opened (first run or Options > Hardware / Setup).
+- THE GPU IS SCANNED AFTER THE WINDOW IS UP, not before it: the header shows
+  'GPU: detecting...' for a moment and then the real card name.
+- THE STARTUP DOWNLOAD OFFER CHECKS THE DISK FIRST. If every model is
+  already in the models folder, MOSS no longer asks huggingface.co for file
+  sizes (that alone cost ~0.9 s of waiting).
+- THE STARTING PAUSE IS 40 ms instead of 200 ms (the pause only existed to
+  give the window a stable foreground owner).
+- CLOSING IS UNCHANGED AND STILL INSTANT: the window closes and the process
+  is gone in ~0.1 s.
+- Fixed: the header could stay on 'GPU: detecting...' forever when the
+  post-paint refresh failed. The failure is now logged instead of silently
+  ignored, and the header falls back to 'GPU: not detected'.
+
+What is new in v0.2.2
+-----------------------
+- THE DROPDOWNS NO LONGER FLASH WHITE: WinForms painted every ComboBox with
+  the Windows theme, so the dark MOSS window was full of bright white boxes
+  (Visual style, Resolution, Images, the speed mode, the prompt-history
+  list). They are now painted by MOSS itself: dark field, a thin chevron
+  button, and an open list that is dark too instead of a white popup. The
+  selected row keeps its blue highlight.
+- FIXED A SPLIT DROPDOWN: at 175 % scaling the themed button was drawn a few
+  pixels off the field, so the Resolution combo looked like two overlapping
+  boxes ('Landscape 4:3' in one, '1280 x 960' in another). It is one clean
+  field now.
+- FIXED DEAD CLICKS UNDER THE LABELS: the field labels were 22 px tall for a
+  single line, so every label box overlapped the widget below it. Because a
+  label sits on top, the top strip of the input underneath could not be
+  clicked (the small '?' help button included). The labels are 16 px now and
+  touch nothing. A test re-derives the whole left-panel geometry and fails
+  if any two controls overlap.
+- The prompt-history dropdown keeps its place; it is dark like the rest.
+
+What is new in v0.2.1
+-----------------------
+- ALL-TIME POWER WITH ITS HISTORY (your request): the Benchmarks dialog's
+  power meter now shows WHEN energy tracking started and how long ago that
+  was ('All time (since 2026-11-21 - 1 day ago): ...'). The start is the
+  oldest recorded day; a reset also resets it. The all-time line also shows
+  the AVERAGE watts over the whole history (~N W average), guarded against
+  division by zero.
+- BUG FIXED same session: the start date could display as 'System.Object[]'
+  (PS 5.1 quirk: '@(... | Select-Object -First 1)' returns a 1-element
+  array). Started is a scalar string now, and a test pins it.
+
+What is new in v0.2.0
+-----------------------
+- EVEN SMALLER WINDOWS (your request): the main window is now 1016 x 539
+  (client 1000 x 500 - it was 1052 x 551). The left panel lost 20 px of
+  dead width (600 px, the top row moved left to match), the right panel is
+  366 px, the status line is 34 px tall and the progress bar sits at y=412.
+  Minimum size 880 x 539; the small-screen cap tracks the new height.
+- FIXED A CLIPPED DIALOG (found by a new systematic audit): the Model files
+  dialog was 9 px too short - its OK/Cancel buttons were cut off at the
+  bottom edge. Now 560 x 266.
+- THE AUDIT IS PART OF THE TESTS: test_v0200 measures EVERY dialog in the
+  app (form height - 39 px chrome vs the lowest control) and fails if any
+  dialog has less than 4 px of margin below its content.
+- Repo hygiene: fastcheck comment wording cleanup; the GitHub repository
+  carries ONLY the four runnable files + the ZIP (no internal notes or test
+  files).
+- BUG FIXED (your report): the Benchmarks dialog CRASHED on open with
+  'Cannot process argument transformation on parameter Seconds'. Cause: the
+  power meter called Format-MossDuration [double]$b.Seconds WITHOUT parens -
+  in command-argument position PowerShell parses that as one literal string
+  ('[double]' + the bucket + '.Seconds'), never as a cast. Present since the
+  power meter (v0.1.87); now parenthesized, and a test guards the pattern.
+- BUG FIXED (your overnight failed generations): the engine rejected
+  'unknown argument: (model)'. OLD sidecars can carry the display label
+  'Default (model)' as sampler/scheduler; the arg builder emitted it
+  verbatim. The choke point now drops any 'Default (...)' label (flag
+  omitted = model default), and the sidecar reader + bulk improve plan
+  sanitize old labels so they cannot re-enter sidecars or jobs.
 
 What is new in v0.1.99
 -----------------------
