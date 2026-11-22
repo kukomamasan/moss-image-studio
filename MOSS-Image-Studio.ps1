@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.2.3'
+$script:AppVersion = '0.2.4'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1'; SafeMode = $true }
@@ -387,6 +387,97 @@ function Get-GpuInventory {
     return $items
 }
 
+# --- v0.2.4: the GPU header without freezing the UI -------------------------
+# The adapter scan (Get-CimInstance, ~120 ms) used to run on the UI thread
+# right after the window appeared, so MOSS froze for a moment exactly when
+# the user starts to work. It now runs on a BACKGROUND runspace: the header
+# shows the CACHED card name instantly and the live scan replaces it when it
+# lands. The setup dialog still runs its own full scan (with the nvidia-smi
+# compute probe) when the user asks for it.
+$script:GpuScanStarted = $false
+$script:GpuScanConsumed = $false
+$script:GpuScanItems = @()
+$script:GpuScanJob = $null
+$script:GpuScanRunner = $null
+$script:GpuScanDone = $false
+
+function Get-MossGpuCacheFile { return (Join-Path $script:ConfigDir 'gpu-cache.json') }
+function Get-MossCachedGpuName {
+    # The card name of the last successful scan ('' when there is none).
+    try {
+        $f = Get-MossGpuCacheFile
+        if (Test-Path -LiteralPath $f) {
+            $d = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
+            if ($d -and $d.PSObject.Properties.Name -contains 'Name' -and [string]$d.Name) { return [string]$d.Name }
+        }
+    } catch {}
+    return ''
+}
+function Save-MossCachedGpuName([string]$Name) {
+    if (-not $Name) { return }
+    try {
+        if (-not (Test-Path -LiteralPath $script:ConfigDir)) { New-Item -ItemType Directory -Path $script:ConfigDir -Force | Out-Null }
+        $o = [ordered]@{ Name = $Name; SavedAt = (Get-Date).ToString('s') }
+        [System.IO.File]::WriteAllText((Get-MossGpuCacheFile), ($o | ConvertTo-Json -Compress))
+    } catch {}
+}
+function Start-MossGpuScan {
+    # Starts the adapter scan on a background runspace. The scan script is
+    # self-contained (a separate runspace cannot call the app's functions)
+    # and returns the same fields as the adapter inventory helper.
+    if ($script:GpuScanStarted) { return }
+    $script:GpuScanStarted = $true
+    try {
+        $code = @'
+$out = @()
+try {
+    foreach ($c in @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop)) {
+        $name = [string]$c.Name; $pnp = [string]$c.PNPDeviceID; $desc = [string]$c.Description
+        $hay = "$name $desc $pnp"
+        $vendor = 'Unknown'
+        if ($hay -match '(?i)VEN_10DE|NVIDIA|GeForce|Quadro|Tesla') { $vendor = 'NVIDIA' }
+        elseif ($hay -match '(?i)VEN_1002|VEN_1022|AMD|Radeon') { $vendor = 'AMD' }
+        elseif ($hay -match '(?i)VEN_8086|Intel') { $vendor = 'Intel' }
+        $isVirtual = ($hay -match '(?i)virtual|indirect display|remote display|parsec|spacedesk|usb display|displaylink|mirage|idd')
+        $kind = if ($isVirtual) { 'Virtual display adapter' } elseif ($vendor -ne 'Unknown') { 'Physical/vendor adapter (compute capability not yet verified)' } else { 'Unclassified display adapter' }
+        $backend = switch ($vendor) { 'NVIDIA' { 'CUDA' } 'AMD' { 'HIP/ROCm or Vulkan' } 'Intel' { 'SYCL or Vulkan' } default { 'Manual check required' } }
+        $out += [pscustomobject]@{ Name=$name; Vendor=$vendor; Type=$kind; SuggestedBackend=$backend; PNPDeviceID=$pnp; IsVirtual=$isVirtual }
+    }
+} catch {}
+$out
+'@
+        $script:GpuScanRunner = [powershell]::Create()
+        [void]$script:GpuScanRunner.AddScript($code)
+        $script:GpuScanJob = $script:GpuScanRunner.BeginInvoke()
+    } catch {
+        $script:GpuScanJob = $null
+        $script:GpuScanRunner = $null
+    }
+}
+function Get-MossGpuScanResult {
+    # $null = the scan is still running. An array = the adapters (empty when
+    # the scan failed - the caller then falls back to the slow path).
+    if (-not $script:GpuScanStarted) { return $null }
+    if ($script:GpuScanConsumed) { return $script:GpuScanItems }
+    if ($null -eq $script:GpuScanJob) { $script:GpuScanConsumed = $true; $script:GpuScanItems = @(); return $script:GpuScanItems }
+    try {
+        if (-not $script:GpuScanJob.IsCompleted) { return $null }
+        $items = @($script:GpuScanRunner.EndInvoke($script:GpuScanJob))
+        try { $script:GpuScanRunner.Dispose() } catch {}
+        $script:GpuScanRunner = $null
+        $script:GpuScanJob = $null
+        $script:GpuScanConsumed = $true
+        $script:GpuScanItems = @($items)
+        return $script:GpuScanItems
+    } catch {
+        $script:GpuScanConsumed = $true
+        $script:GpuScanItems = @()
+        return $script:GpuScanItems
+    }
+}
+
+function Set-MossInventory($items) { $script:Inventory = @($items) }
+function Set-MossGpuScanDone { $script:GpuScanDone = $true }
 function Get-BackendRecommendation([object[]]$inventory) {
     $physical = @($inventory | Where-Object { -not $_.IsVirtual })
     $n = @($physical | Where-Object Vendor -eq 'NVIDIA').Count
@@ -2310,6 +2401,10 @@ function Show-GeneratorWindow {
     }
 
     $f = New-Object System.Windows.Forms.Form
+    # v0.2.4: the layout is suspended while the controls are built. Every
+    # Controls.Add used to trigger a full layout pass of the (already
+    # visible) window - one pass at the end is ~45 ms faster.
+    try { $f.SuspendLayout() } catch {}
     # Compact window (v0.1.96-98): 1052 x 551 - the app-level entries
     # (output folder, model files, benchmarks, error report) moved into the
     # header Options menu, so the left panel holds only generation controls
@@ -2373,7 +2468,11 @@ function Show-GeneratorWindow {
         # the window is shown. The header starts with 'GPU: detecting...' and
         # the label is filled in as soon as the window is up (see the Shown
         # handler below).
-        $gpuSubtitle = 'GPU: detecting...'
+        # v0.2.4: the CACHED card name is shown instantly (no 'GPU:
+        # detecting...' wait). The live scan runs on a background runspace and
+        # refreshes the label when it lands.
+        $cachedGpu = Get-MossCachedGpuName
+        if ($cachedGpu) { $gpuSubtitle = "GPU: $(Get-MossShortName $cachedGpu 34)" } else { $gpuSubtitle = 'GPU: detecting...' }
     }
     $subt=New-Object System.Windows.Forms.Label; $subt.Text="LOCAL IMAGE GENERATION  -  $gpuSubtitle"; $subt.ForeColor=$cMuted; $subt.AutoSize=$true; $subt.Location=New-Object System.Drawing.Point(23,29); $head.Controls.Add($subt)
     # v0.2.3: the GPU name is filled in AFTER the window is visible (the scan
@@ -2383,7 +2482,16 @@ function Show-GeneratorWindow {
     # NOT nested function definitions - calling it from the closure ended in
     # 'Get-MossShortName is not recognized' and the header stayed on
     # 'GPU: detecting...' forever.
-    $script:RefreshGpuSubtitle={ $all=@(Get-GpuInventory); $script:Inventory=$all; $tryGpus=@($all | Where-Object { -not $_.IsVirtual -and $_.Vendor -ne 'Unknown' }); if($tryGpus.Count -gt 0){ $gname=[string]$tryGpus[0].Name; if($gname.Length -gt 34){ $gname=$gname.Substring(0,33).TrimEnd()+[char]0x2026 }; $subt.Text="LOCAL IMAGE GENERATION  -  GPU: $gname" } else { $subt.Text="LOCAL IMAGE GENERATION  -  GPU: not detected" } }.GetNewClosure()
+    # v0.2.4: the header is filled from the BACKGROUND scan - the UI thread
+    # is never blocked by the ~120 ms CIM query. If the background scan
+    # failed, the slow synchronous path is used as a fallback.
+    # v0.2.4: the header is filled from the BACKGROUND scan - the UI thread
+    # is never blocked by the ~120 ms CIM query. If the background scan
+    # failed, the slow synchronous path is used as a fallback.
+    # NOTE: inside a GetNewClosure '$script:' may point at the closure's own
+    # module scope, so every write to the app state goes through a top-level
+    # function (Set-MossInventory / Set-MossGpuScanDone) instead.
+    $script:RefreshGpuSubtitle={ $items=Get-MossGpuScanResult; if($null -eq $items){ return }; $all=@($items); if($all.Count -eq 0){ $all=@(Get-GpuInventory) }; Set-MossInventory $all; Set-MossGpuScanDone; $tryGpus=@($all | Where-Object { -not $_.IsVirtual -and $_.Vendor -ne 'Unknown' }); if($tryGpus.Count -gt 0){ $gname=[string]$tryGpus[0].Name; if($gname.Length -gt 34){ $gname=$gname.Substring(0,33).TrimEnd()+[char]0x2026 }; $subt.Text="LOCAL IMAGE GENERATION  -  GPU: $gname"; Save-MossCachedGpuName $gname } else { $subt.Text="LOCAL IMAGE GENERATION  -  GPU: not detected" } }.GetNewClosure()
     $backendText=[string]$script:Settings.Backend; if (-not $script:Settings.BackendSelectionSaved) { $backendText='Not configured' }
     $backendBadge=New-Object System.Windows.Forms.Label; $backendBadge.Text="BACKEND  $backendText"; $backendBadge.AutoSize=$true; $backendBadge.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $backendBadge.Location=New-Object System.Drawing.Point(535,17); $head.Controls.Add($backendBadge)
     # Header OPTIONS MENU (v0.1.97, user: 'these are really options'): the
@@ -2533,6 +2641,8 @@ try {
     # pinned to a fixed bottom edge.
     $left=New-Object System.Windows.Forms.Panel; $left.Location=New-Object System.Drawing.Point(18,58); $left.Size=New-Object System.Drawing.Size(600,430); $left.Anchor='Top,Bottom,Left'; $left.BackColor=$cCard; $f.Controls.Add($left)
     $right=New-Object System.Windows.Forms.Panel; $right.Location=New-Object System.Drawing.Point(634,58); $right.Size=New-Object System.Drawing.Size(366,430); $right.Anchor='Top,Bottom,Left,Right'; $right.BackColor=$cCard; $f.Controls.Add($right)
+    try { $left.SuspendLayout() } catch {}
+    try { $right.SuspendLayout() } catch {}
     # v0.2.3: the frame is already on screen (early Show() above); the
     # controls now fill the visible panels.
     # v0.2.2: the label box was 22 px tall for a single 9 pt line, so it
@@ -5477,6 +5587,21 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
     # startup work is started explicitly instead of from the Shown event.
     $script:StartWindowWork={
         Hide-MossConsoleWindow
+        # v0.2.4: the adapter scan runs on a BACKGROUND runspace - the UI
+        # thread stays free while it works.
+        try { Start-MossGpuScan } catch {}
+        $script:GpuPollTimer=New-Object System.Windows.Forms.Timer
+        $script:GpuPollTimer.Interval=120
+        # The tick is a PLAIN scriptblock on purpose: $script: inside a
+        # GetNewClosure can point at the closure's own module scope, which
+        # made the refresh a no-op in an earlier attempt.
+        $script:GpuPollTimer.Add_Tick({
+            try {
+                $null = & $script:RefreshGpuSubtitle
+                if ([bool]$script:GpuScanDone) { try { $script:GpuPollTimer.Stop() } catch {} }
+            } catch {}
+        })
+        $script:GpuPollTimer.Start()
         # The history prompt and the startup download offer are opened from a
         # short one-shot timer, NOT directly: a modal opened while the main
         # window is still in its first activation sequence gets buried once
@@ -5525,6 +5650,11 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
         })
         $script:StartupDialogTimer.Start()
     }
+    # v0.2.4: one layout pass for the whole window instead of one per added
+    # control (the layout was suspended while the UI was built).
+    try { $f.ResumeLayout($true) } catch {}
+    try { $left.ResumeLayout($true) } catch {}
+    try { $right.ResumeLayout($true) } catch {}
     # v0.2.3: run the window's message loop instead of ShowDialog - the form
     # is already visible from the early Show() above.
     try { Update-MossLeftActionLayout } catch {}

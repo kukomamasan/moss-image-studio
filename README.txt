@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.2.3)
+MOSS Image Studio - portable build (v0.2.4)
 ============================================
 MOSS is a graphical front-end (GUI) for the sd-cli command-line engine: every
 render is a command line run of bin\sd-cli.exe, and MOSS can show you the
@@ -129,6 +129,22 @@ Generation options (Options...)
   values supported by the bundled engine for experimenting.
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
+
+What is new in v0.2.4
+-----------------------
+- THE HEADER SHOWS YOUR GRAPHICS CARD RIGHT AWAY. The adapter scan (a
+  Windows query that costs ~0.12 s) used to run on the interface thread
+  right after the window appeared, so MOSS froze for a moment exactly when
+  you start to work. The scan now runs in the background and the card name
+  is remembered from the last start, so it is on screen from the first
+  paint - no more 'GPU: detecting...' wait.
+- THE WINDOW IS FILLED IN ONE LAYOUT PASS instead of one per added
+  control. The window was already on screen while its controls were being
+  added, and every one of them re-laid out the whole form; that is ~45 ms
+  less work.
+- The hardware setup dialog still detects the adapters itself (including
+  the NVIDIA compute-driver check) - that check no longer runs on every
+  start.
 
 What is new in v0.2.3
 -----------------------
