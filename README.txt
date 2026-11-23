@@ -130,6 +130,17 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
+What is new in v0.2.8
+-----------------------
+- CRISP FINISH FOR FAST SHARPEN (your report: enhanced humans look too
+  soft): ESRGAN upscaler models are known for smoothing human skin into a
+  soft, plastic look. After every fast-sharpen upscale, MOSS now applies a
+  MILD unsharp mask (amount 0.4) that brings texture back - especially on
+  faces. Options > Fast sharpen finish lets you switch it off ('Off
+  (natural model output)') or keep it on ('Crisp (mild unsharp mask)',
+  default). The mask is pure .NET (no downloads), runs in a fraction of a
+  second, and is applied before the sidecar records the image size.
+
 What is new in v0.2.7
 -----------------------
 - FIXED ENHANCE/IMPROVE AFTER THE ENGINE UPDATE (your report): the new

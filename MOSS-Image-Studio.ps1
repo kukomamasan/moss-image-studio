@@ -9,10 +9,10 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.2.7'
+$script:AppVersion = '0.2.8'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
-$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1'; SafeMode = $true; PowerSaver = 'Off' }
+$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1'; SafeMode = $true; PowerSaver = 'Off'; SharpenFinish = 'Crisp' }
 $script:HistoryPassphrase = $null
 # POWER SAVER (v0.2.5): top-level setter because menu click handlers run in
 # closures where '$script:' may not reach the app scope (same rule the GPU
@@ -21,6 +21,73 @@ function Set-MossPowerSaver([string]$Mode) {
     if (@('Off','Gentle','Max saving') -notcontains $Mode) { $Mode = 'Off' }
     $script:Settings.PowerSaver = $Mode
     Save-Settings
+}
+# SHARPEN FINISH (v0.2.8): what happens after the fast-sharpen upscaler.
+# 'Crisp' (default) adds a mild unsharp mask - ESRGAN x4plus famously
+# smooths human skin into a soft plastic look; a gentle sharpen brings
+# texture back. 'Off' keeps the pure model output.
+function Set-MossSharpenFinish([string]$Mode) {
+    if (@('Off','Crisp') -notcontains $Mode) { $Mode = 'Crisp' }
+    $script:Settings.SharpenFinish = $Mode
+    Save-Settings
+}
+function Invoke-MossUnsharpMask([string]$Path,[double]$Amount) {
+    # Mild unsharp mask (3x3 blur estimate, amount-scaled) over the PNG.
+    # Compiled once and cached; pure .NET, nothing is downloaded.
+    try {
+        if (-not $script:MossUnsharpType) {
+            $cs = @'
+using System; using System.Drawing; using System.Drawing.Imaging; using System.IO;
+public static class MossUnsharp {
+    public static void Apply(string path, double amount) {
+        // Load via MemoryStream: a Bitmap built from the path keeps the FILE
+        // locked, which made the in-place Save fail with a generic GDI+ error.
+        Bitmap src = new Bitmap(new MemoryStream(System.IO.File.ReadAllBytes(path)));
+        int w = src.Width, h = src.Height;
+        Bitmap dst = new Bitmap(w, h);
+        BitmapData sd = src.LockBits(new Rectangle(0,0,w,h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+        BitmapData dd = dst.LockBits(new Rectangle(0,0,w,h), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+        unsafe {
+            byte* sb = (byte*)sd.Scan0; byte* db = (byte*)dd.Scan0;
+            for (int y = 0; y < h; y++) {
+                byte* row = sb + y*sd.Stride;
+                byte* up = (y > 0) ? sb + (y-1)*sd.Stride : row;
+                byte* dn = (y < h-1) ? sb + (y+1)*sd.Stride : row;
+                byte* outRow = db + y*dd.Stride;
+                for (int x = 0; x < w; x++) {
+                    int xl = (x > 0) ? x-1 : x;
+                    int xr = (x < w-1) ? x+1 : x;
+                    for (int c = 0; c < 3; c++) {
+                        int i = x*3 + c;
+                        int blur = (up[xl*3+c] + up[i] + up[xr*3+c]
+                                  + row[xl*3+c] + row[i] + row[xr*3+c]
+                                  + dn[xl*3+c] + dn[i] + dn[xr*3+c]) / 9;
+                        int v = row[i] + (int)(amount * (row[i] - blur));
+                        if (v < 0) v = 0; if (v > 255) v = 255;
+                        outRow[i] = (byte)v;
+                    }
+                }
+            }
+        }
+        src.UnlockBits(sd); dst.UnlockBits(dd);
+        dst.Save(path, ImageFormat.Png);
+        dst.Dispose(); src.Dispose();
+    }
+}
+'@
+            $prov = New-Object Microsoft.CSharp.CSharpCodeProvider
+            $par = New-Object System.CodeDom.Compiler.CompilerParameters
+            $par.CompilerOptions = '/unsafe'
+            $par.GenerateInMemory = $true
+            [void]$par.ReferencedAssemblies.Add('System.Drawing.dll')
+            $res = $prov.CompileAssemblyFromSource($par, $cs)
+            if ($res.Errors.HasErrors) { throw ($res.Errors | ForEach-Object { $_.ErrorText }) -join '; ' }
+            $script:MossUnsharpType = $res.CompiledAssembly.GetType('MossUnsharp')
+        }
+        $m = $script:MossUnsharpType
+        [void]$m.GetMethod('Apply').Invoke($null, @([string]$Path, [double]$Amount))
+        return $true
+    } catch { return $false }
 }
 $script:HistoryLocked = $false
 $script:LockedHistoryEnvelope = $null
@@ -2559,6 +2626,26 @@ function Show-GeneratorWindow {
             foreach($it in $psMenuRef.DropDownItems){ if($it -is [System.Windows.Forms.ToolStripItem]){ $it.Checked = ($curLabel -and $it.Text.StartsWith($curLabel)) } }
         } catch {}
     })
+    # SHARPEN FINISH (v0.2.8): what happens after the fast-sharpen upscaler.
+    $miFin=$mossOptionsMenu.Items.Add('Fast sharpen finish')
+    $miFin.ToolTipText='After the fast-sharpen upscaler: Crisp (default) adds a mild unsharp mask that restores skin texture; ESRGAN models are known for a soft, plastic look on humans. Off keeps the pure model output.'
+    foreach($finL in @(@('Off','Off (natural model output)'),@('Crisp','Crisp (mild unsharp mask)'))){
+        $finItem=$miFin.DropDownItems.Add([string]$finL[1])
+        $finItem.ToolTipText=switch([string]$finL[0]){
+            'Crisp' { 'A mild unsharp mask (amount 0.4) runs after the upscaler and restores texture - especially on human skin.' }
+            default { 'No extra sharpening - the upscaler output is used as-is.' }
+        }
+        $finLvl=[string]$finL[0]
+        $finItem.Add_Click({ Set-MossSharpenFinish $finLvl }.GetNewClosure())
+    }
+    $finMenuRef=$miFin
+    $mossOptionsMenu.Add_Opening({
+        try {
+            $cur=if($script:Settings.Contains('SharpenFinish')){[string]$script:Settings.SharpenFinish}else{'Crisp'}
+            $curLabel=if($cur -eq 'Crisp'){'Crisp (mild unsharp mask)'}else{'Off (natural model output)'}
+            foreach($it in $finMenuRef.DropDownItems){ if($it -is [System.Windows.Forms.ToolStripItem]){ $it.Checked = ($curLabel -and $it.Text.StartsWith($curLabel)) } }
+        } catch {}
+    })
     $miSetup=$mossOptionsMenu.Items.Add('Hardware / Setup...')
     $miSetup.Add_Click({ $f.Tag='SETUP'; $f.Close() })
     $miSetup.ToolTipText='Adapter detection, backend selection (CUDA / Vulkan / ROCm / SYCL / CPU) and GPU preference.'
@@ -4246,6 +4333,11 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
             $p.Dispose()
             if ($exitOk -and (Test-Path -LiteralPath $tmp) -and (Test-MossPngValid $tmp)) {
                 Move-Item -LiteralPath $tmp -Destination $ImageFile -Force
+                # SHARPEN FINISH (v0.2.8): 'Crisp' adds a mild unsharp mask so
+                # ESRGAN's soft/plastic skin look gets texture back.
+                if ($script:Settings.Contains('SharpenFinish') -and [string]$script:Settings.SharpenFinish -eq 'Crisp') {
+                    if (Invoke-MossUnsharpMask $ImageFile 0.4) { try { $LogBox.AppendText("`r`nCrisp finish: a mild unsharp mask was applied after the upscaler (texture restored).") } catch {} }
+                }
                 try { $LogBox.AppendText(("`r`nFast sharpen: the image was upscaled by the separate engine pass ({0})." -f (Split-Path -Leaf $UpscaleModel))) } catch {}
                 return $true
             }
