@@ -9,11 +9,19 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.2.4'
+$script:AppVersion = '0.2.5'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
-$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1'; SafeMode = $true }
+$script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1'; SafeMode = $true; PowerSaver = 'Off' }
 $script:HistoryPassphrase = $null
+# POWER SAVER (v0.2.5): top-level setter because menu click handlers run in
+# closures where '$script:' may not reach the app scope (same rule the GPU
+# scan follows with Set-MossInventory).
+function Set-MossPowerSaver([string]$Mode) {
+    if (@('Off','Gentle','Max saving') -notcontains $Mode) { $Mode = 'Off' }
+    $script:Settings.PowerSaver = $Mode
+    Save-Settings
+}
 $script:HistoryLocked = $false
 $script:LockedHistoryEnvelope = $null
 $script:HistoryPasswordVerifier = $null
@@ -2527,6 +2535,30 @@ function Show-GeneratorWindow {
     $miReport.ToolTipText='Copies an anonymised technical error report to the clipboard and saves it under logs. Nothing is sent over the internet.'
     $miReport.Add_Click({ Copy-MossErrorReport })
     [void]$mossOptionsMenu.Items.Add('-')
+    # POWER SAVER (v0.2.5): a three-level submenu. The chosen level is
+    # applied to every engine process started afterwards. Checkmarks show
+    # the current level when the menu opens.
+    $miPower=$mossOptionsMenu.Items.Add('Power saver')
+    $miPower.ToolTipText='Slow image generation down on purpose so the PC keeps its speed (CPU and GPU) for other programs while images render in the background.'
+    $psLevels=@(@('Off','Off (full speed)'),@('Gentle','Gentle (other programs first)'),@('Max saving','Max saving (PC fully responsive)'))
+    foreach($psL in $psLevels){
+        $psItem=$miPower.DropDownItems.Add([string]$psL[1])
+        $psItem.ToolTipText=switch([string]$psL[0]){
+            'Gentle' { 'The engine runs at below-normal priority: other programs get the CPU and GPU first. Generation is somewhat slower.' }
+            'Max saving' { 'The engine runs at lowest priority: the PC stays fully responsive. Generation can take much longer.' }
+            default { 'Full speed - no throttling (the default).' }
+        }
+        $psLvl=[string]$psL[0]
+        $psItem.Add_Click({ Set-MossPowerSaver $psLvl }.GetNewClosure())
+    }
+    $psMenuRef=$miPower
+    $mossOptionsMenu.Add_Opening({
+        try {
+            $cur=if($script:Settings.Contains('PowerSaver')){[string]$script:Settings.PowerSaver}else{'Off'}
+            $curLabel=($psLevels | Where-Object { $_[0] -eq $cur } | Select-Object -First 1)[1]
+            foreach($it in $psMenuRef.DropDownItems){ if($it -is [System.Windows.Forms.ToolStripItem]){ $it.Checked = ($curLabel -and $it.Text.StartsWith($curLabel)) } }
+        } catch {}
+    })
     $miSetup=$mossOptionsMenu.Items.Add('Hardware / Setup...')
     $miSetup.Add_Click({ $f.Tag='SETUP'; $f.Close() })
     $miSetup.ToolTipText='Adapter detection, backend selection (CUDA / Vulkan / ROCm / SYCL / CPU) and GPU preference.'
@@ -4112,6 +4144,21 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
 
         try {
             [void]$proc.Start()
+            # POWER SAVER (v0.2.5): when the user needs the PC for something
+            # else, the engine process runs at a lower priority so Windows
+            # gives the CPU first (and the GPU scheduler follows process
+            # priority on WDDM) to whatever the user is actually using.
+            # The job still finishes - just slower. 'Off' changes nothing.
+            $psMode = if ($script:Settings.Contains('PowerSaver')) { [string]$script:Settings.PowerSaver } else { 'Off' }
+            switch ($psMode) {
+                'Gentle' {
+                    try { $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal; $log.AppendText("`r`nPower saver (Gentle): the engine runs at below-normal priority - other programs get the CPU and GPU first. Generation is slower but still finishes.") } catch {}
+                }
+                'Max saving' {
+                    try { $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Idle; $log.AppendText("`r`nPower saver (Max saving): the engine runs at lowest priority - the PC stays fully responsive for everything else. Generation can take much longer.") } catch {}
+                }
+                default { }
+            }
             # Start the capture thread AFTER the process exists (ReadLine
             # needs live stream readers); output already buffered by the pipe
             # is picked up by the thread, nothing is lost.

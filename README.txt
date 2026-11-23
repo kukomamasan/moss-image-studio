@@ -130,6 +130,18 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
+What is new in v0.2.5
+-----------------------
+- POWER SAVER (your request): Options > Power saver now has three levels.
+  'Off (full speed)' is the default and changes nothing. 'Gentle (other
+  programs first)' runs the engine at below-normal priority, and 'Max
+  saving (PC fully responsive)' runs it at the lowest priority. While
+  images render, Windows then gives the CPU first (and the GPU scheduler
+  follows process priority) to whatever you are actually using - images
+  still finish, just slower. The level is saved with your other settings,
+  applies to every engine run started afterwards, and the log notes which
+  level was active for each run.
+
 What is new in v0.2.4
 -----------------------
 - THE HEADER SHOWS YOUR GRAPHICS CARD RIGHT AWAY. The adapter scan (a
