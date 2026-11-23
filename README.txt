@@ -130,6 +130,15 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
+What is new in v0.2.6
+-----------------------
+- FIXED 'N of 5 files' BUT ONLY 4 ROWS (your report): the Model files
+  dialog counts the engine file (sd-cli.exe) as the fifth file, but it
+  only showed the four model rows. The engine is now shown as a read-only
+  fifth row ('Engine' - its path is still edited in Hardware / Setup),
+  colored red when the file is missing, so the count always matches what
+  is on the screen.
+
 What is new in v0.2.5
 -----------------------
 - POWER SAVER (your request): Options > Power saver now has three levels.

@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.2.5'
+$script:AppVersion = '0.2.6'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1'; SafeMode = $true; PowerSaver = 'Off' }
@@ -2934,11 +2934,20 @@ try {
     }
     function Show-MossModelFilesDialog {
         $g=New-Object System.Windows.Forms.Form
-        $g.Text='Model files'; $g.Size=New-Object System.Drawing.Size(560,266); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
+        $g.Text='Model files'; $g.Size=New-Object System.Drawing.Size(560,296); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
         $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
         $hint=New-Object System.Windows.Forms.Label; $hint.Text='The engine and model files MOSS loads. Paths are resolved against the MOSS folder.'; $hint.Location=New-Object System.Drawing.Point(12,10); $hint.Size=New-Object System.Drawing.Size(520,20); $hint.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($hint)
         $dlgBoxes=@{}
         $y=38
+        # ENGINE ROW (v0.2.6): the health count is 'N of 5 engine/model files'
+        # - the engine file is the fifth file, but the dialog only showed the
+        # four model rows, so the number never matched what was visible.
+        # The engine path is read-only here (it is edited in Hardware /
+        # Setup), it just makes the fifth counted file visible.
+        $engL=New-Object System.Windows.Forms.Label; $engL.Text='Engine'; $engL.Location=New-Object System.Drawing.Point(12,($y+3)); $engL.Size=New-Object System.Drawing.Size(120,22); $engL.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($engL)
+        $engTb=New-Object System.Windows.Forms.TextBox; $engTb.Text=[string]$script:Settings.EnginePath; $engTb.Location=New-Object System.Drawing.Point(140,$y); $engTb.Size=New-Object System.Drawing.Size(364,23); $engTb.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $engTb.ForeColor=$cText; $engTb.BorderStyle='FixedSingle'; $engTb.ReadOnly=$true; $g.Controls.Add($engTb)
+        $engTb.ForeColor= if (Test-Path -LiteralPath (Get-AbsoluteAppPath $engTb.Text) -PathType Leaf) { [System.Drawing.Color]::FromArgb(230,236,245) } else { [System.Drawing.Color]::FromArgb(224,138,138) }
+        $y+=30
         foreach($mr in $modelRows){
             $rl=New-Object System.Windows.Forms.Label; $rl.Text=$mr[0]; $rl.Location=New-Object System.Drawing.Point(12,($y+3)); $rl.Size=New-Object System.Drawing.Size(120,22); $rl.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($rl)
             $tb=New-Object System.Windows.Forms.TextBox; $tb.Text=[string]$modelControls[$mr[1]].Text; $tb.Location=New-Object System.Drawing.Point(140,$y); $tb.Size=New-Object System.Drawing.Size(364,23); $tb.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $tb.ForeColor=$cText; $tb.BorderStyle='FixedSingle'; $g.Controls.Add($tb)
@@ -2948,7 +2957,7 @@ try {
             $bb.Add_Click({$dlg=New-Object System.Windows.Forms.OpenFileDialog;$dlg.Title="Select file";$dlg.Filter='Model and data files|*.safetensors;*.gguf;*.json|All files (*.*)|*.*';$dlg.CheckFileExists=$true;$cur=Get-AbsoluteAppPath $dlgBoxes[$key].Text;if(Test-Path -LiteralPath $cur -PathType Leaf){$dlg.InitialDirectory=Split-Path -Parent $cur;$dlg.FileName=Split-Path -Leaf $cur}else{$modelsDir=Join-Path $script:AppRoot 'models';if(Test-Path -LiteralPath $modelsDir -PathType Container){$dlg.InitialDirectory=$modelsDir}};if($dlg.ShowDialog($g) -eq 'OK'){$dlgBoxes[$key].Text=$dlg.FileName};[void](Update-MossDlgSummary);$dlg.Dispose()}.GetNewClosure())
             $y+=30
         }
-        $dlgSummary=New-Object System.Windows.Forms.Label; $dlgSummary.Location=New-Object System.Drawing.Point(12,164); $dlgSummary.Size=New-Object System.Drawing.Size(520,20); $g.Controls.Add($dlgSummary)
+        $dlgSummary=New-Object System.Windows.Forms.Label; $dlgSummary.Location=New-Object System.Drawing.Point(12,194); $dlgSummary.Size=New-Object System.Drawing.Size(520,20); $g.Controls.Add($dlgSummary)
         function Update-MossDlgSummary {
             $check=@((Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)))
             foreach($k in @('DiffusionModelPath','LlmPath','VaePath','TokenizerPath')){ $check+=(Get-AbsoluteAppPath $dlgBoxes[$k].Text) }
@@ -2957,8 +2966,8 @@ try {
             else { $dlgSummary.Text=('{0} of 5 engine/model file(s) not found.' -f $missing.Count); $dlgSummary.ForeColor=[System.Drawing.Color]::FromArgb(224,138,138) }
         }
         [void](Update-MossDlgSummary)
-        $ok=Add-Button $g 'OK' 386 196 80 26
-        $cancel=Add-Button $g 'Cancel' 474 196 80 26
+        $ok=Add-Button $g 'OK' 386 226 80 26
+        $cancel=Add-Button $g 'Cancel' 474 226 80 26
         $ok.Add_Click({
             foreach($k in @('DiffusionModelPath','LlmPath','VaePath','TokenizerPath')){ $modelControls[$k].Text=[string]$dlgBoxes[$k].Text }
             $g.Close()
