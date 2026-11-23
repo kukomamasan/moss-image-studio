@@ -9,7 +9,7 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.2.6'
+$script:AppVersion = '0.2.7'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1'; SafeMode = $true; PowerSaver = 'Off' }
@@ -4039,12 +4039,15 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
             $argsList.Add('--vae-tiling')
             $log.AppendText(("`r`nNote: detail regeneration is ON - the composition pass renders at {0} x {1}, then the highres second pass re-synthesizes sharp detail at {2} x {3} (scale {4}x). This takes about 3-4x the normal improve time." -f $renderW, $renderH, [int]($renderW*$hiresScale), [int]($renderH*$hiresScale), $hiresScale))
         }
-        # FAST SHARPEN: after the render, the ESRGAN upscaler model THE USER
-        # PICKED sharpens/enlarges the finished image in pixel space - a
-        # single sampling pass (at HALF the source size) plus seconds of
-        # upscaling, instead of the hires second pass. The model choice is
-        # never overridden; the output size follows the model (the default
-        # x4 model sharpens the half-size render back to 2x the source).
+        # FAST SHARPEN (v0.2.7): the upscaler model THE USER PICKED is no
+        # longer passed to the generation run - engine 0d71f96 REMOVED the
+        # combined generate+upscale ('generation followed by automatic
+        # upscaling requires DGL'). Instead the model is validated here and
+        # the finished images are upscaled by a SECOND engine run
+        # (-M upscale, see Invoke-MossEngineUpscalePass in
+        # Complete-MossBatchImage). Same result as before: output size
+        # follows the model (the default x4 model sharpens the half-size
+        # render back to 2x the source).
         $upscaleModel = ''
         if ($jobProps['UpscaleModel']) { $upscaleModel = [string]$job.UpscaleModel }
         if ($upscaleModel -and -not (Test-Path -LiteralPath $upscaleModel -PathType Leaf)) {
@@ -4055,8 +4058,7 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
             $upscaleModel = ''
         }
         if ($upscaleModel) {
-            $argsList.Add('--upscale-model'); $argsList.Add((Quote-ProcessArgument $upscaleModel))
-            $log.AppendText(("`r`nNote: fast sharpen is ON - the render runs at {0} x {1}, then the upscaler model {2} sharpens/enlarges the result in pixel space (output size follows the model; no second sampling pass)." -f $renderW, $renderH, (Split-Path -Leaf $upscaleModel)))
+            $log.AppendText(("`r`nNote: fast sharpen is ON - the render runs at {0} x {1}, then MOSS upscales every finished image with the model {2} in a second engine pass (output size follows the model; no second sampling pass)." -f $renderW, $renderH, (Split-Path -Leaf $upscaleModel)))
         }
         $argsList.Add('-p'); $argsList.Add((Quote-ProcessArgument $job.Prompt))
         $argsList.Add('-o'); $argsList.Add((Quote-ProcessArgument $pattern))
@@ -4218,6 +4220,45 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
         } finally { $img.Dispose(); $ms.Dispose() }
     }
 
+    # v0.2.7: separate ESRGAN pass (engine 0d71f96 removed the combined
+    # generate+upscale run). Runs -M upscale on ONE image and replaces it
+    # with the upscaled result. A failure keeps the original image.
+    function Invoke-MossEngineUpscalePass([string]$ImageFile,[string]$UpscaleModel,[string]$Engine,[object]$LogBox) {
+        try {
+            $tmp = "$ImageFile.upscale_tmp.png"
+            if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $Engine
+            $psi.Arguments = ((@('-M','upscale','-i',(Quote-ProcessArgument $ImageFile),'--upscale-model',(Quote-ProcessArgument $UpscaleModel),'-o',(Quote-ProcessArgument $tmp)) -join ' '))
+            $psi.WorkingDirectory = $script:AppRoot
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $p = New-Object System.Diagnostics.Process
+            $p.StartInfo = $psi
+            [void]$p.Start()
+            $outTask = $p.StandardOutput.ReadToEndAsync()
+            $errTask = $p.StandardError.ReadToEndAsync()
+            if (-not $p.WaitForExit(300000)) { try { $p.Kill() } catch {} }
+            $exitOk = ($p.ExitCode -eq 0)
+            $upErr = [string]$errTask.Result
+            $p.Dispose()
+            if ($exitOk -and (Test-Path -LiteralPath $tmp) -and (Test-MossPngValid $tmp)) {
+                Move-Item -LiteralPath $tmp -Destination $ImageFile -Force
+                try { $LogBox.AppendText(("`r`nFast sharpen: the image was upscaled by the separate engine pass ({0})." -f (Split-Path -Leaf $UpscaleModel))) } catch {}
+                return $true
+            }
+            try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch {}
+            try { $LogBox.AppendText("`r`nFast sharpen FAILED: the separate upscale pass did not produce a valid image - the result is kept at its render size.") } catch {}
+            try { [void](Write-MossErrorLog 'MOSS upscale pass failure' $upErr) } catch {}
+            return $false
+        } catch {
+            try { $LogBox.AppendText(("`r`nFast sharpen FAILED: {0}" -f $_.Exception.Message)) } catch {}
+            return $false
+        }
+    }
+
     function Complete-MossBatchImage {
         # Processes ONE finished batch image: upscale (speed modes), sidecar,
         # results and the generated-files list. Used BOTH live (while the
@@ -4243,9 +4284,10 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
                 $upscaledNote = ('kept at engine size {0} x {1} (resize failed: {2})' -f $up.FromW, $up.FromH, $_.Exception.Message)
             }
         } elseif ($job.PSObject.Properties['UpscaleModel'] -and [string]$job.UpscaleModel) {
-            # Fast-sharpen run: the engine upscaled the result with the
-            # user-selected ESRGAN model - record it (the sidecar is the
-            # only record of how the image was made).
+            # Fast-sharpen run (v0.2.7): the engine no longer upscales inside
+            # the generation run, so MOSS does it here with a separate
+            # engine pass BEFORE the sidecar records the result size.
+            [void](Invoke-MossEngineUpscalePass $file ([string]$job.UpscaleModel) ([string]$job.Engine) $log)
             $upscaledNote = ('fast sharpen ({0})' -f (Split-Path -Leaf ([string]$job.UpscaleModel)))
         }
         try {
@@ -4376,10 +4418,10 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
                     }
                 } elseif ($job.PSObject.Properties['UpscaleModel'] -and [string]$job.UpscaleModel) {
                     # Fast-sharpen run (same record as the live path): the
-                    # engine upscaled the result with the user-selected ESRGAN
-                    # model. Improves are single-image jobs and end up HERE
-                    # (the engine has usually already exited when the image is
-                    # processed), so this is the branch that normally runs.
+                    # engine no longer upscales inside the generation run
+                    # (v0.2.7), so MOSS upscales with a separate engine pass
+                    # here BEFORE the sidecar is written.
+                    [void](Invoke-MossEngineUpscalePass $file ([string]$job.UpscaleModel) ([string]$job.Engine) $log)
                     $upscaledNote = ('fast sharpen ({0})' -f (Split-Path -Leaf ([string]$job.UpscaleModel)))
                 }
                 # The sidecar must record the ACTUAL saved size (same rule as

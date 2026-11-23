@@ -130,6 +130,18 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
+What is new in v0.2.7
+-----------------------
+- FIXED ENHANCE/IMPROVE AFTER THE ENGINE UPDATE (your report): the new
+  engine (commit 0d71f96) REMOVED the combined generate+upscale run -
+  'generation followed by automatic upscaling requires DGL'. Every improve
+  that used a fast-sharpen upscaler model (RealESRGAN in models\upscalers)
+  failed with that error. MOSS now renders without the upscaler flag and
+  then runs a SECOND engine pass per finished image (-M upscale), which
+  replaces the image with the sharpened result - same output sizes as
+  before, and a failed upscale pass keeps the original image instead of
+  losing it.
+
 What is new in v0.2.6
 -----------------------
 - FIXED 'N of 5 files' BUT ONLY 4 ROWS (your report): the Model files
