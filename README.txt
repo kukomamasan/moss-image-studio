@@ -130,16 +130,24 @@ Generation options (Options...)
 - Improving an image reuses that image's own sampler, scheduler and negative
   prompt when they are recorded in its sidecar.
 
+What is new in v0.2.9
+-----------------------
+- SHARPEN STRENGTH YOU CAN ACTUALLY SEE (your report: 'cannot spot any
+  different'): the first Crisp mask (amount 0.4) was measured at only +5%
+  edge definition - invisible. The finish is now a STRENGTH LEVEL with a
+  clearly visible default: Off (natural model output), Light (subtle,
+  +16%), Crisp (clearly visible, +40% - the default), Extra crisp
+  (strongest, +56%, skin can look slightly harsh). Measured on a real
+  enhance with an edge-energy test, and visually compared on real crops
+  of an enhanced portrait.
+
 What is new in v0.2.8
 -----------------------
 - CRISP FINISH FOR FAST SHARPEN (your report: enhanced humans look too
-  soft): ESRGAN upscaler models are known for smoothing human skin into a
-  soft, plastic look. After every fast-sharpen upscale, MOSS now applies a
-  MILD unsharp mask (amount 0.4) that brings texture back - especially on
-  faces. Options > Fast sharpen finish lets you switch it off ('Off
-  (natural model output)') or keep it on ('Crisp (mild unsharp mask)',
-  default). The mask is pure .NET (no downloads), runs in a fraction of a
-  second, and is applied before the sidecar records the image size.
+  soft): after every fast-sharpen upscale, MOSS applies an unsharp mask
+  that brings texture back. The mask is pure .NET (no downloads), runs in
+  a fraction of a second, and is applied before the sidecar records the
+  image size.
 
 What is new in v0.2.7
 -----------------------

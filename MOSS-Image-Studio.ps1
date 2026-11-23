@@ -9,10 +9,11 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.2.8'
+$script:AppVersion = '0.2.9'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1'; SafeMode = $true; PowerSaver = 'Off'; SharpenFinish = 'Crisp' }
+# (SharpenFinish levels: Off / Light / Crisp / Extra crisp - amounts 0 / 0.8 / 1.2 / 1.8)
 $script:HistoryPassphrase = $null
 # POWER SAVER (v0.2.5): top-level setter because menu click handlers run in
 # closures where '$script:' may not reach the app scope (same rule the GPU
@@ -22,14 +23,19 @@ function Set-MossPowerSaver([string]$Mode) {
     $script:Settings.PowerSaver = $Mode
     Save-Settings
 }
-# SHARPEN FINISH (v0.2.8): what happens after the fast-sharpen upscaler.
-# 'Crisp' (default) adds a mild unsharp mask - ESRGAN x4plus famously
-# smooths human skin into a soft plastic look; a gentle sharpen brings
-# texture back. 'Off' keeps the pure model output.
+# SHARPEN FINISH (v0.2.8/0.2.9): what happens after the fast-sharpen upscaler.
+# Measured on a real enhance: amount 0.4 was INVISIBLE (+5% edge energy);
+# 1.2 is clearly visible (+40%); 1.8 is strongly visible (+56%, slightly
+# harsh on skin). Four levels:
+#   Off = pure model output; Light = 0.8; Crisp = 1.2 (default);
+#   Extra crisp = 1.8.
 function Set-MossSharpenFinish([string]$Mode) {
-    if (@('Off','Crisp') -notcontains $Mode) { $Mode = 'Crisp' }
+    if (@('Off','Light','Crisp','Extra crisp') -notcontains $Mode) { $Mode = 'Crisp' }
     $script:Settings.SharpenFinish = $Mode
     Save-Settings
+}
+function Get-MossSharpenAmount([string]$Mode) {
+    switch ([string]$Mode) { 'Light' { 0.8 } 'Extra crisp' { 1.8 } 'Crisp' { 1.2 } default { 0.0 } }
 }
 function Invoke-MossUnsharpMask([string]$Path,[double]$Amount) {
     # Mild unsharp mask (3x3 blur estimate, amount-scaled) over the PNG.
@@ -2628,11 +2634,13 @@ function Show-GeneratorWindow {
     })
     # SHARPEN FINISH (v0.2.8): what happens after the fast-sharpen upscaler.
     $miFin=$mossOptionsMenu.Items.Add('Fast sharpen finish')
-    $miFin.ToolTipText='After the fast-sharpen upscaler: Crisp (default) adds a mild unsharp mask that restores skin texture; ESRGAN models are known for a soft, plastic look on humans. Off keeps the pure model output.'
-    foreach($finL in @(@('Off','Off (natural model output)'),@('Crisp','Crisp (mild unsharp mask)'))){
+    $miFin.ToolTipText='After the fast-sharpen upscaler: how much extra sharpening. Crisp (default) is clearly visible; Extra crisp is strongest; Off keeps the pure model output.'
+    foreach($finL in @(@('Off','Off (natural model output)'),@('Light','Light (subtle)'),@('Crisp','Crisp (clearly visible)'),@('Extra crisp','Extra crisp (strongest)'))){
         $finItem=$miFin.DropDownItems.Add([string]$finL[1])
         $finItem.ToolTipText=switch([string]$finL[0]){
-            'Crisp' { 'A mild unsharp mask (amount 0.4) runs after the upscaler and restores texture - especially on human skin.' }
+            'Light' { 'A subtle sharpen (measured: +16% edge definition) - barely visible, for a natural look.' }
+            'Extra crisp' { 'The strongest sharpen (measured: +56% edge definition) - very visible, skin can look slightly harsh.' }
+            'Crisp' { 'A clearly visible sharpen (measured: +40% edge definition) - restores skin and hair texture.' }
             default { 'No extra sharpening - the upscaler output is used as-is.' }
         }
         $finLvl=[string]$finL[0]
@@ -2642,7 +2650,7 @@ function Show-GeneratorWindow {
     $mossOptionsMenu.Add_Opening({
         try {
             $cur=if($script:Settings.Contains('SharpenFinish')){[string]$script:Settings.SharpenFinish}else{'Crisp'}
-            $curLabel=if($cur -eq 'Crisp'){'Crisp (mild unsharp mask)'}else{'Off (natural model output)'}
+            $curLabel=switch($cur){ 'Light' {'Light (subtle)'} 'Extra crisp' {'Extra crisp (strongest)'} 'Crisp' {'Crisp (clearly visible)'} default {'Off (natural model output)'} }
             foreach($it in $finMenuRef.DropDownItems){ if($it -is [System.Windows.Forms.ToolStripItem]){ $it.Checked = ($curLabel -and $it.Text.StartsWith($curLabel)) } }
         } catch {}
     })
@@ -4333,10 +4341,11 @@ if (-not $hiresActive) { $renderW = [int]$job.Width; $renderH = [int]$job.Height
             $p.Dispose()
             if ($exitOk -and (Test-Path -LiteralPath $tmp) -and (Test-MossPngValid $tmp)) {
                 Move-Item -LiteralPath $tmp -Destination $ImageFile -Force
-                # SHARPEN FINISH (v0.2.8): 'Crisp' adds a mild unsharp mask so
-                # ESRGAN's soft/plastic skin look gets texture back.
-                if ($script:Settings.Contains('SharpenFinish') -and [string]$script:Settings.SharpenFinish -eq 'Crisp') {
-                    if (Invoke-MossUnsharpMask $ImageFile 0.4) { try { $LogBox.AppendText("`r`nCrisp finish: a mild unsharp mask was applied after the upscaler (texture restored).") } catch {} }
+                # SHARPEN FINISH (v0.2.8/0.2.9): a strength-selected unsharp
+                # mask so ESRGAN's soft/plastic skin look gets texture back.
+                $finAmt = Get-MossSharpenAmount $(if ($script:Settings.Contains('SharpenFinish')) { [string]$script:Settings.SharpenFinish } else { 'Crisp' })
+                if ($finAmt -gt 0) {
+                    if (Invoke-MossUnsharpMask $ImageFile $finAmt) { try { $LogBox.AppendText(("`r`nCrisp finish (strength {0}): an unsharp mask was applied after the upscaler (texture restored)." -f $finAmt)) } catch {} }
                 }
                 try { $LogBox.AppendText(("`r`nFast sharpen: the image was upscaled by the separate engine pass ({0})." -f (Split-Path -Leaf $UpscaleModel))) } catch {}
                 return $true
