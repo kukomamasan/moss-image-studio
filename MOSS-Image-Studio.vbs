@@ -1,9 +1,14 @@
 Option Explicit
 
-Dim shell, fso, root, powershell, command
+Dim shell, fso, root, powershell, scriptPath, command
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 root = fso.GetParentFolderName(WScript.ScriptFullName)
+scriptPath = fso.BuildPath(root, "MOSS-Image-Studio.ps1")
+If Not fso.FileExists(scriptPath) Then
+    MsgBox "MOSS-Image-Studio.ps1 could not be found beside this launcher.", vbCritical, "MOSS Image Studio"
+    WScript.Quit 1
+End If
 
 powershell = shell.ExpandEnvironmentStrings("%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe")
 If Not fso.FileExists(powershell) Then powershell = shell.ExpandEnvironmentStrings("%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe")
@@ -13,7 +18,7 @@ If Not fso.FileExists(powershell) Then
     WScript.Quit 1
 End If
 
-command = Chr(34) & powershell & Chr(34) & " -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File " & Chr(34) & fso.BuildPath(root, "MOSS-Image-Studio.ps1") & Chr(34)
+command = Chr(34) & powershell & Chr(34) & " -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File " & Chr(34) & scriptPath & Chr(34)
 ' Window style 0 = the PowerShell console is hidden from the very first
 ' moment (previously style 1 showed it for a second or more until MOSS's
 ' own Hide-MossConsoleWindow ran after the GUI window appeared - users saw

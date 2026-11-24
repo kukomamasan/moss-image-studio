@@ -1,4 +1,4 @@
-MOSS Image Studio - portable build (v0.3.37)
+MOSS Image Studio - portable build (v0.3.38)
 ===========================================
 
 MOSS Image Studio is an independent GUI for the stable-diffusion.cpp CLI,
@@ -9,8 +9,10 @@ bin\sd-cli.exe, and MOSS can show you the exact command it runs
 Unpack this ZIP into any folder you like (for example E:\MOSS\). All paths are
 resolved relative to the application folder, so MOSS can be moved to another
 drive or computer at any time. Start MOSS with MOSS-Image-Studio.bat (or .vbs).
-The launcher locates Windows PowerShell 5.1 directly in its standard Windows
-location, even when PowerShell is not on the PATH, and hides the console.
+The launchers locate Windows PowerShell 5.1 directly in its standard Windows
+location, even when PowerShell is not on the PATH, validate the app script,
+and hide the console. The BAT launcher invokes Windows Script Host by its
+full system path rather than relying on executable-name search.
 The current version is shown in the window title.
 
 Generation
