@@ -29,10 +29,12 @@ Generation
 - JSON layout prompts are sent without a visual-style prefix. Use the model
   format with centered yxyx boxes; select a visual style for ordinary prompts.
 - Speed selector: Exact (full quality) renders at full size; the faster modes
-  (~2x / ~4x / ~8x) render at a reduced size with full steps and enlarge the
+  (~2x / ~4x) render at a reduced size with full steps and enlarge the
   finished image in pixel space (bicubic - faithful, possibly grainy; never
-  distorted, no second sampling pass). Very large renders (>~3 MP) get VAE
-  tiling automatically so the VAE cannot exhaust GPU memory.
+  distorted, no second sampling pass). For render sizes above 3 MP, MOSS passes
+  the engine's --vae-tiling flag to try to reduce VAE memory use. This is not a
+  guarantee that a render will fit; reduce the render size or try CPU offload
+  if you still get a memory error.
 - Sampler and scheduler: full engine lists with plain-language descriptions
   inline and on hover, including verified in-house facts and the one known
   incompatibility ('ays' schedule + second-order samplers renders blank).
@@ -47,10 +49,11 @@ While rendering
 - ONE ENGINE PROCESS PER IMAGE (v0.3.9): every image of a batch is saved,
   upscaled and listed the moment it is done - files appear one by one.
 - LIVE PREVIEW: the picture forms in the Output preview pane while rendering.
-  The decoder and the update frequency are your choice (Generation... ->
-  Speed & memory): proj (fast built-in), vae (the real VAE - exact look,
-  default), tae (only with a models\taesd.safetensors file) or Off; preview
-  every 1-20 denoiser steps.
+  The decoder and update frequency are configurable (Generation... -> Speed &
+  memory): proj (built-in), vae (uses the model VAE; default), tae (requires
+  models\taesd.safetensors) or Off; update every 1-20 denoiser steps. This
+  decoder setting affects previews only; it is separate from VAE tiling for
+  large renders. If VAE previews do not appear in your setup, choose proj.
 - SKIP abandons the image currently rendering and moves on to the next one;
   everything already saved is kept.
 - PAUSE freezes the running engine process for real (nothing renders, VRAM
@@ -195,63 +198,10 @@ Updating MOSS itself
 --------------------
 - 'Update MOSS...' checks the latest GitHub release and can update the app
   files while preserving config\, models\ and outputs\. If the release feed
-  cannot be read, the Releases page is offered instead.
+  cannot be read, the Releases page is offered instead. Before installing, MOSS
+  verifies the ZIP's SHA-256 digest; if GitHub does not provide a digest, the
+  automatic install is refused.
 - Note: MOSS runs as one .ps1 script. If the script file in your folder is
   ever truncated or corrupted externally (a partial write can look like a
   parse error and MOSS simply will not start), restore it from the ZIP -
   the logs\ folder holds a technical report when that happens.
-
-Header fix (v0.3.12)
---------------------
-- The main-window header no longer shows a stray line through the subtitle
-  text ('LOCAL IMAGE GENERA~TION') at high DPI: the subtitle now sits below
-  the title's real rendered height and the header grows to fit, so the
-  layout is correct at any display scaling.
-
-Startup & small-window fixes (v0.3.13)
---------------------------------------
-- Fresh install (no saved window yet) now STARTS at the smallest supported
-  window size instead of the large design size. Your saved window size is
-  still restored on later starts.
-- The 'Generated files' caption no longer clips at the smallest window
-  size: it now shortens with an ellipsis and shows the full text on hover.
-- The main window no longer shows darker 'stripes' at the sides and bottom:
-  the page background is now the same tone as the panels, and the two card
-  panels carry a subtle 1 px outline instead.
-- Dialog audit fixes (v0.3.13): the Update engine dialog had two section
-  headings hidden behind the version panel (now shown above the lists) and
-  the extra-variant checkbox row could clip its last checkbox at high DPI
-  (panel now widens with the dialog); the LoRA dialog's intro text was cut
-  mid-sentence and its buttons half-off the dialog edge at high DPI (both
-  fixed); the Benchmarks 'Mode' caption no longer truncates.
-
-Audit hardening (v0.3.14)
--------------------------
-- MOSS self-updates verify the release ZIP's SHA-256 digest before install;
-  automatic installation stops with a clear message if GitHub omits it.
-- New encrypted history and sidecars use per-payload salts while existing
-  v1 envelopes remain readable.
-- Engine output streams are drained concurrently to avoid pipe backpressure
-  blocking a render.
-
-Responsive window layout (v0.3.15)
----------------------------------
-- The generation buttons and Ready/status/progress row now move down with
-  the resized prompt and settings area on taller windows.
-
-Batch pause and skip (v0.3.16)
-------------------------------
-- Skipping the current image while paused keeps the next batch image paused
-  until you explicitly click Resume.
-
-Menu and dialog layout (v0.3.17)
--------------------------------
-- Model-file Browse buttons are fully visible, the footer buttons no longer
-  cover the status text, and the model-repair action has room for its caption.
-- Engine release notes wrap, the LoRA catalog scrolls when needed, and all
-  benchmark power-meter lines fit in the dialog.
-
-Button captions (v0.3.19)
-------------------------
-- The prompt-history, generation-options and batch-cancel buttons have enough
-  width for their captions without crowding adjacent controls.
