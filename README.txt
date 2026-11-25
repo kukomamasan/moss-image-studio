@@ -89,6 +89,17 @@ installing an app - and as private as keeping a diary.
 
 ____________________________________________________________________________
 
+ HOW IT WAS MADE
+____________________________________________________________________________
+
+ Sootglass is an honest example of building with AI: nearly all of the
+ code was written together with an AI coding assistant, while the ideas,
+ the direction, the testing against the real app and every picture it
+ renders come from a human. The result is a tool that does exactly what
+ its author wanted - and nothing it did not agree to.
+
+____________________________________________________________________________
+
  QUICK START
 ____________________________________________________________________________
 
