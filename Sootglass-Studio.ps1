@@ -9,15 +9,15 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent
 # any UI appears), so the password prompt and every window run without a
 # visible console. Startup problems still surface: a top-level try/catch
 # shows a message box and writes a log file.
-$script:AppVersion = '0.3.44'
+$script:AppVersion = '0.3.45'
 $script:ConfigDir = Join-Path $script:AppRoot 'config'
 $script:ConfigFile = Join-Path $script:ConfigDir 'settings.json'
 $script:Settings = [ordered]@{ Backend = 'Auto'; BackendSelectionSaved = $false; EnginePath = (Join-Path $script:AppRoot 'bin\sd-cli.exe'); HardwareSetupComplete = $false; ImageStyle = 'Photorealistic'; PreferredGpuIndex = -1; PreferredGpuName = ''; ShowEngineCommandLine = '1'; SafeMode = $false; PowerSaver = 'Off' }
 $script:HistoryPassphrase = $null
 # POWER SAVER (v0.2.5): top-level setter because menu click handlers run in
 # closures where '$script:' may not reach the app scope (same rule the GPU
-# scan follows with Set-MossInventory).
-function Set-MossPowerSaver([string]$Mode) {
+# scan follows with Set-SgInventory).
+function Set-SgPowerSaver([string]$Mode) {
     if (@('Off','Gentle','Max saving') -notcontains $Mode) { $Mode = 'Off' }
     $script:Settings.PowerSaver = $Mode
     Save-Settings
@@ -31,7 +31,7 @@ $script:HistoryPlaintextEnabled = $false
 # AGAIN for every single encrypt/decrypt - saving settings, writing each
 # image sidecar, every wrong code attempt. Each new envelope also has its own
 # random salt for HKDF key derivation, plus a random IV.
-$script:MossKdfCache = @{}
+$script:SgKdfCache = @{}
 $script:HistoryEnabled = $true
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -47,7 +47,7 @@ Add-Type -AssemblyName System.Drawing
 # FlatStyle=Flat makes WinForms paint the whole control itself - dark field,
 # no system button - and the small chevron overlay below takes the place of
 # the pale button that FlatStyle still leaves at the right edge.
-function Set-MossComboTheme([System.Windows.Forms.ComboBox]$Combo,[System.Windows.Forms.Control]$Parent){
+function Set-SgComboTheme([System.Windows.Forms.ComboBox]$Combo,[System.Windows.Forms.Control]$Parent){
     $field=[System.Drawing.Color]::FromArgb(16,21,30)
     $text=[System.Drawing.Color]::FromArgb(230,236,245)
     $line=[System.Drawing.Color]::FromArgb(70,85,110)
@@ -91,7 +91,7 @@ function Set-MossComboTheme([System.Windows.Forms.ComboBox]$Combo,[System.Window
     if (-not $Parent) { return }
     $arrowW=22
     $ov=New-Object System.Windows.Forms.Panel
-    $ov.Name='mossComboChevron'
+    $ov.Name='sgComboChevron'
     $ov.BackColor=$field
     $ov.TabStop=$false
     $ov.Size=New-Object System.Drawing.Size($arrowW,([int]$Combo.Height-1))
@@ -128,23 +128,23 @@ if (-not $instanceAcquired) {
     exit 0
 }
 
-function Hide-MossConsoleWindow {
-    if(-not ('Moss.MossNativeWindow' -as [type])) {
+function Hide-SgConsoleWindow {
+    if(-not ('Sg.SgNativeWindow' -as [type])) {
         # v0.2.3: -MemberDefinition instead of -TypeDefinition. -TypeDefinition
         # launches the C# compiler as a separate process: ~310 ms on EVERY
         # Sootglass start. -MemberDefinition compiles the same three P/Invoke
         # signatures in ~60 ms.
-        Add-Type -Namespace Moss -Name MossNativeWindow -MemberDefinition @'
+        Add-Type -Namespace Sg -Name SgNativeWindow -MemberDefinition @'
     [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool SetForegroundWindow(IntPtr hWnd);
 '@ | Out-Null
     }
-    $consoleHandle=[Moss.MossNativeWindow]::GetConsoleWindow()
-    if($consoleHandle -ne [IntPtr]::Zero){[void][Moss.MossNativeWindow]::ShowWindow($consoleHandle,0)}
+    $consoleHandle=[Sg.SgNativeWindow]::GetConsoleWindow()
+    if($consoleHandle -ne [IntPtr]::Zero){[void][Sg.SgNativeWindow]::ShowWindow($consoleHandle,0)}
 }
 
-function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history',[System.Windows.Forms.Form]$Owner=$null) {
+function Get-SgHistoryPassphrase([bool]$Create,[string]$Purpose='history',[System.Windows.Forms.Form]$Owner=$null) {
     # A call site that passes $null (older code did) would render the sentence
     # with a missing word ('Enter the  code.') - fall back to 'history'.
     if([string]::IsNullOrWhiteSpace($Purpose)){ $Purpose='history' }
@@ -173,7 +173,7 @@ function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history',[Sys
         $n++
         $dialog.Tag=$n
         if($first.Focused -or $n -gt 30){ $focusTimer.Stop(); return }
-        try { [void][MossNativeWindow]::SetForegroundWindow($dialog.Handle) } catch {}
+        try { [void][Sg.SgNativeWindow]::SetForegroundWindow($dialog.Handle) } catch {}
         try { $dialog.Activate() } catch {}
         [void]$first.Focus(); $first.Select()
     }.GetNewClosure())
@@ -193,7 +193,7 @@ function Get-MossHistoryPassphrase([bool]$Create,[string]$Purpose='history',[Sys
     } finally { $dialog.Dispose() }
 }
 
-function Show-MossHistoryRecoveryChoice {
+function Show-SgHistoryRecoveryChoice {
     $f=New-Object System.Windows.Forms.Form; $f.Text='Prompt history options'; $f.ClientSize=New-Object System.Drawing.Size(520,270); $f.Font=New-Object System.Drawing.Font('Segoe UI',9); $f.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $f.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'; $f.MaximizeBox=$false; $f.MinimizeBox=$false
     $label=New-Object System.Windows.Forms.Label; $label.Text='The code was not accepted. Choose how Sootglass should continue. Turning off the code discards the locked history; future history will be saved unencrypted.'; $label.Location=New-Object System.Drawing.Point(18,12); $label.Size=New-Object System.Drawing.Size(484,52); $f.Controls.Add($label)
     $items=@(@('Try again','retry'),@('Continue without history','skip'),@('Turn off password for prompt history','plaintext'),@('Set a new code','reset'),@('Turn off prompt history','disable'))
@@ -202,7 +202,7 @@ function Show-MossHistoryRecoveryChoice {
     try { [void]$f.ShowDialog(); if($f.Tag){return [string]$f.Tag}; return 'skip' } finally { $f.Dispose() }
 }
 
-function Get-MossPayloadV2Keys([byte[]]$MasterKey,[byte[]]$Salt) {
+function Get-SgPayloadV2Keys([byte[]]$MasterKey,[byte[]]$Salt) {
     # HKDF-SHA512: give each envelope independent encryption and MAC keys
     # without repeating the expensive password derivation for every sidecar.
     $extract=[System.Security.Cryptography.HMACSHA512]::new($Salt)
@@ -217,12 +217,12 @@ function Get-MossPayloadV2Keys([byte[]]$MasterKey,[byte[]]$Salt) {
     } finally { $expand.Dispose() }
 }
 
-function Protect-MossPayload([string]$Text,[string]$Password) {
+function Protect-SgPayload([string]$Text,[string]$Password) {
     $iterations=250000
     # Cache only the expensive password-derived master key. The distinct
     # per-envelope salt feeds HKDF, so separate payloads never reuse keys.
     $cacheKey='protect-v2|'+[string]$Password
-    $cached=$script:MossKdfCache[$cacheKey]
+    $cached=$script:SgKdfCache[$cacheKey]
     if ($null -eq $cached) {
         $masterSalt=New-Object byte[] 16
         $rng=[System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -230,14 +230,14 @@ function Protect-MossPayload([string]$Text,[string]$Password) {
         $derive=[System.Security.Cryptography.Rfc2898DeriveBytes]::new($Password,$masterSalt,$iterations)
         try { $masterKey=$derive.GetBytes(64) } finally { $derive.Dispose() }
         $cached=@{ Salt=$masterSalt; Keys=$masterKey }
-        $script:MossKdfCache[$cacheKey]=$cached
+        $script:SgKdfCache[$cacheKey]=$cached
     }
     $masterSalt=[byte[]]$cached.Salt
     $masterKey=[byte[]]$cached.Keys
     $salt=New-Object byte[] 16
     $rng=[System.Security.Cryptography.RandomNumberGenerator]::Create()
     try { $rng.GetBytes($salt) } finally { $rng.Dispose() }
-    $keys=Get-MossPayloadV2Keys $masterKey $salt
+    $keys=Get-SgPayloadV2Keys $masterKey $salt
     $iv=New-Object byte[] 16; $rngIv=[System.Security.Cryptography.RandomNumberGenerator]::Create(); $rngIv.GetBytes($iv); $rngIv.Dispose()
     $aes=[System.Security.Cryptography.Aes]::Create(); $aes.KeySize=256; $aes.Mode=[System.Security.Cryptography.CipherMode]::CBC; $aes.Padding=[System.Security.Cryptography.PaddingMode]::PKCS7; $aes.Key=$keys[0..31]; $aes.IV=$iv
     try { $enc=$aes.CreateEncryptor(); try { $cipher=$enc.TransformFinalBlock([System.Text.Encoding]::UTF8.GetBytes($Text),0,[System.Text.Encoding]::UTF8.GetByteCount($Text)) } finally { $enc.Dispose() } } finally { $aes.Dispose() }
@@ -246,7 +246,7 @@ function Protect-MossPayload([string]$Text,[string]$Password) {
     return ([ordered]@{ Version=2; Iterations=$iterations; KdfSalt=[Convert]::ToBase64String($masterSalt); Salt=[Convert]::ToBase64String($salt); IV=[Convert]::ToBase64String($iv); Ciphertext=[Convert]::ToBase64String($cipher); MAC=[Convert]::ToBase64String($mac) } | ConvertTo-Json -Compress)
 }
 
-function Unprotect-MossPayload([string]$EnvelopeText,[string]$Password) {
+function Unprotect-SgPayload([string]$EnvelopeText,[string]$Password) {
     $envelope=$EnvelopeText | ConvertFrom-Json
     $version=[int]$envelope.Version
     if ($version -notin @(1,2) -or [int]$envelope.Iterations -lt 100000 -or [int]$envelope.Iterations -gt 1000000) { throw 'Unsupported encrypted history format.' }
@@ -254,22 +254,22 @@ function Unprotect-MossPayload([string]$EnvelopeText,[string]$Password) {
     if ($version -eq 1) {
         # Existing saved history and sidecars use PBKDF2 directly with Salt.
         $cacheKey='unprotect-v1|'+[string]$Password+'|'+[string]$envelope.Salt+'|'+[int]$envelope.Iterations
-        $keys=$script:MossKdfCache[$cacheKey]
+        $keys=$script:SgKdfCache[$cacheKey]
         if ($null -eq $keys) {
             $derive=[System.Security.Cryptography.Rfc2898DeriveBytes]::new($Password,$salt,[int]$envelope.Iterations)
             try { $keys=$derive.GetBytes(64) } finally { $derive.Dispose() }
-            $script:MossKdfCache[$cacheKey]=[byte[]]$keys
+            $script:SgKdfCache[$cacheKey]=[byte[]]$keys
         }
     } else {
         $kdfSalt=[Convert]::FromBase64String([string]$envelope.KdfSalt)
         $cacheKey='unprotect-v2|'+[string]$Password+'|'+[string]$envelope.KdfSalt+'|'+[int]$envelope.Iterations
-        $masterKey=$script:MossKdfCache[$cacheKey]
+        $masterKey=$script:SgKdfCache[$cacheKey]
         if ($null -eq $masterKey) {
             $derive=[System.Security.Cryptography.Rfc2898DeriveBytes]::new($Password,$kdfSalt,[int]$envelope.Iterations)
             try { $masterKey=$derive.GetBytes(64) } finally { $derive.Dispose() }
-            $script:MossKdfCache[$cacheKey]=[byte[]]$masterKey
+            $script:SgKdfCache[$cacheKey]=[byte[]]$masterKey
         }
-        $keys=Get-MossPayloadV2Keys ([byte[]]$masterKey) $salt
+        $keys=Get-SgPayloadV2Keys ([byte[]]$masterKey) $salt
     }
     $keys=[byte[]]$keys
     $authData=New-Object byte[] ($salt.Length+$iv.Length+$cipher.Length); [System.Buffer]::BlockCopy($salt,0,$authData,0,$salt.Length); [System.Buffer]::BlockCopy($iv,0,$authData,$salt.Length,$iv.Length); [System.Buffer]::BlockCopy($cipher,0,$authData,$salt.Length+$iv.Length,$cipher.Length)
@@ -280,15 +280,15 @@ function Unprotect-MossPayload([string]$EnvelopeText,[string]$Password) {
     return [System.Text.Encoding]::UTF8.GetString($plain)
 }
 
-function Reset-MossHistoryPassword([System.Windows.Forms.Form]$Owner=$null) {
+function Reset-SgHistoryPassword([System.Windows.Forms.Form]$Owner=$null) {
     $answer=[System.Windows.Forms.MessageBox]::Show('This clears the saved prompt history and replaces its code. The old history cannot be recovered afterward. Continue?','Reset history code',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
     if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return $false}
-    $newPassword=Get-MossHistoryPassphrase $true 'history' $Owner
+    $newPassword=Get-SgHistoryPassphrase $true 'history' $Owner
     if(-not $newPassword){return $false}
     $script:HistoryPassphrase=$newPassword
-    $script:HistoryPasswordVerifier=Protect-MossPayload 'Sootglass-HISTORY-PASSWORD-CHECK-V1' $newPassword
+    $script:HistoryPasswordVerifier=Protect-SgPayload 'Sootglass-HISTORY-PASSWORD-CHECK-V1' $newPassword
     # The old code's cached key material is dead weight after a reset.
-    $script:MossKdfCache.Clear()
+    $script:SgKdfCache.Clear()
     $script:HistoryLocked=$false
     $script:LockedHistoryEnvelope=$null
     $script:HistoryEnabled=$true
@@ -297,7 +297,7 @@ function Reset-MossHistoryPassword([System.Windows.Forms.Form]$Owner=$null) {
     return (Save-Settings)
 }
 
-function Disable-MossHistoryPassword {
+function Disable-SgHistoryPassword {
     $answer=[System.Windows.Forms.MessageBox]::Show('The existing encrypted history cannot be unlocked without its code and will be deleted. Future recent prompts will be saved in plain text in settings.json. Turn off the code and continue?','Turn off history code',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
     if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return $false}
     $script:HistoryPassphrase=$null
@@ -306,12 +306,12 @@ function Disable-MossHistoryPassword {
     $script:LockedHistoryEnvelope=$null
     $script:HistoryEnabled=$true
     $script:HistoryPlaintextEnabled=$true
-    $script:MossKdfCache.Clear()
+    $script:SgKdfCache.Clear()
     $script:Settings.PromptHistory=@()
     return (Save-Settings)
 }
 
-function Disable-MossHistory {
+function Disable-SgHistory {
     $answer=[System.Windows.Forms.MessageBox]::Show('This permanently deletes saved prompt history and stops Sootglass from storing future prompts. Continue?','Turn off prompt history',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
     if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return $false}
     $script:HistoryEnabled=$false
@@ -320,7 +320,7 @@ function Disable-MossHistory {
     $script:HistoryPassphrase=$null
     $script:HistoryPasswordVerifier=$null
     $script:HistoryPlaintextEnabled=$false
-    $script:MossKdfCache.Clear()
+    $script:SgKdfCache.Clear()
     $script:Settings.PromptHistory=@()
     return (Save-Settings)
 }
@@ -345,10 +345,10 @@ function Load-Settings([switch]$UnlockHistory) {
                 $script:Settings.PromptHistory=@()
                 if (-not $UnlockHistory) { return }
                 while ($true) {
-                    $candidate = Get-MossHistoryPassphrase $false
+                    $candidate = Get-SgHistoryPassphrase $false
                     if ($candidate) {
                         try {
-                            $plain = Unprotect-MossPayload ([string]$saved.PromptHistoryProtected) $candidate
+                            $plain = Unprotect-SgPayload ([string]$saved.PromptHistoryProtected) $candidate
                             $script:HistoryPassphrase=$candidate
                             $script:Settings.PromptHistory = @($plain | ConvertFrom-Json)
                             $script:HistoryLocked=$false
@@ -356,12 +356,12 @@ function Load-Settings([switch]$UnlockHistory) {
                             break
                         } catch { $script:HistoryPassphrase=$null }
                     }
-                    $choice=Show-MossHistoryRecoveryChoice
+                    $choice=Show-SgHistoryRecoveryChoice
                     if($choice -eq 'retry'){continue}
                     if($choice -eq 'skip'){$script:HistoryLocked=$true;$script:Settings.PromptHistory=@();return}
-                    if($choice -eq 'reset'){if(Reset-MossHistoryPassword){return};continue}
-                    if($choice -eq 'disable'){if(Disable-MossHistory){return};continue}
-                    if($choice -eq 'plaintext'){if(Disable-MossHistoryPassword){return};continue}
+                    if($choice -eq 'reset'){if(Reset-SgHistoryPassword){return};continue}
+                    if($choice -eq 'disable'){if(Disable-SgHistory){return};continue}
+                    if($choice -eq 'plaintext'){if(Disable-SgHistoryPassword){return};continue}
                 }
             } elseif ($script:HistoryEnabled -and $script:HistoryPlaintextEnabled -and $saved.PSObject.Properties.Name -contains 'PromptHistory') {
                 $script:Settings.PromptHistory = @($saved.PromptHistory)
@@ -378,7 +378,7 @@ function Load-Settings([switch]$UnlockHistory) {
     }
 }
 function Save-Settings {
-    if (-not (Test-Path $script:ConfigDir)) { New-Item -ItemType Directory -Path $script:ConfigDir -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $script:ConfigDir)) { New-Item -ItemType Directory -Path $script:ConfigDir -Force | Out-Null }
     $persist = [ordered]@{}
     foreach ($key in $script:Settings.Keys) { if ($key -ne 'PromptHistory') { $persist[$key] = $script:Settings[$key] } }
     $persist.PromptHistoryEnabled=[bool]$script:HistoryEnabled
@@ -393,7 +393,7 @@ function Save-Settings {
     } elseif ($script:HistoryPassphrase -and $script:HistoryPasswordVerifier) {
         # Code entered and unlocked: history stays encrypted.
         $historyJson = ConvertTo-Json -InputObject $history -Compress
-        $persist.PromptHistoryProtected = Protect-MossPayload ([string]$historyJson) $script:HistoryPassphrase
+        $persist.PromptHistoryProtected = Protect-SgPayload ([string]$historyJson) $script:HistoryPassphrase
         $persist.HistoryPasswordVerifier=$script:HistoryPasswordVerifier
     } elseif ($script:HistoryPlaintextEnabled) {
         $persist.PromptHistory = $history
@@ -401,11 +401,12 @@ function Save-Settings {
         # Without a configured history code, recent prompts stay in memory
         # for this session only and are never written to settings.json.
     }
-    $persist | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $script:ConfigFile -Encoding UTF8
+    $tmpCfg=Join-Path $script:ConfigDir ('settings.json.new-'+[guid]::NewGuid().ToString('N'))
+    try { $persist | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $tmpCfg -Encoding UTF8 -ErrorAction Stop; Move-Item -LiteralPath $tmpCfg -Destination $script:ConfigFile -Force -ErrorAction Stop } catch { try { Remove-Item -LiteralPath $tmpCfg -Force -ErrorAction SilentlyContinue } catch {}; throw }
     return $true
 }
 
-function Reset-MossSettings([System.Windows.Forms.Form]$Owner) {
+function Reset-SgSettings([System.Windows.Forms.Form]$Owner) {
     $answer=[System.Windows.Forms.MessageBox]::Show('Reset all Sootglass settings to their defaults? Sootglass will close so the defaults can be applied on the next launch. Model files, generated images, and saved prompt history/password will be preserved. Any active generation must finish first.','Reset all settings',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
     if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return $false}
     if($script:GenState -and $script:GenState.IsRunning){
@@ -497,11 +498,11 @@ $script:GpuScanJob = $null
 $script:GpuScanRunner = $null
 $script:GpuScanDone = $false
 
-function Get-MossGpuCacheFile { return (Join-Path $script:ConfigDir 'gpu-cache.json') }
-function Get-MossCachedGpuName {
+function Get-SgGpuCacheFile { return (Join-Path $script:ConfigDir 'gpu-cache.json') }
+function Get-SgCachedGpuName {
     # The card name of the last successful scan ('' when there is none).
     try {
-        $f = Get-MossGpuCacheFile
+        $f = Get-SgGpuCacheFile
         if (Test-Path -LiteralPath $f) {
             $d = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
             if ($d -and $d.PSObject.Properties.Name -contains 'Name' -and [string]$d.Name) { return [string]$d.Name }
@@ -509,15 +510,15 @@ function Get-MossCachedGpuName {
     } catch {}
     return ''
 }
-function Save-MossCachedGpuName([string]$Name) {
+function Save-SgCachedGpuName([string]$Name) {
     if (-not $Name) { return }
     try {
         if (-not (Test-Path -LiteralPath $script:ConfigDir)) { New-Item -ItemType Directory -Path $script:ConfigDir -Force | Out-Null }
         $o = [ordered]@{ Name = $Name; SavedAt = (Get-Date).ToString('s') }
-        [System.IO.File]::WriteAllText((Get-MossGpuCacheFile), ($o | ConvertTo-Json -Compress))
+        [System.IO.File]::WriteAllText((Get-SgGpuCacheFile), ($o | ConvertTo-Json -Compress))
     } catch {}
 }
-function Start-MossGpuScan {
+function Start-SgGpuScan {
     # Starts the adapter scan on a background runspace. The scan script is
     # self-contained (a separate runspace cannot call the app's functions)
     # and returns the same fields as the adapter inventory helper.
@@ -550,7 +551,7 @@ $out
         $script:GpuScanRunner = $null
     }
 }
-function Get-MossGpuScanResult {
+function Get-SgGpuScanResult {
     # $null = the scan is still running. An array = the adapters (empty when
     # the scan failed - the caller then falls back to the slow path).
     if (-not $script:GpuScanStarted) { return $null }
@@ -572,8 +573,8 @@ function Get-MossGpuScanResult {
     }
 }
 
-function Set-MossInventory($items) { $script:Inventory = @($items) }
-function Set-MossGpuScanDone { $script:GpuScanDone = $true }
+function Set-SgInventory($items) { $script:Inventory = @($items) }
+function Set-SgGpuScanDone { $script:GpuScanDone = $true }
 function Get-BackendRecommendation([object[]]$inventory) {
     $physical = @($inventory | Where-Object { -not $_.IsVirtual })
     $n = @($physical | Where-Object Vendor -eq 'NVIDIA').Count
@@ -594,7 +595,7 @@ $script:RecommendedBackend = ''
 # launch, even though it is only shown on the first run or when Hardware / Setup
 # is opened. Building it cost ~240 ms + a 155 ms adapter scan of startup time.
 # It is now a function that is called only when the dialog is really needed.
-function Show-MossSetupDialog {
+function Show-SgSetupDialog {
 $script:Inventory = @(Get-GpuInventory)
 $script:RecommendedBackend = Get-BackendRecommendation $script:Inventory
 
@@ -658,7 +659,7 @@ $existing = [string]$script:Settings.Backend
 $selected = switch -Regex ($existing) { '^CUDA' {'CUDA (NVIDIA)';break} '^Vulkan$' {'Vulkan';break} '^HIP' {'HIP/ROCm (AMD)';break} '^SYCL' {'SYCL (Intel)';break} '^CPU' {'CPU only';break} '^Manual' {'Manual / virtual GPU';break} default {'Auto (recommended)'} }
 $backend.SelectedIndex = [Math]::Max(0, $backend.Items.IndexOf($selected))
 # Add the selector to the form (previous build populated it but never displayed it).
-$form.Controls.Add($backend); Set-MossComboTheme $backend
+$form.Controls.Add($backend); Set-SgComboTheme $backend
 
 # Multi-GPU support: let the user pick a physical card. Virtual display adapters
 # are never offered as generation hardware.
@@ -677,7 +678,7 @@ $savedGpu=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $savedGp
 $gpuSelectedIndex=0
 for($gi=0;$gi -lt $gpu.Items.Count;$gi++){ if($savedGpu -ge 0 -and ([string]$gpu.Items[$gi]) -match ('^'+$savedGpu+'\s*:')){ $gpuSelectedIndex=$gi;break} }
 $gpu.SelectedIndex=$gpuSelectedIndex
-$form.Controls.Add($gpu); Set-MossComboTheme $gpu
+$form.Controls.Add($gpu); Set-SgComboTheme $gpu
 
 $engineLabel=New-Object System.Windows.Forms.Label; $engineLabel.Text='Engine executable:'; $engineLabel.Location=New-Object System.Drawing.Point(24,536); $engineLabel.AutoSize=$true; $form.Controls.Add($engineLabel)
 $engine=New-Object System.Windows.Forms.TextBox; $engine.Location=New-Object System.Drawing.Point(145,532); $engine.Size=New-Object System.Drawing.Size(590,26); $engine.Anchor='Top,Left,Right'; $engine.Text=[string]$script:Settings.EnginePath; $form.Controls.Add($engine)
@@ -732,7 +733,7 @@ $note.Text='Note: display enumeration cannot prove CUDA / ROCm / SYCL support. T
 
 $refresh=New-Object System.Windows.Forms.Button; $refresh.Text='Rescan hardware'; $refresh.Location=New-Object System.Drawing.Point(24,612); $refresh.Size=New-Object System.Drawing.Size(130,32); $refresh.Anchor='Bottom,Left'; $form.Controls.Add($refresh)
 $setupHistoryCode=New-Object System.Windows.Forms.Button; $setupHistoryCode.Text='Set / reset history code'; $setupHistoryCode.Location=New-Object System.Drawing.Point(350,612); $setupHistoryCode.Size=New-Object System.Drawing.Size(190,32); $setupHistoryCode.Anchor='Bottom,Left'; $form.Controls.Add($setupHistoryCode)
-$setupHistoryCode.Add_Click({ if(Reset-MossHistoryPassword $form){[System.Windows.Forms.MessageBox]::Show('New history code saved. No prompt history is stored yet.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
+$setupHistoryCode.Add_Click({ if(Reset-SgHistoryPassword $form){[System.Windows.Forms.MessageBox]::Show('New history code saved. No prompt history is stored yet.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
 $test=New-Object System.Windows.Forms.Button; $test.Text='Check backend support'; $test.Location=New-Object System.Drawing.Point(166,612); $test.Size=New-Object System.Drawing.Size(170,32); $test.Anchor='Bottom,Left'; $form.Controls.Add($test)
 $save=New-Object System.Windows.Forms.Button; $save.Text='Save setup'; $save.Location=New-Object System.Drawing.Point(720,612); $save.Size=New-Object System.Drawing.Size(140,32); $save.Anchor='Bottom,Right'; $save.BackColor=[System.Drawing.Color]::FromArgb(45,112,173); $save.ForeColor=[System.Drawing.Color]::White; $save.FlatStyle='Flat'; $form.Controls.Add($save)
 $refresh.Add_Click({ [System.Windows.Forms.MessageBox]::Show('Close and reopen Sootglass Studio to perform a fresh hardware scan.','Hardware scan',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null; $form.Close() })
@@ -889,7 +890,7 @@ $form.Add_Shown({ if (-not $script:Settings.HardwareSetupComplete) { [System.Win
 }
 
 # ---------------- IMAGE GENERATOR ----------------
-function Test-MossPromptHardSafety([string]$Prompt) {
+function Test-SgPromptHardSafety([string]$Prompt) {
     # Non-optional safeguard: never generate prompts that sexualize minors.
     if ([string]::IsNullOrWhiteSpace($Prompt)) { return $true }
     $sexualTerms = @('nsfw','nude','nudes','nudity','naked','porn','pornographic','xxx','erotic','sex','sexual','sexually','sexy','fuck','fucking','cum','cumming','penis','vagina','pussy','cock','tits','titties','boobs','breasts','nipples','areola','topless','bottomless','undressed','undressing','anal','blowjob','handjob','gangbang','bdsm','bondage','fetish','hentai','masturbat','orgasm','horny','aroused','explicit','lewd','suggestive','lingerie','seductive','striptease','stripping','g-string','buttocks','thong')
@@ -904,10 +905,10 @@ function Test-MossPromptHardSafety([string]$Prompt) {
     return $true
 }
 
-function Test-MossPromptSafe([string]$Prompt) {
+function Test-SgPromptSafe([string]$Prompt) {
     # Optional content filter: general sexual, graphic violence/gore, and
     # self-harm terms are checked only when its checkbox is enabled. Minor
-    # safety is handled independently by Test-MossPromptHardSafety.
+    # safety is handled independently by Test-SgPromptHardSafety.
     # Deliberately NOT listed: battle/war/sword/knight/fighting, 'dead'
     # alone (dead tree, dead sea), plain 'murder'/'killer' (murder-mystery
     # art), 'hanging' alone (hanging laundry) - common art staples; the
@@ -943,25 +944,25 @@ function Test-MossPromptSafe([string]$Prompt) {
 # resolution/steps/speed-mode, estimates untested combinations by scaling on
 # (render megapixels x engine steps), and feeds the live ETA so it is correct
 # from the first second instead of 'ETA calculating'.
-function Get-MossBenchmarkFile { Join-Path $script:AppRoot 'config\benchmarks.json' }
+function Get-SgBenchmarkFile { Join-Path $script:AppRoot 'config\benchmarks.json' }
 
-function Load-MossBenchmarks {
+function Load-SgBenchmarks {
     $list = New-Object System.Collections.ArrayList
     try {
-        $f = Get-MossBenchmarkFile
+        $f = Get-SgBenchmarkFile
         if (Test-Path -LiteralPath $f) {
             $data = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
             foreach ($e in @($data)) { [void]$list.Add($e) }
         }
     } catch {}
     # The comma matters: an EMPTY ArrayList returned normally collapses to
-    # $null (classic PowerShell pipeline gotcha), and Add-MossBenchmarkEntry
+    # $null (classic PowerShell pipeline gotcha), and Add-SgBenchmarkEntry
     # then crashes calling .Add on null. The unary comma keeps the list
     # object intact even when empty.
     return ,$list
 }
 
-function Save-MossBenchmarks($List) {
+function Save-SgBenchmarks($List) {
     try {
         $dir = Join-Path $script:AppRoot 'config'
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -969,7 +970,7 @@ function Save-MossBenchmarks($List) {
         # pipeline just does not run downstream) and the file would silently
         # keep its old content - 'Clear recorded data' would never clear.
         $json = if (@($List).Count -eq 0) { '[]' } else { (@($List) | ConvertTo-Json -Depth 5) }
-        Set-Content -LiteralPath (Get-MossBenchmarkFile) -Value $json -Encoding UTF8
+        Set-Content -LiteralPath (Get-SgBenchmarkFile) -Value $json -Encoding UTF8
     } catch {}
 }
 
@@ -977,14 +978,14 @@ function Save-MossBenchmarks($List) {
 # During a render the app samples the GPU's power draw and integrates it
 # over time (Wh). MEASURED values come from nvidia-smi (NVIDIA driver
 # tool - used when present, never required). Without it the draw is
-# ESTIMATED from the GPU's rated board power (Get-MossGpuTdp, vendor
+# ESTIMATED from the GPU's rated board power (Get-SgGpuTdp, vendor
 # neutral) with a documented 0.75 utilization factor; unknown GPUs fall
 # back to a 250 W typical. Cumulative energy is kept per day and all
 # time in config\energy.json, the session total in memory.
-function New-MossEnergyBucket {
+function New-SgEnergyBucket {
     return [pscustomobject]@{ Seconds = 0.0; Wh = 0.0; MeasuredWh = 0.0; Runs = 0; Images = 0 }
 }
-function Add-MossEnergyToBucket($Bucket, [double]$Joules, [double]$MeasuredJoules, [double]$Seconds, [int]$Images) {
+function Add-SgEnergyToBucket($Bucket, [double]$Joules, [double]$MeasuredJoules, [double]$Seconds, [int]$Images) {
     if ($null -eq $Bucket) { return }
     $Bucket.Seconds = [Math]::Round([double]$Bucket.Seconds + $Seconds, 1)
     $Bucket.Wh = [Math]::Round([double]$Bucket.Wh + ($Joules / 3600.0), 4)
@@ -992,11 +993,11 @@ function Add-MossEnergyToBucket($Bucket, [double]$Joules, [double]$MeasuredJoule
     $Bucket.Runs = [int]$Bucket.Runs + 1
     $Bucket.Images = [int]$Bucket.Images + [Math]::Max(0, $Images)
 }
-function Get-MossEnergyFile { return (Join-Path $script:AppRoot 'config\energy.json') }
-function Load-MossEnergy {
-    $ledger = [pscustomobject]@{ Days = New-Object System.Collections.ArrayList; AllTime = (New-MossEnergyBucket) }
+function Get-SgEnergyFile { return (Join-Path $script:AppRoot 'config\energy.json') }
+function Load-SgEnergy {
+    $ledger = [pscustomobject]@{ Days = New-Object System.Collections.ArrayList; AllTime = (New-SgEnergyBucket) }
     try {
-        $f = Get-MossEnergyFile
+        $f = Get-SgEnergyFile
         if (Test-Path -LiteralPath $f) {
             $data = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
             if ($data) {
@@ -1007,44 +1008,44 @@ function Load-MossEnergy {
     } catch {}
     return ,$ledger
 }
-function Save-MossEnergy($Ledger) {
+function Save-SgEnergy($Ledger) {
     try {
         $dir = Join-Path $script:AppRoot 'config'
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         # Keep roughly two years of day buckets, prune the oldest.
         while (@($Ledger.Days).Count -gt 730) { $Ledger.Days.RemoveAt(0) }
-        $Ledger | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Get-MossEnergyFile) -Encoding UTF8
+        $Ledger | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Get-SgEnergyFile) -Encoding UTF8
     } catch {}
 }
-function Add-MossEnergyUsage([double]$Joules, [double]$MeasuredJoules, [double]$Seconds, [int]$Images, [string]$Date = $null) {
+function Add-SgEnergyUsage([double]$Joules, [double]$MeasuredJoules, [double]$Seconds, [int]$Images, [string]$Date = $null) {
     # Records one finished engine run's energy into the day + all-time
     # buckets (config\energy.json) and the in-memory session total.
     # $Date override exists for tests; default is today.
     if ($Seconds -le 0 -and $Joules -le 0) { return }
     if (-not $Date) { $Date = (Get-Date).ToString('yyyy-MM-dd') }
-    $ledger = Load-MossEnergy
+    $ledger = Load-SgEnergy
     # NOTE: '@(... | Select-Object -First 1)' returns a 1-element ARRAY in
     # this PS 5.1 - the bucket helper would then fail every property set.
     # Pipe directly: the assignment yields the scalar object (or nothing).
     $day = $ledger.Days | Where-Object { [string]$_.Date -eq $Date } | Select-Object -First 1
     if (-not $day) { $day = [pscustomobject]@{ Date = $Date; Seconds = 0.0; Wh = 0.0; MeasuredWh = 0.0; Runs = 0; Images = 0 }; [void]$ledger.Days.Add($day) }
-    Add-MossEnergyToBucket $day $Joules $MeasuredJoules $Seconds $Images
-    Add-MossEnergyToBucket $ledger.AllTime $Joules $MeasuredJoules $Seconds $Images
-    Save-MossEnergy $ledger
+    Add-SgEnergyToBucket $day $Joules $MeasuredJoules $Seconds $Images
+    Add-SgEnergyToBucket $ledger.AllTime $Joules $MeasuredJoules $Seconds $Images
+    Save-SgEnergy $ledger
     if ($null -ne $script:SessionEnergy) {
-        Add-MossEnergyToBucket $script:SessionEnergy $Joules $MeasuredJoules $Seconds $Images
+        Add-SgEnergyToBucket $script:SessionEnergy $Joules $MeasuredJoules $Seconds $Images
     }
 }
-function Get-MossEnergySummary {
+function Get-SgEnergySummary {
     # Returns today's bucket, the all-time bucket, today's date and the
     # date energy tracking STARTED (the oldest day bucket - day buckets
     # are appended chronologically and pruned oldest-first, so Days[0]
     # is the beginning of the recorded history). $null when no day is
     # recorded yet.
     $today = (Get-Date).ToString('yyyy-MM-dd')
-    $ledger = Load-MossEnergy
+    $ledger = Load-SgEnergy
     $day = $ledger.Days | Where-Object { [string]$_.Date -eq $today } | Select-Object -First 1
-    if (-not $day) { $day = New-MossEnergyBucket; $day | Add-Member -NotePropertyName Date -NotePropertyValue $today }
+    if (-not $day) { $day = New-SgEnergyBucket; $day | Add-Member -NotePropertyName Date -NotePropertyValue $today }
     $started = $null
     $dayList = @($ledger.Days)
     if ($dayList.Count -gt 0) {
@@ -1058,7 +1059,7 @@ function Get-MossEnergySummary {
     }
     return [pscustomobject]@{ Date = $today; Day = $day; AllTime = $ledger.AllTime; Started = $started }
 }
-function Get-MossNvidiaSmiPath {
+function Get-SgNvidiaSmiPath {
     # Vendor-neutral: returns the nvidia-smi.exe path when the NVIDIA
     # driver tool is present, otherwise $null (the TDP estimate is used).
     $candidates = @(
@@ -1069,7 +1070,7 @@ function Get-MossNvidiaSmiPath {
     foreach ($c in $candidates) { if ($c -and (Test-Path -LiteralPath $c -PathType Leaf)) { return $c } }
     return $null
 }
-function Parse-MossPowerCsvLine([string]$Line) {
+function Parse-SgPowerCsvLine([string]$Line) {
     # nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits prints
     # one line per GPU, e.g. '231.45' or ' N/A' (idle/no permission).
     if (-not $Line) { return $null }
@@ -1078,7 +1079,7 @@ function Parse-MossPowerCsvLine([string]$Line) {
     if ([double]::TryParse($t, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v) -and $v -ge 0 -and $v -lt 2000) { return $v }
     return $null
 }
-function Get-MossPowerEstimateWatts([double]$Tdp) {
+function Get-SgPowerEstimateWatts([double]$Tdp) {
     # Draw estimate without a measurement tool: 75% of the rated board
     # power while sampling (rendering is GPU-heavy but not 100% TDP the
     # whole time), 250 W typical when the model is not in the table.
@@ -1086,7 +1087,7 @@ function Get-MossPowerEstimateWatts([double]$Tdp) {
     return 250.0
 }
 
-function Get-MossRenderMP([int]$W,[int]$H,[string]$SpeedMode) {
+function Get-SgRenderMP([int]$W,[int]$H,[string]$SpeedMode) {
     # The size the ENGINE actually renders for the given speed mode.
     $scale = switch ([string]$SpeedMode) {
         '2x' { 0.7 }
@@ -1103,10 +1104,10 @@ function Get-MossRenderMP([int]$W,[int]$H,[string]$SpeedMode) {
     return (([double]$W * [double]$H) / 1000000.0)
 }
 
-function Add-MossBenchmarkEntry {
+function Add-SgBenchmarkEntry {
     param($Job, [double]$SecondsPerImage, [int]$Images)
     if ($SecondsPerImage -le 0.05 -or $Images -le 0) { return }
-    $list = Load-MossBenchmarks
+    $list = Load-SgBenchmarks
     $gpuName = ''
     try { $g0 = @($script:Inventory | Where-Object { -not $_.IsVirtual } | Select-Object -First 1); if ($g0) { $gpuName = [string]$g0.Name } } catch {}
     $rw = [int]$Job.Width; $rh = [int]$Job.Height
@@ -1126,14 +1127,14 @@ function Add-MossBenchmarkEntry {
     }
     [void]$list.Add($entry)
     while ($list.Count -gt 400) { $list.RemoveAt(0) }
-    Save-MossBenchmarks $list
+    Save-SgBenchmarks $list
 }
 
-function Get-MossBenchmarkEstimate {
+function Get-SgBenchmarkEstimate {
     # Seconds-per-image extrapolated from the benchmark store.
     param([int]$W, [int]$H, [string]$SpeedMode, [int]$Steps, [bool]$IsImg2Img)
     try {
-        $list = Load-MossBenchmarks
+        $list = Load-SgBenchmarks
         # Detail-regeneration runs are recorded with HiresScale >= 1.5: their
         # measured time includes the enlarged second pass, so they must never
         # be matched for a PLAIN estimate (the 853 s hires verify run would
@@ -1158,14 +1159,14 @@ function Get-MossBenchmarkEstimate {
             $recMP = (([double]$best.RenderW * [double]$best.RenderH) / 1000000.0)
             return @{ Sec = [double]$best.SecondsPerImage * ($targetMP / $recMP) * ([double]$Steps / [Math]::Max(1, [int]$best.Steps)); E = $best }
         }
-        $targetMP = Get-MossRenderMP $W $H $SpeedMode
+        $targetMP = Get-SgRenderMP $W $H $SpeedMode
         $m = & $bestMatch $targetMP $IsImg2Img
         if (-not $m) { return $null }
         return @{ Sec = [Math]::Max(1.0, [Math]::Round([double]$m.Sec, 1)); Based = ('{0} x {1} {2} @ {3} steps' -f $m.E.W, $m.E.H, $m.E.SpeedMode, $m.E.Steps) }
     } catch { return $null }
 }
 
-function Get-MossGpuTdp([string]$GpuName) {
+function Get-SgGpuTdp([string]$GpuName) {
     # Rated board power (watts) for common GPUs, used ONLY for the energy
     # estimate in the Benchmarks dialog. Vendor-neutral: NVIDIA, AMD and
     # Intel entries; returns $null when the GPU is not in the table so the
@@ -1190,7 +1191,7 @@ function Get-MossGpuTdp([string]$GpuName) {
     return $null
 }
 
-function Get-MossSidecarPath([string]$ImagePath) {
+function Get-SgSidecarPath([string]$ImagePath) {
     # Where a NEW per-image sidecar is written: '<image folder>\metadata\
     # <name>.json'. The output folder therefore only shows the pictures;
     # the JSON sidecars (seed/prompt/settings that power re-render info and
@@ -1201,15 +1202,15 @@ function Get-MossSidecarPath([string]$ImagePath) {
     return (Join-Path (Join-Path $dir 'metadata') ([System.IO.Path]::GetFileNameWithoutExtension([string]$ImagePath) + '.json'))
 }
 
-function Get-MossSidecarReadPath([string]$ImagePath) {
+function Get-SgSidecarReadPath([string]$ImagePath) {
     # Where to READ a sidecar: the metadata subfolder when present, otherwise
     # the legacy location next to the image (images made by older versions).
-    $p = Get-MossSidecarPath $ImagePath
+    $p = Get-SgSidecarPath $ImagePath
     if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
     return [System.IO.Path]::ChangeExtension([string]$ImagePath, '.json')
 }
 
-function Get-MossOrphanSidecars([string]$ImagePath) {
+function Get-SgOrphanSidecars([string]$ImagePath) {
     # Sidecar files whose picture no longer exists: they appear when a
     # picture is RENAMED or MOVED outside Sootglass (the sidecar is named after
     # the picture), or when a picture was deleted by hand. Only Sootglass's own
@@ -1230,7 +1231,7 @@ function Get-MossOrphanSidecars([string]$ImagePath) {
         }
     }
     # Return the ELEMENTS (not a wrapped collection): an empty list then
-    # collapses to no output, so @(Get-MossOrphanSidecars ...) in the caller
+    # collapses to no output, so @(Get-SgOrphanSidecars ...) in the caller
     # yields Count 0 for 'no orphans' - with 'return ,$result' the empty
     # ArrayList arrived as ONE item and made Count always >= 1, which fired
     # the adoption offer on every sidecar adoption even for images WITH a sidecar.
@@ -1238,13 +1239,13 @@ function Get-MossOrphanSidecars([string]$ImagePath) {
 }
 
 # v0.3.1: orphaned-sidecar adoption offer was REMOVED. The function
-# Approve-MossSidecarAdoption had zero callers (dead code since v0.2.13).
-# Get-MossOrphanSidecars stays: it is still used for diagnostics.
+# Approve-SgSidecarAdoption had zero callers (dead code since v0.2.13).
+# Get-SgOrphanSidecars stays: it is still used for diagnostics.
 
 # v0.3.1: script-scoped summary updater for the Model files dialog.
 # The old nested function was invisible to the browse-button closures
 # (GetNewClosure) - cancelling the file picker crashed the app.
-function Update-MossDlgSummaryBoxes($Boxes,$SummaryLabel) {
+function Update-SgDlgSummaryBoxes($Boxes,$SummaryLabel) {
     $check=@((Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)))
     foreach($k in @('DiffusionModelPath','LlmPath','VaePath','TokenizerPath')){ $check+=(Get-AbsoluteAppPath ([string]$Boxes[$k].Text)) }
     $missing=@($check | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
@@ -1257,16 +1258,16 @@ function Update-MossDlgSummaryBoxes($Boxes,$SummaryLabel) {
 # closes the generator and a new setup process opens) restarted the window
 # CenterScreen on the PRIMARY monitor - the window 'teleported' away from
 # where the user had it (e.g. a secondary portrait monitor).
-function Save-MossWindowBounds($form) {
+function Save-SgWindowBounds($form) {
     try {
         $max = ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Maximized)
         $b = if ($max) { $form.RestoreBounds } else { $form.Bounds }
         $script:Settings.WindowBounds = ('{0},{1},{2},{3}' -f [int]$b.X,[int]$b.Y,[int]$b.Width,[int]$b.Height)
         $script:Settings.WindowMaximized = [bool]$max
         Save-Settings | Out-Null
-    } catch { try { [void](Write-MossErrorLog 'Save window bounds failed' ($_.Exception.Message)) } catch {} }
+    } catch { try { [void](Write-SgErrorLog 'Save window bounds failed' ($_.Exception.Message)) } catch {} }
 }
-function Restore-MossWindowBounds($form) {
+function Restore-SgWindowBounds($form) {
     $raw = [string]$script:Settings.WindowBounds
     if (-not $raw) {
         # v0.3.12: fresh install (no saved window yet) starts at the SMALLEST
@@ -1310,7 +1311,7 @@ function Restore-MossWindowBounds($form) {
     }
 }
 
-function Test-MossPngValid([string]$ImagePath) {
+function Test-SgPngValid([string]$ImagePath) {
     # True only when the file exists AND is a complete, decodable PNG.
     # Guards against truncated writes (disk full, power loss, antivirus
     # interference): the engine 'creates' the file, but a half-written PNG
@@ -1331,13 +1332,17 @@ function Test-MossPngValid([string]$ImagePath) {
     } catch { return $false }
 }
 
-function Write-MossErrorLog([string]$Title,[string]$Body) {
+function Write-SgErrorLog([string]$Title,[string]$Body) {
     # Always keep a local copy, even if later uploading fails or the PC is offline.
     try {
         $logDir = Join-Path $script:AppRoot 'logs'
         if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
-        $file = Join-Path $logDir ('error-' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.txt')
+        $file = Join-Path $logDir ('error-' + (Get-Date -Format 'yyyyMMdd_HHmmss.fff') + '.txt')
         ("$Title`r`n$Body") | Set-Content -LiteralPath $file -Encoding UTF8
+        # v0.3.45: keep logs bounded - the newest 20 error logs stay, like run logs.
+        $oldErr = Get-ChildItem -LiteralPath $logDir -Filter 'error-*.txt' -File -ErrorAction SilentlyContinue |
+            Sort-Object Name | Select-Object -Skip 20
+        foreach ($staleE in $oldErr) { Remove-Item -LiteralPath $staleE.FullName -Force -ErrorAction SilentlyContinue }
         return $file
     } catch { return $null }
 }
@@ -1349,11 +1354,11 @@ function Write-MossErrorLog([string]$Title,[string]$Body) {
 # on-disk file-size estimate (convrot/int8 conversion, skipped tensors and
 # LoRA patches change what really lands in VRAM). Oldest run logs are pruned
 # to keep the folder bounded.
-function Write-MossRunLog([string]$Stdout,[string]$Stderr) {
+function Write-SgRunLog([string]$Stdout,[string]$Stderr) {
     try {
         $logDir = Join-Path $script:AppRoot 'logs'
         if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
-        $file = Join-Path $logDir ('run-' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.txt')
+        $file = Join-Path $logDir ('run-' + (Get-Date -Format 'yyyyMMdd_HHmmss.fff') + '.txt')
         ("--- STDOUT ---`r`n$Stdout`r`n--- STDERR ---`r`n$Stderr") | Set-Content -LiteralPath $file -Encoding UTF8
         $old = Get-ChildItem -LiteralPath $logDir -Filter 'run-*.txt' -File -ErrorAction SilentlyContinue |
             Sort-Object Name | Select-Object -Skip 20
@@ -1362,7 +1367,7 @@ function Write-MossRunLog([string]$Stdout,[string]$Stderr) {
     } catch { return $null }
 }
 
-function Get-MossTrackedWeightsMB([string[]]$ModelLeafNames) {
+function Get-SgTrackedWeightsMB([string[]]$ModelLeafNames) {
     # Returns the highest 'tracked weights' value (MB) from the most recent
     # past run log that loaded ALL of the given model files, or 0 when no
     # matching log exists. Scans run-*.txt first (newest to oldest, capped),
@@ -1400,7 +1405,7 @@ function Get-AbsoluteAppPath([string]$value) {
     if ([System.IO.Path]::IsPathRooted($value)) { return [System.IO.Path]::GetFullPath($value) }
     return [System.IO.Path]::GetFullPath((Join-Path $script:AppRoot $value))
 }
-function Format-MossModelSize([object]$Value,[int]$Digits=2) {
+function Format-SgModelSize([object]$Value,[int]$Digits=2) {
     $bytes=[int64]0
     if ($null -eq $Value -or -not [int64]::TryParse([string]$Value,[System.Globalization.NumberStyles]::Integer,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$bytes) -or $bytes -lt 0) {
         return 'size unavailable'
@@ -1410,7 +1415,7 @@ function Format-MossModelSize([object]$Value,[int]$Digits=2) {
 }
 # v0.3.8: the LoRA folder is optional - create it at startup so the user has
 # somewhere obvious to drop .safetensors files (never filled automatically).
-function Ensure-MossLoraDir {
+function Ensure-SgLoraDir {
     $dir = Get-AbsoluteAppPath ([string]$script:Settings.LoraDir)
     if ([string]::IsNullOrWhiteSpace($dir)) { return '' }
     if (-not (Test-Path -LiteralPath $dir)) { try { [void][System.IO.Directory]::CreateDirectory($dir) } catch { return '' } }
@@ -1419,8 +1424,8 @@ function Ensure-MossLoraDir {
 # List LoRA stems usable in <lora:stem:strength> prompt tags: *.safetensors
 # under the LoRA dir, stems must match [^:>]+ (the engine's tag regex would
 # break otherwise). Returns stem|path pairs.
-function Get-MossLoraFiles {
-    $dir = Ensure-MossLoraDir
+function Get-SgLoraFiles {
+    $dir = Ensure-SgLoraDir
     if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { return @() }
     try {
         return @(Get-ChildItem -LiteralPath $dir -Filter '*.safetensors' -File -ErrorAction SilentlyContinue |
@@ -1432,7 +1437,7 @@ function Get-MossLoraFiles {
 # Sootglass (repo Comfy-Org/MOSS-Image, folder loras/). The list is read from the
 # Hugging Face API, so newly published LoRAs show up without a Sootglass update.
 # Metadata only - no file is downloaded here.
-function Get-MossLoraCatalog {
+function Get-SgLoraCatalog {
     $repo='Comfy-Org/MOSS-Image'
     $items=@()
     try {
@@ -1467,8 +1472,26 @@ function Get-MossLoraCatalog {
 # own). A downloaded file lands in models\loras and is immediately usable:
 # the Generation dialog picks it up on its next refresh and the strength
 # slider applies it as a <lora:name:strength> prompt tag.
-function Show-MossLoraDownloadDialog([System.Windows.Forms.Form]$Owner=$null) {
-    $loraDirAbs=Ensure-MossLoraDir
+# v0.3.45 (fix): buttons that rename themselves for the cancel state ('Close'
+# -> 'Cancel' / 'Cancel install' -> 'Cancelling...') must not clip the new
+# caption. Set the text and grow the button just enough to fit it, keeping
+# the LEFT edge fixed (layout anchor); growth is clamped to the parent's
+# client width and never shrinks below the design width.
+function Set-SgButtonText([System.Windows.Forms.Button]$b,[string]$Text) {
+    if($b.Text -ceq $Text){ return }
+    $b.Text=$Text
+    try {
+        $sz=[System.Windows.Forms.TextRenderer]::MeasureText($Text,$b.Font)
+        $need=[int]([math]::Ceiling($sz.Width))+14
+        if($need -gt $b.Width){
+            $maxW=$b.Width
+            try { $maxW=([int]$b.Parent.ClientSize.Width)-$b.Left-6 } catch {}
+            $b.Width=[Math]::Min($need,[Math]::Max($b.Width,$maxW))
+        }
+    } catch {}
+}
+function Show-SgLoraDownloadDialog([System.Windows.Forms.Form]$Owner=$null) {
+    $loraDirAbs=Ensure-SgLoraDir
     if(-not $loraDirAbs){
         [System.Windows.Forms.MessageBox]::Show($Owner,'The LoRA folder could not be created. Check the Sootglass folder permissions.','LoRA models',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
         return
@@ -1483,14 +1506,14 @@ function Show-MossLoraDownloadDialog([System.Windows.Forms.Form]$Owner=$null) {
     # which is frame-independent - correct at any DPI.
     $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
     $hint=New-Object System.Windows.Forms.Label; $hint.Text='Optional LoRA add-ons published for Sootglass by Comfy-Org on Hugging Face. Nothing is downloaded until you tick a LoRA and press Download. Downloaded files are placed in:'+"`r`n"+$loraDirAbs+"`r`n"+'They become usable right away - check them in Generation... > LoRA and set a strength.'; $hint.Location=New-Object System.Drawing.Point(12,10); $hint.Size=New-Object System.Drawing.Size(584,96); $hint.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($hint)
-    $catalog=@(Get-MossLoraCatalog)
+    $catalog=@(Get-SgLoraCatalog)
     # v0.3.13: real CheckBox per LoRA instead of a CheckedListBox - checking
     # an entry no longer paints the whole row with the selection highlight,
     # only the checkbox itself toggles. Entries are stacked in a themed panel.
     $loraPanel=New-Object System.Windows.Forms.Panel; $loraPanel.Location=New-Object System.Drawing.Point(12,($hint.Bottom+8)); $loraPanel.Size=New-Object System.Drawing.Size(584,196); $loraPanel.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $loraPanel.BorderStyle='FixedSingle'; $loraPanel.AutoScroll=$true; $g.Controls.Add($loraPanel)
     $loraChecks=New-Object System.Collections.ArrayList
     $installed=@{}
-    foreach($lf in (Get-MossLoraFiles)){ $installed[[string]$lf.Stem]=$true }
+    foreach($lf in (Get-SgLoraFiles)){ $installed[[string]$lf.Stem]=$true }
     $entryInfo=@()
     foreach($cat in $catalog){
         $stem=[System.IO.Path]::GetFileNameWithoutExtension([string]$cat.Name)
@@ -1506,7 +1529,7 @@ function Show-MossLoraDownloadDialog([System.Windows.Forms.Form]$Owner=$null) {
     }
     $status=New-Object System.Windows.Forms.Label; $status.Text='Tick the LoRAs you want and press Download. Sootglass stays responsive while the file downloads.'; $status.Location=New-Object System.Drawing.Point(12,($loraPanel.Bottom+10)); $status.Size=New-Object System.Drawing.Size(584,36); $status.ForeColor=[System.Drawing.Color]::FromArgb(145,161,185); $g.Controls.Add($status)
     $progress=New-Object System.Windows.Forms.ProgressBar; $progress.Location=New-Object System.Drawing.Point(12,($status.Bottom+2)); $progress.Size=New-Object System.Drawing.Size(584,18); $progress.Style='Continuous'; $progress.Visible=$false; $g.Controls.Add($progress)
-    $dlBtn=New-Object System.Windows.Forms.Button; $dlBtn.Text='Download selected'; $dlBtn.Location=New-Object System.Drawing.Point(344,($status.Bottom+46)); $dlBtn.Size=New-Object System.Drawing.Size(160,30); $dlBtn.FlatStyle='Flat'; $dlBtn.BackColor=[System.Drawing.Color]::FromArgb(39,90,61); $dlBtn.ForeColor=[System.Drawing.Color]::White; $g.Controls.Add($dlBtn)
+    $dlBtn=New-Object System.Windows.Forms.Button; $dlBtn.Text='Download selected'; $dlBtn.Location=New-Object System.Drawing.Point(344,($status.Bottom+46)); $dlBtn.Size=New-Object System.Drawing.Size(160,30); $dlBtn.FlatStyle='Flat'; $dlBtn.BackColor=[System.Drawing.Color]::FromArgb(45,112,173); $dlBtn.ForeColor=[System.Drawing.Color]::White; $g.Controls.Add($dlBtn)
     $closeBtn=New-Object System.Windows.Forms.Button; $closeBtn.Text='Close'; $closeBtn.Location=New-Object System.Drawing.Point(512,($status.Bottom+46)); $closeBtn.Size=New-Object System.Drawing.Size(96,30); $closeBtn.FlatStyle='Flat'; $closeBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $closeBtn.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Controls.Add($closeBtn)
     $g.ClientSize=New-Object System.Drawing.Size(620,([Math]::Max(($dlBtn.Bottom+14),($closeBtn.Bottom+14))))
     $logDir=Join-Path $script:AppRoot 'logs'
@@ -1528,7 +1551,7 @@ function Show-MossLoraDownloadDialog([System.Windows.Forms.Form]$Owner=$null) {
     # there. (GetNewClosure() would also capture the variables, but it runs
     # the handler in a module scope that cannot see the app's own functions
     # - the v0.1.19 crash - so the script scope is the safer choice.)
-    $script:MossLoraDownload=@{}
+    $script:SgLoraDownload=@{}
     # The worker that runs in the background runspace. It only touches its
     # arguments and the shared hashtable, so it stays self-contained.
     $dlCode=@'
@@ -1538,27 +1561,53 @@ try {
     [System.Net.ServicePointManager]::SecurityProtocol=[System.Net.SecurityProtocolType]::Tls12
     $req=[System.Net.HttpWebRequest]::Create($Url)
     $req.Method='GET'; $req.Timeout=60000; $req.ReadWriteTimeout=120000; $req.UserAgent='Sootglass-Studio'
+    $State['CurrentRequest']=$req
+    if($State['CancelRequested']){ try { $req.Abort() } catch {}; throw 'Download cancelled by user.' }
     $resp=$req.GetResponse()
     $total=$resp.ContentLength
     if($total -gt 0){ $State['Total']=[long]$total }
+    $State['StartUtc']=[datetime]::UtcNow
     $in=$resp.GetResponseStream(); $out=[System.IO.File]::Create($OutFile)
     try {
-        $buf=New-Object byte[] 65536
+        $buf=New-Object byte[] 1048576
         while(($read=$in.Read($buf,0,$buf.Length)) -gt 0){
+            if($State['CancelRequested']){ throw 'Download cancelled by user.' }
             $out.Write($buf,0,$read)
             $State['Bytes']=[long]$State['Bytes']+$read
         }
-    } finally { $out.Close(); $in.Close(); $resp.Close() }
+    } finally { $out.Close(); $in.Close(); $resp.Close(); $State['CurrentRequest']=$null }
     $State['Ok']=$true
 } catch {
+    if($State['CancelRequested']){ $State['Cancelled']=$true; $State['Done']=$true; return }
     $firstErr=$_.Exception.Message
     # Fallback: curl.exe gets through the old .NET HTTP stack when it fails.
+    # v0.3.45: runs as a polled process so Cancel can kill it immediately.
     try {
         $curlExe=(Get-Command curl.exe -ErrorAction SilentlyContinue).Source
         if($curlExe){
             Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
-            & $curlExe -sL --max-time 7200 -o $OutFile $Url
-            if($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $OutFile)){
+            $psiC=New-Object System.Diagnostics.ProcessStartInfo
+            $psiC.FileName=$curlExe; $psiC.UseShellExecute=$false; $psiC.CreateNoWindow=$true
+            $psiC.Arguments='-sL --fail --show-error --max-time 7200 -o "'+$OutFile.Replace('"','\"')+'" "'+$Url.Replace('"','\"')+'"'
+            $curlP=[System.Diagnostics.Process]::Start($psiC)
+            $State['CurrentProcess']=$curlP
+            $curlOk=$false
+            while(-not $curlP.WaitForExit(250)){
+                if($State['CancelRequested']){
+                    try { $curlP.Kill() } catch {}
+                    try { $curlP.WaitForExit(3000) } catch {}
+                    try { $curlP.Dispose() } catch {}
+                    $State['CurrentProcess']=$null
+                    $State['Cancelled']=$true; $State['Done']=$true
+                    return
+                }
+            }
+            $curlExit=$curlP.ExitCode
+            try { $curlP.Dispose() } catch {}
+            $State['CurrentProcess']=$null
+            # v0.3.45 (fix): a non-zero curl exit means a truncated/failed
+            # transfer - a partial file with length > 0 is NOT success.
+            if($curlExit -eq 0 -and (Test-Path -LiteralPath $OutFile)){
                 $State['Bytes']=(Get-Item -LiteralPath $OutFile).Length
                 $State['Ok']=$true
             } else { $State['Error']=$firstErr }
@@ -1573,22 +1622,34 @@ $State['Done']=$true
         if(-not $picked.Count){ $status.Text='Tick at least one LoRA first.'; return }
         # Only the files that are actually missing are transferred.
         $todo=@($picked | Where-Object { -not $_.Installed })
+        if(-not $todo.Count){
+            # v0.3.45 (fix): consistent with the engine reinstall guard - when
+            # everything selected is already installed, offer a deliberate
+            # re-download that overwrites, instead of a dead end. The file is
+            # fetched to <name>.part and moved over with -Force, so the old
+            # copy stays intact until the new one is complete.
+            $reTotal=0
+            foreach($ep in $picked){ $reTotal+=[int64]$ep.Item.Size }
+            $reAnswer=[System.Windows.Forms.MessageBox]::Show($g,("Everything you selected is already installed.`r`n`r`nRe-download "+$picked.Count+" file(s), about "+[math]::Round($reTotal/1MB)+" MB, and overwrite the existing copies anyway?"),'LoRAs already installed',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
+            if($reAnswer -ne [System.Windows.Forms.DialogResult]::Yes){
+                $status.Text='Nothing to download - the selected LoRAs are already installed.'
+                try { if(-not(Test-Path -LiteralPath $logDir)){ New-Item -ItemType Directory -Path $logDir -Force | Out-Null } } catch {}
+                $stamp0=Get-Date -Format 'yyyyMMdd-HHmmss'
+                try { @('LoRA download '+ (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) | Set-Content -LiteralPath (Join-Path $logDir ('lora-download-'+$stamp0+'.txt')) -Encoding UTF8 } catch {}
+                return
+            }
+            $todo=@($picked)
+        }
         $logLines=@('LoRA download '+ (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
         foreach($ep in $picked){
             $destPath=Join-Path $loraDirAbs ([string]$ep.Item.Name)
-            if($ep.Installed){ $logLines += ('SKIP '+$ep.Item.Name+': already installed at '+$destPath) }
+            if($ep.Installed -and (@($todo) -notcontains $ep)){ $logLines += ('SKIP '+$ep.Item.Name+': already installed at '+$destPath) }
+            elseif($ep.Installed){ $logLines += ('QUEUED (overwrite) '+$ep.Item.Name+' -> '+$destPath) }
             else { $logLines += ('QUEUED '+$ep.Item.Name+' -> '+$destPath) }
-        }
-        if(-not $todo.Count){
-            $status.Text='Nothing to download - the selected LoRAs are already installed.'
-            try { if(-not(Test-Path -LiteralPath $logDir)){ New-Item -ItemType Directory -Path $logDir -Force | Out-Null } } catch {}
-            $stamp0=Get-Date -Format 'yyyyMMdd-HHmmss'
-            try { $logLines | Set-Content -LiteralPath (Join-Path $logDir ('lora-download-'+$stamp0+'.txt')) -Encoding UTF8 } catch {}
-            return
         }
         try { if(-not(Test-Path -LiteralPath $logDir)){ New-Item -ItemType Directory -Path $logDir -Force | Out-Null } } catch {}
         $stamp=Get-Date -Format 'yyyyMMdd-HHmmss'
-        $dl=$script:MossLoraDownload
+        $dl=$script:SgLoraDownload
         $dl['Queue']=@($todo); $dl['Index']=0; $dl['Log']=$logLines
         $dl['LogFile']=(Join-Path $logDir ('lora-download-'+$stamp+'.txt'))
         $dl['Status']=$status; $dl['Progress']=$progress; $dl['Btn']=$dlBtn; $dl['Close']=$closeBtn; $dl['Form']=$g
@@ -1596,7 +1657,7 @@ $State['Done']=$true
         $dl['State']=$null; $dl['Runner']=$null; $dl['Job']=$null; $dl['Part']=''
         try { $dl['Log'] | Set-Content -LiteralPath $dl['LogFile'] -Encoding UTF8 } catch {}
         $dlBtn.Enabled=$false
-        $closeBtn.Text='Cancel'
+        Set-SgButtonText $closeBtn 'Cancel'
         # Enter must not cancel a running transfer by accident.
         $g.AcceptButton=$null
         $progress.Visible=$true; $progress.Style='Continuous'; $progress.Value=0
@@ -1605,7 +1666,7 @@ $State['Done']=$true
         $dest=Join-Path $dl['Dir'] ([string]$cur.Item.Name)
         $part=[string]$dest+'.part'
         $state=[System.Collections.Hashtable]::Synchronized((New-Object System.Collections.Hashtable))
-        $state['Done']=$false; $state['Ok']=$false; $state['Error']=''; $state['Bytes']=0; $state['Total']=[int64]$cur.Item.Size
+        $state['Done']=$false; $state['Ok']=$false; $state['Error']=''; $state['Bytes']=0; $state['Total']=[int64]$cur.Item.Size; $state['StartUtc']=$null
         $dl['State']=$state; $dl['Dest']=$dest; $dl['Part']=$part; $dl['Name']=[string]$cur.Item.Name
         $runner=[powershell]::Create()
         [void]$runner.AddScript($dlCode).AddArgument([string]$cur.Item.Url).AddArgument($part).AddArgument($state)
@@ -1616,7 +1677,7 @@ $State['Done']=$true
         # The tick handler reads EVERYTHING it needs from the script-scoped
         # hashtable, so it never depends on the click handler's locals.
         $timer.Add_Tick({
-            $dl=$script:MossLoraDownload
+            $dl=$script:SgLoraDownload
             if(-not $dl -or -not $dl['Active']){ return }
             $st=$dl['State']
             if($null -eq $st){ return }
@@ -1625,9 +1686,19 @@ $State['Done']=$true
                 $b=[long]$st['Bytes']; $t=[long]$st['Total']
                 $dl['Progress'].Maximum=100
                 if($t -gt 0){ $dl['Progress'].Value=[Math]::Min(100,[int](($b*100)/$t)) }
+                $etaT=''
+                try {
+                    if($st['StartUtc']){
+                        $elL=([datetime]::UtcNow - [datetime]$st['StartUtc']).TotalSeconds
+                        if($elL -gt 2 -and $b -gt 1MB){
+                            $mbpsL=($b/1MB)/$elL
+                            if($mbpsL -gt 0.01 -and $t -gt 0){ $etaT=' - about '+(Format-SgEta ((($t-$b)/1MB)/$mbpsL))+' left' }
+                        }
+                    }
+                } catch {}
                 $mb=[math]::Round($b/1MB,1).ToString([System.Globalization.CultureInfo]::InvariantCulture)
-                if($t -gt 0){ $dl['Status'].Text=('Downloading '+$dl['Name']+': '+$mb+' MB of '+[math]::Round($t/1MB,0).ToString([System.Globalization.CultureInfo]::InvariantCulture)+' MB ('+$dl['Progress'].Value+'%)') }
-                else { $dl['Status'].Text=('Downloading '+$dl['Name']+': '+$mb+' MB') }
+                if($t -gt 0){ $dl['Status'].Text=('Downloading '+$dl['Name']+': '+$mb+' MB of '+[math]::Round($t/1MB,0).ToString([System.Globalization.CultureInfo]::InvariantCulture)+' MB ('+$dl['Progress'].Value+'%)'+$etaT) }
+                else { $dl['Status'].Text=('Downloading '+$dl['Name']+': '+$mb+' MB'+$etaT) }
                 return
             }
             # --- this file finished ---
@@ -1635,6 +1706,21 @@ $State['Done']=$true
             try { [void]$dl['Runner'].EndInvoke($dl['Job']) } catch {}
             try { $dl['Runner'].Dispose() } catch {}
             $dl['Runner']=$null; $dl['Job']=$null
+            if($st['Cancelled']){
+                # v0.3.45: the worker was aborted cleanly - finish the cancel
+                # here (timer was stopped above, runner is gone).
+                try { if($dl['Part']){ Remove-Item -LiteralPath $dl['Part'] -Force -ErrorAction SilentlyContinue } } catch {}
+                $dl['Active']=$false
+                $dl['Log']=@($dl['Log']) + ('CANCELLED '+$dl['Name']+': user cancelled; partial file removed from '+$dl['Dir'])
+                try { $dl['Log'] | Set-Content -LiteralPath $dl['LogFile'] -Encoding UTF8 } catch {}
+                $dl['Progress'].Visible=$false
+                $dl['Btn'].Enabled=$true
+                Set-SgButtonText $dl['Close'] 'Close'; $dl['Close'].Enabled=$true
+                $g.AcceptButton=$closeBtn
+                $dl['Status'].Text='Download cancelled.'
+                try { $dl['Log'] | Set-Content -LiteralPath $dl['LogFile'] -Encoding UTF8 } catch {}
+                return
+            }
             $item=$dl['Queue'][$dl['Index']]
             if($st['Ok']){
                 try {
@@ -1678,7 +1764,7 @@ $State['Done']=$true
             $dl['Timer'].Stop(); $dl['Timer'].Dispose()
             $dl['Progress'].Visible=$false
             $dl['Btn'].Enabled=$true
-            $dl['Close'].Text='Close'
+            Set-SgButtonText $dl['Close'] 'Close'
             $g.AcceptButton=$closeBtn
             $okCount=0; $failCount=0
             foreach($ln in @($dl['Log'])){ if([string]$ln -like 'OK *'){$okCount++} elseif([string]$ln -like 'FAILED *'){$failCount++} }
@@ -1687,41 +1773,32 @@ $State['Done']=$true
         })
         $timer.Start()
     })
-    # Close / Cancel button. While a transfer runs it cancels the transfer
-    # and keeps the window open; otherwise it closes the window.
+    # Close / Cancel button. While a transfer runs it signals cancel to the
+    # worker (abort request / kill curl) and lets the timer tick finish the
+    # cleanup - Stop() on a runspace stuck in Stream.Read blocks the UI.
     $closeBtn.Add_Click({
-        $dl=$script:MossLoraDownload
+        $dl=$script:SgLoraDownload
         if($dl -and $dl['Active']){
-            try { $dl['Timer'].Stop(); $dl['Timer'].Dispose() } catch {}
-            try { if($dl['Runner']){ $dl['Runner'].Stop() } } catch {}
-            try { if($dl['Runner']){ $dl['Runner'].Dispose() } } catch {}
-            $dl['Runner']=$null; $dl['Job']=$null
-            try { if($dl['Part']){ Remove-Item -LiteralPath $dl['Part'] -Force -ErrorAction SilentlyContinue } } catch {}
-            $dl['Active']=$false
-            $dl['Log']=@($dl['Log']) + ('CANCELLED '+$dl['Name']+': user cancelled; partial file removed from '+$dl['Dir'])
-            try { $dl['Log'] | Set-Content -LiteralPath $dl['LogFile'] -Encoding UTF8 } catch {}
-            $dl['Progress'].Visible=$false
-            $dl['Btn'].Enabled=$true
-            $dl['Close'].Text='Close'
-            $g.AcceptButton=$closeBtn
-            $dl['Status'].Text='Download cancelled.'
-            try { $dl['Log'] | Set-Content -LiteralPath $dl['LogFile'] -Encoding UTF8 } catch {}
+            $stC=$dl['State']
+            if($stC){ $stC['CancelRequested']=$true }
+            try { if($stC['CurrentRequest']){ $stC['CurrentRequest'].Abort() } } catch {}
+            try { if($stC['CurrentProcess'] -and -not $stC['CurrentProcess'].HasExited){ $stC['CurrentProcess'].Kill() } } catch {}
+            Set-SgButtonText $dl['Close'] 'Cancelling...'; $dl['Close'].Enabled=$false
             return
         }
         $g.Close()
     })
-    # Closing the window (the X button) while a transfer runs must stop the
-    # timer as well, or it would keep firing into a disposed form.
+    # Closing the window (the X button) while a transfer runs signals cancel
+    # the same way and keeps the window open until the tick cleans up.
     $g.Add_FormClosing({
-        $dl=$script:MossLoraDownload
+        $dl=$script:SgLoraDownload
         if($dl -and $dl['Active']){
-            try { $dl['Timer'].Stop(); $dl['Timer'].Dispose() } catch {}
-            try { if($dl['Runner']){ $dl['Runner'].Stop(); $dl['Runner'].Dispose() } } catch {}
-            $dl['Runner']=$null; $dl['Job']=$null
-            try { if($dl['Part']){ Remove-Item -LiteralPath $dl['Part'] -Force -ErrorAction SilentlyContinue } } catch {}
-            $dl['Active']=$false
-            $dl['Log']=@($dl['Log']) + ('CANCELLED '+$dl['Name']+': download window closed; partial file removed from '+$dl['Dir'])
-            try { $dl['Log'] | Set-Content -LiteralPath $dl['LogFile'] -Encoding UTF8 } catch {}
+            $_.Cancel=$true
+            $stC=$dl['State']
+            if($stC){ $stC['CancelRequested']=$true }
+            try { if($stC['CurrentRequest']){ $stC['CurrentRequest'].Abort() } } catch {}
+            try { if($stC['CurrentProcess'] -and -not $stC['CurrentProcess'].HasExited){ $stC['CurrentProcess'].Kill() } } catch {}
+            Set-SgButtonText $dl['Close'] 'Cancelling...'; $dl['Close'].Enabled=$false
         }
     })
     $g.AcceptButton=$closeBtn
@@ -1742,7 +1819,7 @@ function Get-RelativeAppPath([string]$value) {
         return $full
     } catch { return $value }
 }
-function ConvertTo-MossDouble([string]$text,[ref]$out) {
+function ConvertTo-SgDouble([string]$text,[ref]$out) {
     # Locale-safe decimal parsing: accept both '0.6' and '0,6' regardless of
     # the Windows regional format (e.g. Danish uses comma and would otherwise
     # read '0.6' as the integer 6 because the dot is the thousands separator).
@@ -1750,7 +1827,7 @@ function ConvertTo-MossDouble([string]$text,[ref]$out) {
     return [double]::TryParse($norm,[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,$out)
 }
 
-function ConvertFrom-MossDouble([double]$value) {
+function ConvertFrom-SgDouble([double]$value) {
     # Locale-safe decimal formatting for engine arguments and stored settings:
     # always '0.6' style, never the regional '0,6' that the engine cannot read.
     return $value.ToString([System.Globalization.CultureInfo]::InvariantCulture)
@@ -1760,13 +1837,13 @@ function Quote-ProcessArgument([string]$value) {
     if ($null -eq $value) { return '""' }
     return '"' + ($value -replace '(\\*)"','$1$1\"' -replace '(\\+)$','$1$1') + '"'
 }
-function Test-MossImageDimension([int]$Dimension) {
+function Test-SgImageDimension([int]$Dimension) {
     return ($Dimension -ge 64 -and $Dimension -le 8192 -and ($Dimension % 16 -eq 0))
 }
-function Get-MossScaledDimension([int]$Dimension,[double]$Scale) {
+function Get-SgScaledDimension([int]$Dimension,[double]$Scale) {
     return [int][Math]::Max(128,[Math]::Floor(($Dimension * $Scale) / 16.0) * 16)
 }
-function Test-MossLayoutPrompt([string]$Prompt) {
+function Test-SgLayoutPrompt([string]$Prompt) {
     if ([string]::IsNullOrWhiteSpace($Prompt) -or $Prompt.TrimStart().Substring(0,1) -ne '{') { return $false }
     try {
         $layout=ConvertFrom-Json -InputObject $Prompt -ErrorAction Stop
@@ -1779,30 +1856,41 @@ function Test-MossLayoutPrompt([string]$Prompt) {
         return $false
     }
 }
-function Get-MossEngineCommit([string]$enginePath) {
+function Get-SgEngineCommit([string]$enginePath) {
     # Reads the installed engine version: sd-cli.exe prints e.g.
     # 'stable-diffusion.cpp version unknown, commit c6dfa9d'. Returns the
     # commit hash in lower case, or '' when it cannot be determined.
     if ([string]::IsNullOrWhiteSpace($enginePath) -or -not (Test-Path -LiteralPath $enginePath -PathType Leaf)) { return '' }
     try {
-        $out = & $enginePath --version 2>&1 | Out-String
+        $out = Get-SgEngineVersionOutput $enginePath
         if ($out -match 'commit\s+([0-9a-fA-F]{6,40})') { return $Matches[1].ToLowerInvariant() }
     } catch {}
     return ''
 }
-function Get-MossEngineVersionOutput([string]$enginePath) {
-    # Runs the engine once and returns its version output. Empty result means
-    # the executable did not produce any output (missing DLLs, broken exe,
-    # antivirus blocking) - used to verify the engine actually starts after
-    # an update and again after a failure-restore.
+function Get-SgEngineVersionOutput([string]$enginePath) {
+    # Runs the engine once and returns its version output (stdout+stderr).
+    # Empty result means the executable did not produce any output (missing
+    # DLLs, broken exe, antivirus blocking) - used to verify the engine
+    # actually starts after an update and again after a failure-restore.
+    # v0.3.45: runs as a polled process with a timeout instead of '2>&1' -
+    # under $ErrorActionPreference='Stop', ANY native stderr line turns that
+    # redirect into a terminating error, which made a perfectly good engine
+    # report as 'does not start' and triggered a rollback.
     if ([string]::IsNullOrWhiteSpace($enginePath) -or -not (Test-Path -LiteralPath $enginePath -PathType Leaf)) { return '' }
     try {
-        $out = & $enginePath --version 2>&1 | Out-String
-        if ([string]::IsNullOrWhiteSpace($out)) { return '' }
-        return $out.Trim()
+        $psiV=New-Object System.Diagnostics.ProcessStartInfo
+        $psiV.FileName=$enginePath; $psiV.Arguments='--version'; $psiV.UseShellExecute=$false
+        $psiV.CreateNoWindow=$true; $psiV.RedirectStandardOutput=$true; $psiV.RedirectStandardError=$true
+        $pV=[System.Diagnostics.Process]::Start($psiV)
+        $outV=$pV.StandardOutput.ReadToEndAsync(); $errV=$pV.StandardError.ReadToEndAsync()
+        if(-not $pV.WaitForExit(15000)){ try { $pV.Kill() } catch {}; try { $pV.WaitForExit(3000) } catch {} }
+        $outV2=([string]$outV.Result+' '+[string]$errV.Result).Trim()
+        try { $pV.Dispose() } catch {}
+        if ([string]::IsNullOrWhiteSpace($outV2)) { return '' }
+        return $outV2
     } catch { return '' }
 }
-function Test-MossZipDigest([string]$zipPath,$asset,[switch]$RequireDigest) {
+function Test-SgZipDigest([string]$zipPath,$asset,[switch]$RequireDigest) {
     # GitHub publishes a sha256 digest for release assets when available; a
     # mismatch means the download is corrupt and must not be installed.
     $digest=[string]$asset.digest
@@ -1815,7 +1903,7 @@ function Test-MossZipDigest([string]$zipPath,$asset,[switch]$RequireDigest) {
     $hash=(Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if($hash -ne $expected){ throw ('The downloaded file is corrupt (sha256 mismatch: expected '+$expected+', got '+$hash+').') }
 }
-function Get-MossEngineCacheInfo([string]$engineBin) {
+function Get-SgEngineCacheInfo([string]$engineBin) {
     # v0.3.3: per-commit cache of the installed engine files, stored as ONE
     # compressed zip: engines\cache-<commit>.zip (with a manifest.txt entry).
     # If exactly one (or a few) engine files are lost later, ONLY those entries
@@ -1849,7 +1937,7 @@ function Get-MossEngineCacheInfo([string]$engineBin) {
     return $null
 }
 
-function Show-MossEngineBackupRestore([System.Windows.Forms.Form]$Owner,[string]$enginePath,[string]$engineBin,[System.Collections.ArrayList]$log,[string]$stamp) {
+function Show-SgEngineBackupRestore([System.Windows.Forms.Form]$Owner,[string]$enginePath,[string]$engineBin,[System.Collections.ArrayList]$log,[string]$stamp) {
     # Manual rollback: lists the automatic engine-backup-<time> folders the
     # updater created next to the engine folder and copies a chosen one back.
     # Backups contain only the engine files (exe + DLLs) - the large model
@@ -1920,7 +2008,7 @@ function Show-MossEngineBackupRestore([System.Windows.Forms.Form]$Owner,[string]
             } else {
                 foreach($f in $bf){ Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $engineBin $f.Name) -Force; [void]$log.Add(('Restored '+$f.Name+' from '+$b.Name)) }
             }
-            $out=Get-MossEngineVersionOutput $enginePath
+            $out=Get-SgEngineVersionOutput $enginePath
             if([string]::IsNullOrWhiteSpace($out)){
                 [void]$log.Add(('WARNING: rollback from '+$b.Name+' did not produce a working engine version output'))
                 $status.Text='Backup restored, but sd-cli.exe does not report a version.'
@@ -1941,24 +2029,25 @@ function Show-MossEngineBackupRestore([System.Windows.Forms.Form]$Owner,[string]
         }
     })
     [void]$d.ShowDialog($Owner)
+    $d.Dispose()
 }
-function Test-MossModelTargetName([string]$LocalPath,[string]$ExpectedName) {
+function Test-SgModelTargetName([string]$LocalPath,[string]$ExpectedName) {
     if([string]::IsNullOrWhiteSpace($LocalPath) -or [string]::IsNullOrWhiteSpace($ExpectedName)){ return $false }
     return ([System.IO.Path]::GetFileName($LocalPath).Equals($ExpectedName,[System.StringComparison]::OrdinalIgnoreCase))
 }
-function Test-MossModelSourceIdentity([string]$LocalPath,[string]$ExpectedName,[int64]$ExpectedSize) {
-    if(-not (Test-MossModelTargetName $LocalPath $ExpectedName)){ return $false }
+function Test-SgModelSourceIdentity([string]$LocalPath,[string]$ExpectedName,[int64]$ExpectedSize) {
+    if(-not (Test-SgModelTargetName $LocalPath $ExpectedName)){ return $false }
     if(-not (Test-Path -LiteralPath $LocalPath -PathType Leaf)){ return $false }
     if($ExpectedSize -le 0){ return $true }
     return ((Get-Item -LiteralPath $LocalPath).Length -eq $ExpectedSize)
 }
-function Get-MossModelBackupPath([string]$LocalPath,[string]$Stamp) {
+function Get-SgModelBackupPath([string]$LocalPath,[string]$Stamp) {
     if([string]::IsNullOrWhiteSpace($LocalPath) -or [string]::IsNullOrWhiteSpace($Stamp)){ return '' }
     $destDir=[System.IO.Path]::GetDirectoryName($LocalPath)
     $oldName=([System.IO.Path]::GetFileNameWithoutExtension($LocalPath))+'.old-'+$Stamp+([System.IO.Path]::GetExtension($LocalPath))
     return (Join-Path $destDir $oldName)
 }
-function Get-MossModelUpdateInfo {
+function Get-SgModelUpdateInfo {
     # Checks the known model sources on Hugging Face against the local files:
     # remote LFS size vs local file size (metadata only - no multi-GB
     # downloads). Sizes of multi-GB LFS files are a reliable version signal.
@@ -1986,7 +2075,7 @@ function Get-MossModelUpdateInfo {
         $localPath=''
         if($script:Settings.Contains($m.Setting)){
             $candidate=Get-AbsoluteAppPath ([string]$script:Settings[$m.Setting])
-            if($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf) -and (Test-MossModelTargetName $candidate $m.Name)){ $localPath=$candidate }
+            if($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf) -and (Test-SgModelTargetName $candidate $m.Name)){ $localPath=$candidate }
         }
         if(-not $localPath){
             $modelsDir=Join-Path $script:AppRoot 'models'
@@ -2026,7 +2115,7 @@ function Get-MossModelUpdateInfo {
     }
     return $out
 }
-function Get-MossProbeSpeed([int64]$TotalBytes, [double]$ElapsedSec, [int64]$RampBytes, [double]$RampSec) {
+function Get-SgProbeSpeed([int64]$TotalBytes, [double]$ElapsedSec, [int64]$RampBytes, [double]$RampSec) {
     # Speed for the download probe, in MB/s (0 when not measurable).
     # The first RampBytes (TCP slow start / TLS handshake ramp-up) are
     # EXCLUDED from the timing: they measure connection setup, not the
@@ -2041,7 +2130,7 @@ function Get-MossProbeSpeed([int64]$TotalBytes, [double]$ElapsedSec, [int64]$Ram
     return 0
 }
 
-function Measure-MossDownloadSpeed([string]$url) {
+function Measure-SgDownloadSpeed([string]$url) {
     # Downloads up to 2 MB of the file with a HARD 5-second wall budget and
     # returns the steady-state speed in MB/s (0 when it cannot be measured)
     # - used for the download-time estimate. Timeouts are deliberately
@@ -2073,21 +2162,21 @@ function Measure-MossDownloadSpeed([string]$url) {
             $sw.Stop()
             $elapsed=$sw.Elapsed.TotalSeconds
             if($rampSec -lt 0){ $rampSec=$elapsed; $rampData=0 } else { $rampData=$rampBytes }
-            return Get-MossProbeSpeed $total $elapsed $rampData $rampSec
+            return Get-SgProbeSpeed $total $elapsed $rampData $rampSec
         } finally { $resp.Close() }
     } catch {}
     return 0
 }
 
-function Get-MossDownloadSpeedFile { return (Join-Path $script:AppRoot 'config\downloadspeed.json') }
-function Save-MossRealDownloadSpeed([double]$MBps, [int64]$Bytes) {
+function Get-SgDownloadSpeedFile { return (Join-Path $script:AppRoot 'config\downloadspeed.json') }
+function Save-SgRealDownloadSpeed([double]$MBps, [int64]$Bytes) {
     # Records the REAL average speed of a completed model download
     # (bytes transferred / wall time) - the most honest speed signal this
     # machine has. Speeds <= 0 are ignored. Last 3 entries kept.
     if ($MBps -le 0 -or $MBps -gt 2000) { return }
     try {
         $list = New-Object System.Collections.ArrayList
-        $f = Get-MossDownloadSpeedFile
+        $f = Get-SgDownloadSpeedFile
         if (Test-Path -LiteralPath $f) {
             try { $data = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json; foreach ($e in @($data)) { [void]$list.Add($e) } } catch {}
         }
@@ -2098,13 +2187,13 @@ function Save-MossRealDownloadSpeed([double]$MBps, [int64]$Bytes) {
         $list | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $f -Encoding UTF8
     } catch {}
 }
-function Load-MossRealDownloadSpeed {
+function Load-SgRealDownloadSpeed {
     # The most recent REAL model-download speed (MB/s), or $null. Entries
     # are appended chronologically, so the LAST valid entry is the newest
     # (date strings tie when downloads complete within the same second -
     # comparing dates would then keep an older one).
     try {
-        $f = Get-MossDownloadSpeedFile
+        $f = Get-SgDownloadSpeedFile
         if (-not (Test-Path -LiteralPath $f)) { return $null }
         $data = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
         $best = $null
@@ -2113,7 +2202,7 @@ function Load-MossRealDownloadSpeed {
     } catch {}
     return $null
 }
-function Get-MossCachedDownloadSpeed([int]$MaxAgeDays = 7) {
+function Get-SgCachedDownloadSpeed([int]$MaxAgeDays = 7) {
     # The last MEASURED download speed, taken from the CACHE ONLY - this
     # function never touches the network.
     # v0.2.3: measuring the speed means downloading 6 MB from the model
@@ -2121,32 +2210,32 @@ function Get-MossCachedDownloadSpeed([int]$MaxAgeDays = 7) {
     # start. Everywhere else (startup, opening a dialog) Sootglass uses this
     # cached number and says 'depends on your connection' when there is none.
     try {
-        $real = Load-MossRealDownloadSpeed
+        $real = Load-SgRealDownloadSpeed
         if ($real) {
             try { if (((Get-Date) - [datetime]$real.Date) -le [TimeSpan]::FromDays($MaxAgeDays)) { return [double]$real.MBps } } catch {}
         }
     } catch {}
     return 0
 }
-function Get-MossDownloadSpeedEstimate([string]$url, [int]$MaxAgeDays = 7) {
+function Get-SgDownloadSpeedEstimate([string]$url, [int]$MaxAgeDays = 7) {
     # The best available download speed (MB/s, 0 when unknown):
     # 1. A REAL completed model download from the last $MaxAgeDays days is
     #    used ALONE - no probe, the dialog opens instantly.
     # 2. Otherwise a fresh 5-second probe is run and BLENDED 50/50 with any
     #    older real measurement (the probe sees today's network, the real
     #    number shows what a full multi-GB transfer settles at).
-    $real = Load-MossRealDownloadSpeed
+    $real = Load-SgRealDownloadSpeed
     $maxAge = [TimeSpan]::FromDays($MaxAgeDays)
     if ($real) {
         try { if (((Get-Date) - [datetime]$real.Date) -le $maxAge) { return [double]$real.MBps } } catch {}
     }
-    $probe = Measure-MossDownloadSpeed $url
+    $probe = Measure-SgDownloadSpeed $url
     if ($probe -gt 0 -and $real -and [double]$real.MBps -gt 0) { return [Math]::Round((($probe + [double]$real.MBps) / 2.0), 2) }
     if ($probe -gt 0) { return $probe }
     if ($real -and [double]$real.MBps -gt 0) { return [double]$real.MBps }
     return 0
 }
-function Find-MossRelocationDrive([int64]$needBytes) {
+function Find-SgRelocationDrive([int64]$needBytes) {
     # Returns the fixed local drive (other than Sootglass's current one) with the
     # most free space, if it can hold the downloads plus a healthy margin.
     try {
@@ -2160,7 +2249,7 @@ function Find-MossRelocationDrive([int64]$needBytes) {
         return $best
     } catch { return $null }
 }
-function Move-MossToNewLocation([string]$newRoot) {
+function Move-SgToNewLocation([string]$newRoot) {
     # Copies the Sootglass application files to a roomier location and creates a
     # desktop shortcut there. Models/bin are NOT copied - the startup offer
     # in the new location downloads them fresh.
@@ -2191,7 +2280,7 @@ function Move-MossToNewLocation([string]$newRoot) {
         return $null
     }
 }
-function Test-MossOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
+function Test-SgOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
     # Startup completeness check: if the engine or the known model files are
     # missing, offer to download them right away so Sootglass works as intended.
     # Updates for already-installed files are NOT prompted here - they live in
@@ -2226,10 +2315,10 @@ function Test-MossOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
         $missing=@()
         $modelsTotal=0
         $firstMissingUrl=''
-        $infos=@(Get-MossModelUpdateInfo)
+        $infos=@(Get-SgModelUpdateInfo)
         foreach($i in $infos){
             if($i.Status -eq 'not installed'){
-                $missing+=($i.Name+'  ('+(Format-MossModelSize $i.RemoteSize)+')')
+                $missing+=($i.Name+'  ('+(Format-SgModelSize $i.RemoteSize)+')')
                 $modelsTotal+=$i.RemoteSize
                 if(-not $firstMissingUrl){ $firstMissingUrl=[string]$i.RemoteUrl }
             }
@@ -2243,7 +2332,7 @@ function Test-MossOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
                 # v0.2.3: CACHED speed only - the startup offer must not
                 # download 6 MB just to print an estimate. The real probe
                 # runs later, when a download is actually confirmed.
-                $spd=Get-MossCachedDownloadSpeed
+                $spd=Get-SgCachedDownloadSpeed
                 if($spd -gt 0){ $est=' At your measured speed ('+[math]::Round($spd,1)+' MB/s) this takes about '+[math]::Round($modelsTotal/1MB/$spd/60,0)+' minutes.' }
             }
             # Not enough room on Sootglass's current drive? Suggest a better place
@@ -2253,15 +2342,15 @@ function Test-MossOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
             $driveRoot=[System.IO.Path]::GetPathRoot((Get-AbsoluteAppPath '.')).TrimEnd('\')
             try { $freeHere=(New-Object System.IO.DriveInfo($driveRoot)).AvailableFreeSpace } catch { $freeHere=[int64]::MaxValue }
             if($freeHere -lt $needTotal){
-                $better=Find-MossRelocationDrive ($needTotal*2)
+                $better=Find-SgRelocationDrive ($needTotal*2)
                 if($better){
                     $suggested=Join-Path $better.Root 'Sootglass Studio'
-                    $msg=("Sootglass is in a tight spot:`r`n`r`n`"{0}`" only has {1} free, but the missing files need about {2}.`r`n`r`nDrive {3} has {4} free. Move Sootglass there?`r`n`r`nMOSS will be copied to `"{5}`" and a desktop shortcut will be created - then the downloads run from the new place (this copy can be deleted afterwards)." -f $driveRoot,(Format-MossModelSize $freeHere 1),(Format-MossModelSize $needTotal 1),$better.Root.TrimEnd('\'),(Format-MossModelSize $better.Free 1),$suggested)
+                    $msg=("Sootglass is in a tight spot:`r`n`r`n`"{0}`" only has {1} free, but the missing files need about {2}.`r`n`r`nDrive {3} has {4} free. Move Sootglass there?`r`n`r`nSootglass will be copied to `"{5}`" and a desktop shortcut will be created - then the downloads run from the new place (this copy can be deleted afterwards)." -f $driveRoot,(Format-SgModelSize $freeHere 1),(Format-SgModelSize $needTotal 1),$better.Root.TrimEnd('\'),(Format-SgModelSize $better.Free 1),$suggested)
                     $answer=[System.Windows.Forms.MessageBox]::Show($Owner,$msg,'Better place for Sootglass',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
                     if($answer -eq [System.Windows.Forms.DialogResult]::Yes){
-                        $newRoot=Move-MossToNewLocation $suggested
+                        $newRoot=Move-SgToNewLocation $suggested
                         if($newRoot){
-                            try { [void](Write-MossErrorLog 'Relocated Sootglass' ('New location: '+$newRoot)) } catch {}
+                            try { [void](Write-SgErrorLog 'Relocated Sootglass' ('New location: '+$newRoot)) } catch {}
                             $startAnswer=[System.Windows.Forms.MessageBox]::Show($Owner,("Sootglass was copied to `""+$newRoot+"`" and a desktop shortcut (Sootglass Studio) now points there.`r`n`r`nStart the new copy now? The downloads then run from the new place - you can close this old window and delete this old copy afterwards."),'Better place for Sootglass',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Information)
                             if($startAnswer -eq [System.Windows.Forms.DialogResult]::Yes){
                                 $starter=Join-Path $newRoot 'Sootglass-Studio.vbs'
@@ -2272,13 +2361,13 @@ function Test-MossOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
                         }
                     }
                 } else {
-                    [System.Windows.Forms.MessageBox]::Show($Owner,("Sootglass is in a tight spot:`r`n`r`n`""+$driveRoot+"`" only has "+(Format-MossModelSize $freeHere 1)+" free, but the missing files need about "+(Format-MossModelSize $needTotal 1)+", and no other fixed drive has room either.`r`n`r`nFree up space (or plug in a larger drive) and start Sootglass again.`r`nYou can also continue now and install only what fits."),'Better place for Sootglass',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+                    [System.Windows.Forms.MessageBox]::Show($Owner,("Sootglass is in a tight spot:`r`n`r`n`""+$driveRoot+"`" only has "+(Format-SgModelSize $freeHere 1)+" free, but the missing files need about "+(Format-SgModelSize $needTotal 1)+", and no other fixed drive has room either.`r`n`r`nFree up space (or plug in a larger drive) and start Sootglass again.`r`nYou can also continue now and install only what fits."),'Better place for Sootglass',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
                     return
                 }
             }
             $msg=("Sootglass is not fully installed yet:`r`n`r`n"+(($lines) -join "`r`n")+"`r`n`r`nWithout the engine and model files Sootglass cannot generate images.`r`n`r`nDownload them now?"+$est+"`r`n(You can also do this later via 'Update engine...' in the header.)")
             $answer=[System.Windows.Forms.MessageBox]::Show($Owner,$msg,'Sootglass setup',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
-            if($answer -eq [System.Windows.Forms.DialogResult]::Yes){ Show-MossEngineUpdateDialog $Owner }
+            if($answer -eq [System.Windows.Forms.DialogResult]::Yes){ Show-SgEngineUpdateDialog $Owner }
         }
     } catch {}
 }
@@ -2286,7 +2375,7 @@ function Test-MossOfferStartupDownload([System.Windows.Forms.Form]$Owner) {
 # tokenizer and the engine - switching needs ZERO downloads when the files
 # are already in models\ (only the diffusion model and the LLM differ per
 # precision). This dialog shows what is installed and switches instantly.
-function Get-MossPrecisionInfo {
+function Get-SgPrecisionInfo {
     # Returns one entry per precision: label, the diffusion + LLM file names,
     # and which of them are actually present on disk (settings path or
     # models\<name>).
@@ -2301,15 +2390,15 @@ function Get-MossPrecisionInfo {
         $diffPath=Join-Path $modelsDir $d.Diffusion; $llmPath=Join-Path $modelsDir $d.Llm
         $diffOk=Test-Path -LiteralPath $diffPath -PathType Leaf
         $llmOk=Test-Path -LiteralPath $llmPath -PathType Leaf
-        if(-not $diffOk -and $script:Settings.Contains('DiffusionModelPath')){ $p=Get-AbsoluteAppPath ([string]$script:Settings['DiffusionModelPath']); if($p -and (Test-MossModelTargetName $p $d.Diffusion)){ $diffOk=$true; $diffPath=$p } }
-        if(-not $llmOk -and $script:Settings.Contains('LlmPath')){ $p=Get-AbsoluteAppPath ([string]$script:Settings['LlmPath']); if($p -and (Test-MossModelTargetName $p $d.Llm)){ $llmOk=$true; $llmPath=$p } }
+        if(-not $diffOk -and $script:Settings.Contains('DiffusionModelPath')){ $p=Get-AbsoluteAppPath ([string]$script:Settings['DiffusionModelPath']); if($p -and (Test-SgModelTargetName $p $d.Diffusion)){ $diffOk=$true; $diffPath=$p } }
+        if(-not $llmOk -and $script:Settings.Contains('LlmPath')){ $p=Get-AbsoluteAppPath ([string]$script:Settings['LlmPath']); if($p -and (Test-SgModelTargetName $p $d.Llm)){ $llmOk=$true; $llmPath=$p } }
         $missing=@(); if(-not $diffOk){ $missing+=$d.Diffusion }; if(-not $llmOk){ $missing+=$d.Llm }
         $current=($script:Settings.Contains('LlmPath') -and ((Split-Path -Leaf (Get-AbsoluteAppPath ([string]$script:Settings['LlmPath']))) -eq $d.Llm))
         $out+=[pscustomobject]@{ Key=$d.Key; Label=$d.Label; Diffusion=$d.Diffusion; Llm=$d.Llm; Ready=($missing.Count -eq 0); Missing=$missing; Current=$current; DiffPath=$diffPath; LlmPath=$llmPath }
     }
     return ,$out
 }
-function Install-MossModelFiles([object[]]$ModelPlan,[string]$TempRoot,[string]$Stamp,[scriptblock]$OnProgress=$null,[object[]]$SettingsPlan=$null) {
+function Install-SgModelFiles([object[]]$ModelPlan,[string]$TempRoot,[string]$Stamp,[scriptblock]$OnProgress=$null,[object[]]$SettingsPlan=$null) {
     $installed=@()
     $settingsBefore=@{}
     try {
@@ -2321,21 +2410,21 @@ function Install-MossModelFiles([object[]]$ModelPlan,[string]$TempRoot,[string]$
             $downloadedInPlace=[bool]$mTemp
             if(-not $downloadedInPlace){
                 $mTemp=Join-Path $TempRoot ('model-'+$mi.Name+'.part')
-                [void](Save-MossWebFile ([string]$mi.RemoteUrl) $mTemp 7200)
+                [void](Save-SgWebFile ([string]$mi.RemoteUrl) $mTemp 7200)
             }
             if(-not (Test-Path -LiteralPath $mTemp -PathType Leaf)){ throw ('The '+$mi.Name+' download did not produce a file.') }
             $got=(Get-Item -LiteralPath $mTemp).Length
-            if($mi.RemoteSize -gt 0 -and $got -ne $mi.RemoteSize){ throw ('download size mismatch for '+$mi.Name+' (got '+(Format-MossModelSize $got)+', expected '+(Format-MossModelSize $mi.RemoteSize)+')') }
+            if($mi.RemoteSize -gt 0 -and $got -ne $mi.RemoteSize){ throw ('download size mismatch for '+$mi.Name+' (got '+(Format-SgModelSize $got)+', expected '+(Format-SgModelSize $mi.RemoteSize)+')') }
             $destModel=[string]$mi.LocalPath
             if(-not $destModel){ $destModel=Join-Path $script:AppRoot ('models\'+$mi.Name) }
-            if(-not (Test-MossModelTargetName $destModel ([string]$mi.Name))){
+            if(-not (Test-SgModelTargetName $destModel ([string]$mi.Name))){
                 throw ('Model download target filename mismatch: '+[string]$mi.Name+' must not overwrite '+[System.IO.Path]::GetFileName($destModel))
             }
             $destDir=[System.IO.Path]::GetDirectoryName($destModel)
             if(-not (Test-Path -LiteralPath $destDir -PathType Container)){ New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
             $backupPath=''
             if(Test-Path -LiteralPath $destModel -PathType Leaf){
-                $backupPath=Get-MossModelBackupPath $destModel $Stamp
+                $backupPath=Get-SgModelBackupPath $destModel $Stamp
                 Move-Item -LiteralPath $destModel -Destination $backupPath -ErrorAction Stop
             }
             try {
@@ -2374,7 +2463,7 @@ function Install-MossModelFiles([object[]]$ModelPlan,[string]$TempRoot,[string]$
             if($item.Backup){
                 $oldSiblings=@(Get-ChildItem -LiteralPath ([System.IO.Path]::GetDirectoryName($item.Path)) -File -Filter (([System.IO.Path]::GetFileNameWithoutExtension($item.Path))+'.old-*') -ErrorAction SilentlyContinue | Sort-Object -Property Name -Descending)
                 for($bi=3; $bi -lt $oldSiblings.Count; $bi++){
-                    try { Remove-Item -LiteralPath $oldSiblings[$bi].FullName -Force -ErrorAction Stop } catch { [void](Write-MossErrorLog 'Model backup cleanup failed' ($oldSiblings[$bi].FullName+': '+$_.Exception.Message)) }
+                    try { Remove-Item -LiteralPath $oldSiblings[$bi].FullName -Force -ErrorAction Stop } catch { [void](Write-SgErrorLog 'Model backup cleanup failed' ($oldSiblings[$bi].FullName+': '+$_.Exception.Message)) }
                 }
             }
         }
@@ -2397,13 +2486,13 @@ function Install-MossModelFiles([object[]]$ModelPlan,[string]$TempRoot,[string]$
         throw $installError
     }
 }
-function Show-MossModelVariantDownload([System.Windows.Forms.Form]$Owner,[string]$Variant,[object[]]$RequestedModels=$null) {
+function Show-SgModelVariantDownload([System.Windows.Forms.Form]$Owner,[string]$Variant,[object[]]$RequestedModels=$null) {
     if(@('quantized','q8','bf16') -notcontains $Variant){ throw ('Unsupported model precision: '+$Variant) }
     if($null -ne $script:GenState -and $script:GenState.IsRunning){
         [System.Windows.Forms.MessageBox]::Show($Owner,'A generation is running. Wait for it to finish (or cancel it) before downloading model files.','Model download',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
         return
     }
-    $infos=@(Get-MossModelUpdateInfo $Variant)
+    $infos=@(Get-SgModelUpdateInfo $Variant)
     $modelPlan=@($infos | Where-Object { $_.Status -eq 'update available' -or $_.Status -eq 'not installed' })
     $requiredModels=@($infos | Where-Object { [string]$_.Setting -in @('DiffusionModelPath','LlmPath') })
     $unverified=@($requiredModels | Where-Object { $_.Status -notin @('update available','not installed','up to date') })
@@ -2440,7 +2529,7 @@ function Show-MossModelVariantDownload([System.Windows.Forms.Form]$Owner,[string
         if([int64]$mi.RemoteSize -le 0){ $spaceCheckError=('Sootglass could not determine the download size for '+$mi.Name+'.'); break }
         $destModel=[string]$mi.LocalPath
         if(-not $destModel){ $destModel=Join-Path $script:AppRoot ('models\'+$mi.Name) }
-        if(-not (Test-MossModelTargetName $destModel ([string]$mi.Name))){
+        if(-not (Test-SgModelTargetName $destModel ([string]$mi.Name))){
             $destModel=Join-Path $script:AppRoot ('models\'+$mi.Name)
             $mi.LocalPath=$destModel
         }
@@ -2464,7 +2553,7 @@ function Show-MossModelVariantDownload([System.Windows.Forms.Form]$Owner,[string
     $spaceLines=@(); $spaceShortages=@(); $spaceMargin=[int64](512MB)
     foreach($spaceEntry in $spaceByRoot.Values){
         $needed=[int64]$spaceEntry.Needed+$spaceMargin
-        $line=($spaceEntry.Root+': need '+(Format-MossModelSize $needed)+' (including 512 MB safety margin), available '+(Format-MossModelSize $spaceEntry.Available))
+        $line=($spaceEntry.Root+': need '+(Format-SgModelSize $needed)+' (including 512 MB safety margin), available '+(Format-SgModelSize $spaceEntry.Available))
         $spaceLines+=$line
         if([int64]$spaceEntry.Available -lt $needed){ $spaceShortages+=$line }
     }
@@ -2472,8 +2561,8 @@ function Show-MossModelVariantDownload([System.Windows.Forms.Form]$Owner,[string
         [System.Windows.Forms.MessageBox]::Show($Owner,("There is not enough free disk space for these model files:`r`n`r`n  "+($spaceShortages -join "`r`n  ")+"`r`n`r`nFree up space and try again. No files were downloaded."),'Not enough disk space',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
         return
     }
-    $downloadLines=($modelPlan | ForEach-Object { '  '+$_.Name+'  ('+(Format-MossModelSize $_.RemoteSize)+')' }) -join "`r`n"
-    $confirmText="Download and install these model files only?`r`n`r`n{0}`r`n`r`nTotal download: {1}`r`nAvailable disk space:`r`n  {2}`r`n`r`nThe installed engine and graphics runtime (NVIDIA/CUDA, AMD/ROCm, Intel/SYCL, or other backend) will be left unchanged and will not be downloaded again. Existing model files will be kept as backups." -f $downloadLines,(Format-MossModelSize $modelsTotal),($spaceLines -join "`r`n  ")
+    $downloadLines=($modelPlan | ForEach-Object { '  '+$_.Name+'  ('+(Format-SgModelSize $_.RemoteSize)+')' }) -join "`r`n"
+    $confirmText="Download and install these model files only?`r`n`r`n{0}`r`n`r`nTotal download: {1}`r`nAvailable disk space:`r`n  {2}`r`n`r`nThe installed engine and graphics runtime (NVIDIA/CUDA, AMD/ROCm, Intel/SYCL, or other backend) will be left unchanged and will not be downloaded again. Existing model files will be kept as backups." -f $downloadLines,(Format-SgModelSize $modelsTotal),($spaceLines -join "`r`n  ")
     $answer=[System.Windows.Forms.MessageBox]::Show($Owner,$confirmText,'Download model files',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
     if($answer -ne [System.Windows.Forms.DialogResult]::Yes){ return }
     $busy=@(Get-Process -Name 'sd-cli','sd-server' -ErrorAction SilentlyContinue)
@@ -2510,6 +2599,7 @@ try {
         Remove-Item -LiteralPath $outFile -Force -ErrorAction SilentlyContinue
         $downloaded=$false; $lastError=''
         for($attempt=1;$attempt -le 2 -and -not $downloaded;$attempt++){
+            $State['Bytes']=[long]0
             $request=$null; $response=$null; $inputStream=$null; $outputStream=$null
             try {
                 if($State['CancelRequested']){ throw 'Download cancelled by user.' }
@@ -2518,6 +2608,7 @@ try {
                 $State['CurrentRequest']=$request
                 if($State['CancelRequested']){ $request.Abort(); throw 'Download cancelled by user.' }
                 $State['Phase']='Downloading'
+                $State['StartUtc']=[datetime]::UtcNow
                 $response=$request.GetResponse()
                 if($response.ContentLength -gt 0){ $State['Total']=[long]$response.ContentLength }
                 $inputStream=$response.GetResponseStream()
@@ -2601,7 +2692,7 @@ try {
     $state['Error']=''; $state['Bytes']=[long]0; $state['Total']=[long]0; $state['Index']=0; $state['Count']=$modelPlan.Count
     $state['Name']=''; $state['Phase']='Starting'; $state['CurrentRequest']=$null; $state['CurrentProcess']=$null
     $runner=$null; $job=$null; $timer=$null
-    $script:MossModelDownload=@{
+    $script:SgModelDownload=@{
         Active=$true; State=$state; ModelPlan=$modelPlan; SettingsPlan=$requiredModels
         Stamp=$stamp; Runner=$null; Job=$null; Timer=$null; Form=$progress; Label=$progressLabel
         Progress=$progressBar; CancelButton=$cancelBtn; Owner=$Owner
@@ -2610,15 +2701,25 @@ try {
         $runner=[powershell]::Create()
         [void]$runner.AddScript($downloadCode).AddArgument($modelPlan).AddArgument($state)
         $job=$runner.BeginInvoke()
-        $script:MossModelDownload['Runner']=$runner; $script:MossModelDownload['Job']=$job
+        $script:SgModelDownload['Runner']=$runner; $script:SgModelDownload['Job']=$job
         $timer=New-Object System.Windows.Forms.Timer; $timer.Interval=250
-        $script:MossModelDownload['Timer']=$timer
+        $script:SgModelDownload['Timer']=$timer
         $timer.Add_Tick({
-            $dl=$script:MossModelDownload
+            $dl=$script:SgModelDownload
             if(-not $dl -or -not $dl['Active']){ return }
             $st=$dl['State']
             if(-not $st['Done']){
-                $dl['Label'].Text=('Downloading '+$st['Index']+' of '+$st['Count']+': '+$st['Name']+' - '+(Format-MossModelSize $st['Bytes'])+' of '+(Format-MossModelSize $st['Total']))
+                $etaTxt=''
+                try {
+                    if($st['StartUtc'] -and [string]$st['Phase'] -eq 'Downloading'){
+                        $elS=([datetime]::UtcNow - [datetime]$st['StartUtc']).TotalSeconds
+                        if($elS -gt 2 -and [long]$st['Bytes'] -gt 1MB){
+                            $mbpsE=(($st['Bytes']/1MB)/$elS)
+                            if($mbpsE -gt 0.01 -and [long]$st['Total'] -gt 0){ $etaTxt=' - about '+(Format-SgEta ((($st['Total']-$st['Bytes'])/1MB)/$mbpsE))+' left' }
+                        }
+                    }
+                } catch {}
+                $dl['Label'].Text=('Downloading '+$st['Index']+' of '+$st['Count']+': '+$st['Name']+' - '+(Format-SgModelSize $st['Bytes'])+' of '+(Format-SgModelSize $st['Total'])+$etaTxt)
                 if([string]$st['Phase'] -eq 'Retrying with curl'){
                     $dl['Progress'].Style='Marquee'; $dl['Progress'].MarqueeAnimationSpeed=25
                 } else {
@@ -2653,9 +2754,9 @@ try {
             $dl['Progress'].Style='Marquee'; $dl['Progress'].MarqueeAnimationSpeed=25
             [System.Windows.Forms.Application]::DoEvents()
             try {
-                $installed=Install-MossModelFiles -ModelPlan $dl['ModelPlan'] -TempRoot $script:AppRoot -Stamp $dl['Stamp'] -SettingsPlan $dl['SettingsPlan'] -OnProgress {
+                $installed=Install-SgModelFiles -ModelPlan $dl['ModelPlan'] -TempRoot $script:AppRoot -Stamp $dl['Stamp'] -SettingsPlan $dl['SettingsPlan'] -OnProgress {
                     param($mi,$index,$count)
-                    $dl=$script:MossModelDownload
+                    $dl=$script:SgModelDownload
                     $dl['Label'].Text=('Installing model '+$index+' of '+$count+': '+$mi.Name)
                     [System.Windows.Forms.Application]::DoEvents()
                 }
@@ -2671,20 +2772,26 @@ try {
             }
         })
         $cancelBtn.Add_Click({
-            $dl=$script:MossModelDownload
+            $dl=$script:SgModelDownload
             if($dl -and $dl['Active']){
-                $st=$dl['State']; $st['CancelRequested']=$true
-                try { if($st['CurrentRequest']){ $st['CurrentRequest'].Abort() } } catch {}
-                try { if($st['CurrentProcess'] -and -not $st['CurrentProcess'].HasExited){ $st['CurrentProcess'].Kill() } } catch {}
+                # v0.3.45 (hardening): never index a possibly-null state
+                # (same crash class as the engine-update $movedExtras fix) -
+                # the state can be briefly re-created between phases.
+                $st=$dl['State']
+                if($st){
+                    $st['CancelRequested']=$true
+                    try { if($st['CurrentRequest']){ $st['CurrentRequest'].Abort() } } catch {}
+                    try { if($st['CurrentProcess'] -and -not $st['CurrentProcess'].HasExited){ $st['CurrentProcess'].Kill() } } catch {}
+                }
                 $dl['Label'].Text='Cancelling download...'
                 $dl['CancelButton'].Text='Cancelling...'; $dl['CancelButton'].Enabled=$false
                 $dl['Progress'].Style='Marquee'; $dl['Progress'].MarqueeAnimationSpeed=25
                 return
             }
-            $dl['Form'].Close()
+            if($dl){ $dl['Form'].Close() }
         })
         $progress.Add_FormClosing({
-            $dl=$script:MossModelDownload
+            $dl=$script:SgModelDownload
             if($dl -and $dl['Active']){
                 $_.Cancel=$true
                 $dl['CancelButton'].PerformClick()
@@ -2701,10 +2808,10 @@ try {
         if($timer){ try { $timer.Stop(); $timer.Dispose() } catch {} }
         if($runner){ try { $runner.Dispose() } catch {} }
         if($progress -and -not $progress.IsDisposed){ $progress.Dispose() }
-        $script:MossModelDownload=$null
+        $script:SgModelDownload=$null
     }
 }
-function Show-MossSwitchModels([System.Windows.Forms.Form]$Owner=$null) {
+function Show-SgSwitchModels([System.Windows.Forms.Form]$Owner=$null) {
     $g=New-Object System.Windows.Forms.Form
     $g.Text='Switch models (precision)'
     $g.ClientSize=New-Object System.Drawing.Size(760,420); $g.MinimumSize=New-Object System.Drawing.Size(776,459); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false
@@ -2713,7 +2820,7 @@ function Show-MossSwitchModels([System.Windows.Forms.Form]$Owner=$null) {
     $ttl=New-Object System.Windows.Forms.Label; $ttl.Text='SWITCH MODELS  -  pick the precision to use'; $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',13,[System.Drawing.FontStyle]::Bold); $ttl.AutoSize=$true; $ttl.Location=New-Object System.Drawing.Point(12,10); $g.Controls.Add($ttl)
     $sub=New-Object System.Windows.Forms.Label; $sub.Text='All precisions share the VAE, the tokenizer and the engine - only the diffusion model and the LLM differ. Switching to an installed precision is INSTANT (no download). Missing files can be fetched from here.'
     $sub.Location=New-Object System.Drawing.Point(12,40); $sub.Size=New-Object System.Drawing.Size(720,36); $sub.ForeColor=$cMuted; $g.Controls.Add($sub)
-    $infos=Get-MossPrecisionInfo
+    $infos=Get-SgPrecisionInfo
     if($infos.Count -eq 1 -and $infos[0] -is [array]){ $infos=$infos[0] }
     $radios=@(); $row=0
     foreach($inf in $infos){
@@ -2753,7 +2860,7 @@ function Show-MossSwitchModels([System.Windows.Forms.Form]$Owner=$null) {
         for($i=0;$i -lt $radios.Count;$i++){ if($radios[$i].Checked){ $sel=@($infos)[$i] } }
         if(-not $sel){ return }
         $g.Close()
-        Show-MossModelVariantDownload $Owner $sel.Key
+        Show-SgModelVariantDownload $Owner $sel.Key
     })
     $closeBtn.Add_Click({$g.Close()})
     [void]$g.ShowDialog($Owner)
@@ -2763,24 +2870,96 @@ function Show-MossSwitchModels([System.Windows.Forms.Form]$Owner=$null) {
 # v0.3.5: resilient download helper - Invoke-RestMethod/WebRequest on the
 # legacy .NET stack intermittently gets HTTP 504 from GitHub; curl.exe
 # (bundled with Windows) gets through. Two IWR attempts, then curl fallback.
-function Save-MossWebFile([string]$Url,[string]$OutFile,[int]$TimeoutSec) {
+function Format-SgEta([double]$Seconds) {
+    if($Seconds -le 0 -or $Seconds -gt 86400){ return '' }
+    $s=[int][math]::Round($Seconds)
+    if($s -ge 3600){ return ('{0}:{1:d2}:{2:d2}' -f [int]([math]::Floor($s/3600)),[int]([math]::Floor(($s%3600)/60)),[int]($s%60)) }
+    return ('{0}:{1:d2}' -f [int]([math]::Floor($s/60)),[int]($s%60))
+}
+function Save-SgWebFile([string]$Url,[string]$OutFile,[int]$TimeoutSec,[scriptblock]$OnProgress=$null) {
+    # v0.3.45: chunked streaming download (1 MB chunks). The optional
+    # $OnProgress callback receives (bytes,total,mbps); returning $true from
+    # it aborts with 'Download cancelled by user.'. UI callers use it to
+    # pump DoEvents, update a bar/ETA and honour a Cancel button between
+    # chunks, so even multi-hundred-MB downloads keep the window responsive.
     for($att=1;$att -le 2;$att++){
+        $aborted=$false; $cbErr=$false
         try {
             [System.Net.ServicePointManager]::SecurityProtocol=[System.Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec $TimeoutSec
+            $req=[System.Net.HttpWebRequest]::Create($Url)
+            $req.Method='GET'; $req.Timeout=$TimeoutSec*1000; $req.ReadWriteTimeout=$TimeoutSec*1000; $req.UserAgent='Sootglass-Studio'; $req.AllowAutoRedirect=$true
+            $resp=$req.GetResponse()
+            try {
+                $total=[long]$resp.ContentLength; if($total -lt 0){ $total=0 }
+                $sw=[System.Diagnostics.Stopwatch]::StartNew()
+                $fs=[System.IO.File]::Create($OutFile)
+                try {
+                    $s=$resp.GetResponseStream()
+                    $buf=New-Object byte[] (1MB)
+                    $read=[long]0
+                    while(($n=$s.Read($buf,0,$buf.Length)) -gt 0){
+                        $fs.Write($buf,0,$n); $read+=$n
+                        if($OnProgress){
+                            $mbps=0.0
+                            if($sw.Elapsed.TotalSeconds -gt 0.5){ $mbps=($read/1MB)/$sw.Elapsed.TotalSeconds }
+                            try { if(& $OnProgress $read $total $mbps){ $aborted=$true; break } }
+                            catch { $cbErr=$true; throw }
+                        }
+                    }
+                } finally { $fs.Dispose() }
+            } finally { $resp.Close() }
+            if($aborted){ throw 'Download cancelled by user.' }
+            # v0.3.45 (fix): a stream that ended before ContentLength is a
+            # truncated download - never report it as complete.
+            $outLen=0L
+            try { if(Test-Path -LiteralPath $OutFile -PathType Leaf){ $outLen=(Get-Item -LiteralPath $OutFile).Length } } catch {}
+            if($total -gt 0 -and $outLen -gt 0 -and $outLen -lt $total){ Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue; throw ('Download incomplete: got '+$outLen+' of '+$total+' bytes.') }
             if((Test-Path -LiteralPath $OutFile -PathType Leaf) -and (Get-Item -LiteralPath $OutFile).Length -gt 0){ return 'iwr' }
-        } catch { Start-Sleep -Milliseconds 800 }
+        } catch {
+            # A callback exception is NOT a network failure - retrying the
+            # download would hide the real cause. Only genuine transport
+            # errors get the retry; 'cancelled by user' rethrows either way.
+            if($cbErr -and $_.Exception.Message -notlike '*cancelled by user*'){ try { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue } catch {}; throw }
+            if($_.Exception.Message -like '*cancelled by user*'){ try { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue } catch {}; throw }
+            Start-Sleep -Milliseconds 800
+        }
         Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
     }
     $curlExe=(Get-Command curl.exe -ErrorAction SilentlyContinue).Source
     if($curlExe){
-        & $curlExe -sL --max-time $TimeoutSec -o $OutFile $Url
-        if((Test-Path -LiteralPath $OutFile -PathType Leaf) -and (Get-Item -LiteralPath $OutFile).Length -gt 0){ return 'curl' }
+        # v0.3.45: run curl as a polled process so the caller's Cancel button
+        # stays live here too (the plain '& curl' call was unkillable for the
+        # whole --max-time window).
+        $psi=New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName=$curlExe; $psi.UseShellExecute=$false; $psi.CreateNoWindow=$true
+        $quotedOut='"'+$OutFile.Replace('"','\"')+'"'
+        $quotedUrl='"'+$Url.Replace('"','\"')+'"'
+        $psi.Arguments='-sL --fail --show-error --max-time '+$TimeoutSec+' -o '+$quotedOut+' '+$quotedUrl
+        $curlP=New-Object System.Diagnostics.Process
+        $curlP.StartInfo=$psi
+        if($curlP.Start()){
+            while(-not $curlP.WaitForExit(200)){
+                if($OnProgress -and (& $OnProgress 0 0 0)){
+                    try { $curlP.Kill() } catch {}
+                    try { $curlP.WaitForExit(3000) } catch {}
+                    try { $curlP.Dispose() } catch {}
+                    try { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue } catch {}
+                    throw 'Download cancelled by user.'
+                }
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+            # v0.3.45 (fix): a non-zero curl exit (timeout, partial transfer,
+            # killed stream) means the file may be truncated - never report it
+            # as success. (Matches the LoRA and model downloader workers.)
+            $curlExitS=$curlP.ExitCode
+            try { $curlP.Dispose() } catch {}
+            if($curlExitS -eq 0 -and (Test-Path -LiteralPath $OutFile -PathType Leaf) -and (Get-Item -LiteralPath $OutFile).Length -gt 0){ return 'curl' }
+        }
     }
     throw ('Download failed after retries: '+$Url)
 }
 
-function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[string]$Preselect='') {
+function Show-SgEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[string]$Preselect='') {
     # UPDATING THE ENGINE (sd-cli core files) - deliberately separate from the
     # 'Update Sootglass...' header button: Sootglass is only the GUI, while sd-cli.exe
     # and its libraries in the bin folder are the engine that renders images.
@@ -2800,7 +2979,7 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
         $enginePath=Join-Path $script:AppRoot 'bin\sd-cli.exe'
     }
     $engineBin=[System.IO.Path]::GetDirectoryName($enginePath)
-    $installedCommit=Get-MossEngineCommit $enginePath
+    $installedCommit=Get-SgEngineCommit $enginePath
     $stamp=Get-Date -Format 'yyyyMMdd_HHmmss'
     $log=New-Object System.Collections.ArrayList
     [void]$log.Add(('Engine update started '+(Get-Date -Format 'u')))
@@ -2846,7 +3025,7 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
         [void]$log.Add('ERROR: the release feed could not be read (offline or blocked)')
         try { $logDir=Join-Path $script:AppRoot 'logs'; if(-not(Test-Path -LiteralPath $logDir)){New-Item -ItemType Directory -Path $logDir -Force|Out-Null}; ($log -join "`r`n") | Set-Content -LiteralPath (Join-Path $logDir ('engine-update-'+$stamp+'.txt')) -Encoding UTF8 } catch {}
         $answer=[System.Windows.Forms.MessageBox]::Show($Owner,"Sootglass could not read the engine release feed (offline or blocked?).`r`n`r`nOpen the releases page to check and download manually?`r`nChoose No to open the backup-restore dialog instead (works offline).",'Engine update',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
-        if($answer -eq [System.Windows.Forms.DialogResult]::Yes){ try { Start-Process 'https://github.com/leejet/stable-diffusion.cpp/releases' } catch {} } else { Show-MossEngineBackupRestore $Owner $enginePath $engineBin $log $stamp }
+        if($answer -eq [System.Windows.Forms.DialogResult]::Yes){ try { Start-Process 'https://github.com/leejet/stable-diffusion.cpp/releases' } catch {} } else { Show-SgEngineBackupRestore $Owner $enginePath $engineBin $log $stamp }
         return
     }
     $latest=$releases[0]
@@ -2856,17 +3035,17 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
     if($upToDate){ [void]$log.Add('The installed engine matches the latest release (up to date) - the dialog also offers changelogs and backup restore') }
     # Check the model sources at the same time (metadata only - no multi-GB
     # downloads): remote LFS size vs local file size per known source.
-    $modelInfos=@(Get-MossModelUpdateInfo)
-    $script:MossDlgModels=@($modelInfos | Where-Object { $_.Status -eq 'update available' -or $_.Status -eq 'not installed' })
+    $modelInfos=@(Get-SgModelUpdateInfo)
+    $script:SgDlgModels=@($modelInfos | Where-Object { $_.Status -eq 'update available' -or $_.Status -eq 'not installed' })
     $modelFailed=@($modelInfos | Where-Object { $_.Status -eq 'check failed' -or $_.Status -eq 'no matching file at the source' })
-    [void]$log.Add(('Model check: '+$modelInfos.Count+' known sources, '+$script:MossDlgModels.Count+' need attention'))
+    [void]$log.Add(('Model check: '+$modelInfos.Count+' known sources, '+$script:SgDlgModels.Count+' need attention'))
     foreach($mi in $modelInfos){ [void]$log.Add(('Model '+$mi.Name+': '+$mi.Status)) }
     # The download speed for the time estimate, from the CACHE only.
     # v0.2.3: this used to MEASURE the speed (a 6 MB download) as soon as
     # the dialog opened - even when the user only wanted to LOOK and closed
     # the dialog again. The real probe now runs only just before a download
     # is actually confirmed.
-    $measuredSpeed=Get-MossCachedDownloadSpeed
+    $measuredSpeed=Get-SgCachedDownloadSpeed
     if($measuredSpeed -gt 0){ [void]$log.Add(('Measured download speed: '+[math]::Round($measuredSpeed,1)+' MB/s')) } else { [void]$log.Add('Download speed could not be measured') }
 
     # Dialog: release list + changelog reader + variant selection + installer.
@@ -2889,7 +3068,7 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
     $listLabel=New-Object System.Windows.Forms.Label; $listLabel.Text='RECENT RELEASES (select one to read its changelog)'; $listLabel.Location=New-Object System.Drawing.Point(12,140); $listLabel.Size=New-Object System.Drawing.Size(330,20); $listLabel.ForeColor=$cMuted; $g.Controls.Add($listLabel)
     $releaseList=New-Object System.Windows.Forms.ListBox; $releaseList.Location=New-Object System.Drawing.Point(12,162); $releaseList.Size=New-Object System.Drawing.Size(330,176); $releaseList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $releaseList.ForeColor=$cText; $releaseList.BorderStyle='FixedSingle'; $g.Controls.Add($releaseList)
     $notesLabel=New-Object System.Windows.Forms.Label; $notesLabel.Text='RELEASE NOTES / CHANGELOG'; $notesLabel.Location=New-Object System.Drawing.Point(356,140); $notesLabel.Size=New-Object System.Drawing.Size(330,20); $notesLabel.ForeColor=$cMuted; $g.Controls.Add($notesLabel)
-    $notes=New-Object System.Windows.Forms.TextBox; $notes.Multiline=$true; $notes.ReadOnly=$true; $notes.ScrollBars='Vertical'; $notes.WordWrap=$true; $notes.Location=New-Object System.Drawing.Point(356,162); $notes.Size=New-Object System.Drawing.Size(346,176); $notes.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $notes.ForeColor=$cText; $notes.BorderStyle='FixedSingle'; $notes.Font=New-Object System.Drawing.Font('Consolas',8); $g.Controls.Add($notes)
+    $notes=New-Object System.Windows.Forms.TextBox; $notes.Multiline=$true; $notes.ReadOnly=$true; $notes.ScrollBars='Vertical'; $notes.WordWrap=$true; $notes.TabStop=$false; $notes.Location=New-Object System.Drawing.Point(356,162); $notes.Size=New-Object System.Drawing.Size(346,176); $notes.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $notes.ForeColor=$cText; $notes.BorderStyle='FixedSingle'; $notes.Font=New-Object System.Drawing.Font('Consolas',8); $g.Controls.Add($notes)
     foreach($rel in $releases){ $relDate=$(if($rel.published_at){([datetime]$rel.published_at).ToString('yyyy-MM-dd')}else{'?'}); [void]$releaseList.Items.Add(([string]$rel.tag_name+'   ('+$relDate+')')) }
     $releaseList.SelectedIndex=0
     $showNotes={
@@ -2909,16 +3088,16 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
     $releaseList.Add_SelectedIndexChanged($showNotes)
     & $showNotes
     $variantLabel=New-Object System.Windows.Forms.Label; $variantLabel.Text='ENGINE VARIANT (what your current engine becomes)'; $variantLabel.Location=New-Object System.Drawing.Point(12,344); $variantLabel.Size=New-Object System.Drawing.Size(400,20); $variantLabel.ForeColor=$cMuted; $g.Controls.Add($variantLabel)
-    $variant=[System.Windows.Forms.ComboBox]::new();; $variant.DropDownStyle='DropDownList';; $variant.Location=New-Object System.Drawing.Point(12,364); $variant.Size=New-Object System.Drawing.Size(280,26); $variant.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $variant.ForeColor=$cText; $g.Controls.Add($variant); Set-MossComboTheme $variant $g
+    $variant=[System.Windows.Forms.ComboBox]::new();; $variant.DropDownStyle='DropDownList';; $variant.Location=New-Object System.Drawing.Point(12,364); $variant.Size=New-Object System.Drawing.Size(280,26); $variant.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $variant.ForeColor=$cText; $g.Controls.Add($variant); Set-SgComboTheme $variant $g
     # The CUDA versions offered are read from the selected release itself, so
     # cuda11 / cuda12 / a future cuda13 all appear automatically. The driver's
     # own CUDA capability is read from nvidia-smi so Auto can pick a build the
     # driver can actually run.
-    $script:MossDlgDriverCuda=''
+    $script:SgDlgDriverCuda=''
     try {
         $smiCmd=Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue
         if(-not $smiCmd){ foreach($smiCand in @("$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe","$env:WINDIR\System32\nvidia-smi.exe")){ if(Test-Path -LiteralPath $smiCand){ $smiCmd=$smiCand; break } } }
-        if($smiCmd){ $smiOut=(& $smiCmd 2>&1 | Out-String); if($smiOut -match 'CUDA Version:\s*([0-9]+\.[0-9]+)'){ $script:MossDlgDriverCuda=$Matches[1] } }
+        if($smiCmd){ $smiOut=(& $smiCmd 2>&1 | Out-String); if($smiOut -match 'CUDA Version:\s*([0-9]+\.[0-9]+)'){ $script:SgDlgDriverCuda=$Matches[1] } }
     } catch {}
     $variantDesc=New-Object System.Windows.Forms.Label; $variantDesc.Location=New-Object System.Drawing.Point(306,364); $variantDesc.Size=New-Object System.Drawing.Size(396,44); $variantDesc.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $g.Controls.Add($variantDesc)
     $extraLabel=New-Object System.Windows.Forms.Label; $extraLabel.Text='ALSO MAKE AVAILABLE - extra variants in their own folders (switch later via Hardware / Setup):'; $extraLabel.Location=New-Object System.Drawing.Point(12,414); $extraLabel.Size=New-Object System.Drawing.Size(690,16); $extraLabel.ForeColor=$cMuted; $g.Controls.Add($extraLabel)
@@ -2939,13 +3118,13 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
                 if($cands.Count -gt 0){
                     $detail='NVIDIA GPU detected'
                     $pick=$null
-                    if($script:MossDlgDriverCuda){
+                    if($script:SgDlgDriverCuda){
                         $dMaj=0
-                        try { $dMaj=[int](([string]$script:MossDlgDriverCuda).Split('.')[0]) } catch { $dMaj=0 }
+                        try { $dMaj=[int](([string]$script:SgDlgDriverCuda).Split('.')[0]) } catch { $dMaj=0 }
                         foreach($c in $cands){ $cMaj=0; try { $cMaj=[int]($c.Substring(4).Split('.')[0]) } catch { $cMaj=0 }; if($cMaj -le $dMaj){ $pick=$c; break } }
-                        if($pick){ $detail=('NVIDIA GPU detected - newest CUDA build your driver (up to CUDA '+$script:MossDlgDriverCuda+') supports') }
+                        if($pick){ $detail=('NVIDIA GPU detected - newest CUDA build your driver (up to CUDA '+$script:SgDlgDriverCuda+') supports') }
                     }
-                    if(-not $pick){ $pick=$cands[0]; if(-not $script:MossDlgDriverCuda){ $detail='NVIDIA GPU detected - newest CUDA build in this release (driver capability unreadable)' } }
+                    if(-not $pick){ $pick=$cands[0]; if(-not $script:SgDlgDriverCuda){ $detail='NVIDIA GPU detected - newest CUDA build in this release (driver capability unreadable)' } }
                     $key=$pick
                 } else { $detail='NVIDIA GPU detected, but this release ships no CUDA build - Vulkan' }
             }
@@ -2955,15 +3134,15 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
     $syncInstallOptions={
         $vIdxNow=$variant.SelectedIndex
         $primaryNow='auto'
-        if($vIdxNow -ge 0 -and $vIdxNow -lt $script:MossDlgKeys.Count){ $primaryNow=[string]$script:MossDlgKeys[$vIdxNow] }
+        if($vIdxNow -ge 0 -and $vIdxNow -lt $script:SgDlgKeys.Count){ $primaryNow=[string]$script:SgDlgKeys[$vIdxNow] }
         $detailNow=''
-        if($primaryNow -eq 'auto'){ $r=& $resolveAuto $script:MossDlgConcrete; $primaryNow=[string]$r[0]; $detailNow=[string]$r[1] }
+        if($primaryNow -eq 'auto'){ $r=& $resolveAuto $script:SgDlgConcrete; $primaryNow=[string]$r[0]; $detailNow=[string]$r[1] }
         $desc=''
         if($vIdxNow -eq 0){
             $desc=('Auto picks '+(& $variantLabelOf $primaryNow)+' - '+$detailNow+'.')
         } elseif($primaryNow -like 'cuda*'){
             $desc=('For NVIDIA cards using CUDA '+$primaryNow.Substring(4)+' - the fastest option.')
-            if($script:MossDlgDriverCuda){ $desc+=(' Your driver supports up to CUDA '+$script:MossDlgDriverCuda+' - a higher CUDA build may not start on it.') } else { $desc+=' The driver CUDA version could not be read - if the engine fails to start, pick a lower CUDA version or Vulkan.' }
+            if($script:SgDlgDriverCuda){ $desc+=(' Your driver supports up to CUDA '+$script:SgDlgDriverCuda+' - a higher CUDA build may not start on it.') } else { $desc+=' The driver CUDA version could not be read - if the engine fails to start, pick a lower CUDA version or Vulkan.' }
         } else {
             switch($primaryNow){
                 'vulkan' { $desc='Runs on almost any modern GPU - NVIDIA, AMD and Intel. Slightly slower than a native CUDA build, but the most compatible choice.' }
@@ -2973,8 +3152,8 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
             }
         }
         $variantDesc.Text=$desc
-        foreach($k in @($script:MossDlgConcrete)){
-            $cb=$script:MossDlgExtras[$k]
+        foreach($k in @($script:SgDlgConcrete)){
+            $cb=$script:SgDlgExtras[$k]
             if($null -eq $cb){ continue }
             if($k -eq $primaryNow){ $cb.Enabled=$false; $cb.Checked=$false } else { $cb.Enabled=$true }
         }
@@ -2984,9 +3163,9 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
     }
     # v0.3.5: NVIDIA-only defaults. An NVIDIA card never runs AMD ROCm
     # engine files, so default to filtering them out when NVIDIA is detected.
-    $script:MossHasNvidia=$false
-    try { $script:MossHasNvidia=(@(Get-GpuInventory | Where-Object { -not $_.IsVirtual -and $_.Vendor -eq 'NVIDIA' }).Count -gt 0) } catch {}
-    $script:MossNvidiaOnly=[bool]$script:MossHasNvidia
+    $script:SgHasNvidia=$false
+    try { $script:SgHasNvidia=(@(Get-GpuInventory | Where-Object { -not $_.IsVirtual -and $_.Vendor -eq 'NVIDIA' }).Count -gt 0) } catch {}
+    $script:SgNvidiaOnly=[bool]$script:SgHasNvidia
     $syncVariantCombo={
         if($releaseList.SelectedIndex -lt 0 -or $releaseList.SelectedIndex -ge $releases.Count){ return }
         $rel=$releases[$releaseList.SelectedIndex]
@@ -2998,15 +3177,15 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
         if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-vulkan-x64.zip' }).Count -gt 0){ $concrete+='vulkan' }
         # v0.3.5: with NVIDIA-only on, the AMD ROCm packages are filtered out
         # entirely (an ROCm engine can never run on an NVIDIA card).
-        if(-not $script:MossNvidiaOnly){
+        if(-not $script:SgNvidiaOnly){
             if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-rocm*' }).Count -gt 0){ $concrete+='rocm' }
         } else {
             [void]$log.Add('NVIDIA-only mode: AMD ROCm engine packages are not offered or downloaded.')
         }
         if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-sycl*' }).Count -gt 0){ $concrete+='sycl' }
         if(@($rel.assets | Where-Object { [string]$_.name -like '*bin-win-cpu-x64.zip' }).Count -gt 0){ $concrete+='cpu' }
-        $script:MossDlgConcrete=$concrete
-        $script:MossDlgKeys=@('auto')+$concrete
+        $script:SgDlgConcrete=$concrete
+        $script:SgDlgKeys=@('auto')+$concrete
         $variant.Items.Clear()
         [void]$variant.Items.Add('Auto (recommended for my hardware)')
         foreach($k in $concrete){ [void]$variant.Items.Add((& $variantLabelOf $k)) }
@@ -3017,11 +3196,11 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
         # NVIDIA card, so with this on the AMD packages are not even offered
         # (nothing downloads that the user has no reason to want). Default ON
         # when an NVIDIA GPU was detected.
-        if($script:MossHasNvidia){
-            $nvCb=New-Object System.Windows.Forms.CheckBox; $nvCb.Text='NVIDIA only - skip AMD (ROCm) packages (not needed for NVIDIA)'; $nvCb.AutoSize=$true; $nvCb.Checked=$script:MossNvidiaOnly; $nvCb.ForeColor=$cMuted
+        if($script:SgHasNvidia){
+            $nvCb=New-Object System.Windows.Forms.CheckBox; $nvCb.Text='NVIDIA only - skip AMD (ROCm) packages (not needed for NVIDIA)'; $nvCb.AutoSize=$true; $nvCb.Checked=$script:SgNvidiaOnly; $nvCb.ForeColor=$cMuted
             $tip.SetToolTip($nvCb,'AMD ROCm engine files only run on AMD GPUs. On your NVIDIA card they would never be used, so with this checked they are never downloaded, shown or installed. Vulkan (any GPU) and Intel SYCL stay available.')
             $nvCb.Add_CheckedChanged({
-                if($script:MossNvidiaOnly -ne $nvCb.Checked){ $script:MossNvidiaOnly=$nvCb.Checked; & $syncVariantCombo }
+                if($script:SgNvidiaOnly -ne $nvCb.Checked){ $script:SgNvidiaOnly=$nvCb.Checked; & $syncVariantCombo }
             })
             [void]$extraFlow.Controls.Add($nvCb)
         }
@@ -3031,53 +3210,53 @@ function Show-MossEngineUpdateDialog([System.Windows.Forms.Form]$Owner=$null,[st
             [void]$extraFlow.Controls.Add($cb)
             $newExtras[$k]=$cb
         }
-        $script:MossDlgExtras=$newExtras
+        $script:SgDlgExtras=$newExtras
         & $syncInstallOptions
     }
     $releaseList.Add_SelectedIndexChanged({ & $syncVariantCombo })
     & $syncVariantCombo
     # MODELS section: only models that need attention are listed (updates
     # available or not installed); up-to-date models do not appear.
-    $modelsLabelText=$(if($script:MossDlgModels.Count -gt 0){'MODELS - '+$script:MossDlgModels.Count+' update(s) available (checked = download and install):'}else{'MODELS - all known models are up to date.'})
+    $modelsLabelText=$(if($script:SgDlgModels.Count -gt 0){'MODELS - '+$script:SgDlgModels.Count+' update(s) available (checked = download and install):'}else{'MODELS - all known models are up to date.'})
     if($modelFailed.Count -gt 0){ $modelsLabelText+=' (some sources could not be checked - offline?)' }
     $modelsLabel=New-Object System.Windows.Forms.Label; $modelsLabel.Text=$modelsLabelText; $modelsLabel.Location=New-Object System.Drawing.Point(12,470); $modelsLabel.Size=New-Object System.Drawing.Size(690,16); $modelsLabel.ForeColor=$cMuted; $g.Controls.Add($modelsLabel)
     $modelsList=New-Object System.Windows.Forms.CheckedListBox; $modelsList.Location=New-Object System.Drawing.Point(12,488); $modelsList.Size=New-Object System.Drawing.Size(690,64); $modelsList.CheckOnClick=$true; $modelsList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $modelsList.ForeColor=$cText; $modelsList.BorderStyle='FixedSingle'
-    foreach($mi in $script:MossDlgModels){
-        [void]$modelsList.Items.Add(($mi.Name+'   ('+(Format-MossModelSize $mi.RemoteSize)+' download'+$(if($mi.Status -eq 'update available'){', update'}else{', new install'})+')'))
+    foreach($mi in $script:SgDlgModels){
+        [void]$modelsList.Items.Add(($mi.Name+'   ('+(Format-SgModelSize $mi.RemoteSize)+' download'+$(if($mi.Status -eq 'update available'){', update'}else{', new install'})+')'))
         $modelsList.SetItemChecked($modelsList.Items.Count-1,$true)
     }
-    $modelsList.Visible=($script:MossDlgModels.Count -gt 0)
+    $modelsList.Visible=($script:SgDlgModels.Count -gt 0)
     $g.Controls.Add($modelsList)
-    $modelBackupCheck=New-Object System.Windows.Forms.CheckBox; $modelBackupCheck.Text='Back up the old model files first (renamed to <name>.old-<time> - instant; the newest 3 backups are kept)'; $modelBackupCheck.Location=New-Object System.Drawing.Point(12,590); $modelBackupCheck.Size=New-Object System.Drawing.Size(690,22); $modelBackupCheck.ForeColor=$cMuted; $modelBackupCheck.Visible=($script:MossDlgModels.Count -gt 0); $modelBackupCheck.Checked=$true; $g.Controls.Add($modelBackupCheck)
+    $modelBackupCheck=New-Object System.Windows.Forms.CheckBox; $modelBackupCheck.Text='Back up the old model files first (renamed to <name>.old-<time> - instant; the newest 3 backups are kept)'; $modelBackupCheck.Location=New-Object System.Drawing.Point(12,590); $modelBackupCheck.Size=New-Object System.Drawing.Size(690,22); $modelBackupCheck.ForeColor=$cMuted; $modelBackupCheck.Visible=($script:SgDlgModels.Count -gt 0); $modelBackupCheck.Checked=$true; $g.Controls.Add($modelBackupCheck)
     # v0.3.4: MODEL PRECISION - choose how the diffusion model and the text
     # encoder LLM are quantized. Changing it repopulates the MODELS list
     # above; the existing download/install machinery fetches exactly the
     # files that differ from the local ones and repoints the settings.
-    $script:MossDlgVariant='quantized'
-    if(@('quantized','q8','bf16') -contains $Preselect){ $script:MossDlgVariant=$Preselect }
+    $script:SgDlgVariant='quantized'
+    if(@('quantized','q8','bf16') -contains $Preselect){ $script:SgDlgVariant=$Preselect }
     else {
         try {
             $llmName=[System.IO.Path]::GetFileName([string]$script:Settings['LlmPath'])
-            if($llmName -like '*BF16*'){ $script:MossDlgVariant='bf16' } elseif($llmName -like '*Q8_0*'){ $script:MossDlgVariant='q8' }
+            if($llmName -like '*BF16*'){ $script:SgDlgVariant='bf16' } elseif($llmName -like '*Q8_0*'){ $script:SgDlgVariant='q8' }
         } catch {}
     }
     $precLabel=New-Object System.Windows.Forms.Label; $precLabel.Text='MODEL PRECISION:'; $precLabel.Location=New-Object System.Drawing.Point(12,564); $precLabel.Size=New-Object System.Drawing.Size(110,20); $precLabel.ForeColor=$cMuted; $g.Controls.Add($precLabel)
-    $precCombo=New-Object System.Windows.Forms.ComboBox;; $precCombo.DropDownStyle='DropDownList'; $precCombo.Location=New-Object System.Drawing.Point(126,560); $precCombo.Size=New-Object System.Drawing.Size(240,26); $precCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $precCombo.ForeColor=$cText; $g.Controls.Add($precCombo); Set-MossComboTheme $precCombo $g
+    $precCombo=New-Object System.Windows.Forms.ComboBox;; $precCombo.DropDownStyle='DropDownList'; $precCombo.Location=New-Object System.Drawing.Point(126,560); $precCombo.Size=New-Object System.Drawing.Size(240,26); $precCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $precCombo.ForeColor=$cText; $g.Controls.Add($precCombo); Set-SgComboTheme $precCombo $g
     [void]$precCombo.Items.Add('Quantized  (default, ~11 GB)')
     [void]$precCombo.Items.Add('High quality - Q8 LLM  (~15 GB)')
     [void]$precCombo.Items.Add('Full 16-bit BF16  (~28 GB)')
-    $precCombo.SelectedIndex = $(switch($script:MossDlgVariant){ 'bf16' {2} 'q8' {1} default {0} })
+    $precCombo.SelectedIndex = $(switch($script:SgDlgVariant){ 'bf16' {2} 'q8' {1} default {0} })
     $precHelp=Add-Button $g 'Precision?' 380 556 100 28
-    $modelsOnlyBtn=Add-Button $g 'Download models only...' 492 556 210 28; $modelsOnlyBtn.AccessibleName='Download only the selected precision model files'; $modelsOnlyBtn.Enabled=($script:MossDlgModels.Count -gt 0)
+    $modelsOnlyBtn=Add-Button $g 'Download models only...' 492 556 210 28; $modelsOnlyBtn.AccessibleName='Download only the selected precision model files'; $modelsOnlyBtn.Enabled=($script:SgDlgModels.Count -gt 0)
     $tip.SetToolTip($modelsOnlyBtn,'Downloads only checked missing/updated model files. Keep both required model files checked to switch precision. The installed NVIDIA/CUDA, AMD/ROCm, Intel/SYCL or other engine runtime is not downloaded or changed.')
     $modelsOnlyBtn.Add_Click({
-        $selectedVariant=[string]$script:MossDlgVariant
+        $selectedVariant=[string]$script:SgDlgVariant
         $selectedModels=@()
         foreach($idx in $modelsList.CheckedIndices){
-            if($idx -ge 0 -and $idx -lt $script:MossDlgModels.Count){ $selectedModels+=,$script:MossDlgModels[$idx] }
+            if($idx -ge 0 -and $idx -lt $script:SgDlgModels.Count){ $selectedModels+=,$script:SgDlgModels[$idx] }
         }
         $g.Hide()
-        try { Show-MossModelVariantDownload $Owner $selectedVariant $selectedModels } finally { $g.Close() }
+        try { Show-SgModelVariantDownload $Owner $selectedVariant $selectedModels } finally { $g.Close() }
     })
     $tip.SetToolTip($precCombo,'How the diffusion model and text encoder are stored: quantized (small, fast) or full 16-bit BF16 (best quality, ~28 GB, needs model offloading on a 12 GB GPU).')
     $precHelp.Add_Click({
@@ -3098,45 +3277,91 @@ Switching downloads only the files that are not already on disk and updates the 
     })
     $precCombo.Add_SelectedIndexChanged({
         $newVar = $(switch($precCombo.SelectedIndex){ 2 {'bf16'} 1 {'q8'} default {'quantized'} })
-        if($newVar -eq $script:MossDlgVariant){ return }
+        if($newVar -eq $script:SgDlgVariant){ return }
         $precCombo.Enabled=$false
         try {
             $g.Cursor=[System.Windows.Forms.Cursors]::WaitCursor
-            $script:MossDlgVariant=$newVar
-            $allInfos=@(Get-MossModelUpdateInfo $newVar)
-            $script:MossDlgModels=@($allInfos | Where-Object { $_.Status -eq 'update available' -or $_.Status -eq 'not installed' })
+            $script:SgDlgVariant=$newVar
+            $allInfos=@(Get-SgModelUpdateInfo $newVar)
+            $script:SgDlgModels=@($allInfos | Where-Object { $_.Status -eq 'update available' -or $_.Status -eq 'not installed' })
             $modelsList.Items.Clear()
-            foreach($mi in $script:MossDlgModels){
-                [void]$modelsList.Items.Add(($mi.Name+'   ('+(Format-MossModelSize $mi.RemoteSize)+' download'+$(if($mi.Status -eq 'update available'){', update'}else{', new install'})+')'))
+            foreach($mi in $script:SgDlgModels){
+                [void]$modelsList.Items.Add(($mi.Name+'   ('+(Format-SgModelSize $mi.RemoteSize)+' download'+$(if($mi.Status -eq 'update available'){', update'}else{', new install'})+')'))
                 $modelsList.SetItemChecked($modelsList.Items.Count-1,$true)
             }
-            $modelsList.Visible=($script:MossDlgModels.Count -gt 0)
-            $modelBackupCheck.Visible=($script:MossDlgModels.Count -gt 0)
-            $modelsLabel.Text=$(if($script:MossDlgModels.Count -gt 0){'MODELS - '+$script:MossDlgModels.Count+' file(s) of the selected precision are missing (checked = download and install):'}else{'MODELS - all files of the selected precision are already on disk.'})
-            $modelsOnlyBtn.Enabled=($script:MossDlgModels.Count -gt 0)
+            $modelsList.Visible=($script:SgDlgModels.Count -gt 0)
+            $modelBackupCheck.Visible=($script:SgDlgModels.Count -gt 0)
+            $modelsLabel.Text=$(if($script:SgDlgModels.Count -gt 0){'MODELS - '+$script:SgDlgModels.Count+' file(s) of the selected precision are missing (checked = download and install):'}else{'MODELS - all files of the selected precision are already on disk.'})
+            $modelsOnlyBtn.Enabled=($script:SgDlgModels.Count -gt 0)
         } catch { $modelsOnlyBtn.Enabled=$false; $modelsLabel.Text=('The precision check failed: '+$_.Exception.Message) }
         finally { $g.Cursor=[System.Windows.Forms.Cursors]::Default; $precCombo.Enabled=$true }
     })
     $installBtn=New-Object System.Windows.Forms.Button; $installBtn.Text='Download and install...'; $installBtn.Location=New-Object System.Drawing.Point(12,618); $installBtn.Size=New-Object System.Drawing.Size(180,32); $installBtn.FlatStyle='Flat'; $installBtn.BackColor=[System.Drawing.Color]::FromArgb(45,112,173); $installBtn.ForeColor=[System.Drawing.Color]::White; $g.Controls.Add($installBtn)
     $restoreBtn=New-Object System.Windows.Forms.Button; $restoreBtn.Text='Restore a backup...'; $restoreBtn.Location=New-Object System.Drawing.Point(202,618); $restoreBtn.Size=New-Object System.Drawing.Size(150,32); $restoreBtn.FlatStyle='Flat'; $restoreBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $restoreBtn.ForeColor=$cText; $g.Controls.Add($restoreBtn)
     $pageBtn=New-Object System.Windows.Forms.Button; $pageBtn.Text='Open releases page'; $pageBtn.Location=New-Object System.Drawing.Point(362,618); $pageBtn.Size=New-Object System.Drawing.Size(150,32); $pageBtn.FlatStyle='Flat'; $pageBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $pageBtn.ForeColor=$cText; $g.Controls.Add($pageBtn)
-    # v0.3.3: when only SOME engine files are lost, offer an instant local
-    # repair from the per-commit cache zip instead of a full 437 MB download.
-    $script:MossDlgRepair=$null
-    try { $script:MossDlgRepair=Get-MossEngineCacheInfo $engineBin } catch { $script:MossDlgRepair=$null }
-    $repairBtn=New-Object System.Windows.Forms.Button; $repairBtn.Text='Repair files...'; $repairBtn.Location=New-Object System.Drawing.Point(522,618); $repairBtn.Size=New-Object System.Drawing.Size(100,32); $repairBtn.FlatStyle='Flat'; $repairBtn.BackColor=[System.Drawing.Color]::FromArgb(39,90,61); $repairBtn.ForeColor=[System.Drawing.Color]::White; $repairBtn.Visible=($null -ne $script:MossDlgRepair); $g.Controls.Add($repairBtn)
-    if($script:MossDlgRepair){
-        $repInfo=$script:MossDlgRepair
-        $status.Text=('SMART REPAIR AVAILABLE: '+$repInfo.Missing.Count+' engine file(s) missing ('+(($repInfo.Missing | Select-Object -First 3) -join ', ')+$(if($repInfo.Missing.Count -gt 3){', ...'}else{''})+') and the local cache zip for commit '+$repInfo.Commit+' has them. Use Repair files... - no download needed.')
-    }
+    # v0.3.45: activity indicator shown while an install is running - the
+    # marquee keeps moving whenever messages are pumped, so the user can see
+    # at a glance that work continues (the dialog also stays responsive now).
+    $busyBar=New-Object System.Windows.Forms.ProgressBar; $busyBar.Style='Marquee'; $busyBar.MarqueeAnimationSpeed=25; $busyBar.Location=New-Object System.Drawing.Point(12,710); $busyBar.Size=New-Object System.Drawing.Size(690,6); $busyBar.Visible=$false; $g.Controls.Add($busyBar)
+    # v0.3.3 (fixed v0.3.45): when only SOME engine files are lost, offer an
+    # instant local repair from the per-commit cache zip instead of a full
+    # download. The cache must belong to the INSTALLED commit - repairing
+    # from a different commit would create a mixed-version engine.
+    $script:SgDlgRepair=$null
+    try { $script:SgDlgRepair=Get-SgEngineCacheInfo $engineBin } catch { $script:SgDlgRepair=$null }
     $closeBtn=New-Object System.Windows.Forms.Button; $closeBtn.Text='Close'; $closeBtn.Location=New-Object System.Drawing.Point(630,618); $closeBtn.Size=New-Object System.Drawing.Size(80,32); $closeBtn.FlatStyle='Flat'; $closeBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $closeBtn.ForeColor=$cText; $g.Controls.Add($closeBtn)
     $status=New-Object System.Windows.Forms.Label; $status.Location=New-Object System.Drawing.Point(12,658); $status.Size=New-Object System.Drawing.Size(690,50); $status.ForeColor=$cMuted; $status.Text='Pick a release above to read its changelog. Engine files and models are checked at the same time; the current engine files are backed up before anything changes; models are only touched when you select a model update. Use Restore a backup... to roll back the engine.'; $g.Controls.Add($status)
+    $repairBtn=New-Object System.Windows.Forms.Button; $repairBtn.Text='Repair files...'; $repairBtn.Location=New-Object System.Drawing.Point(522,618); $repairBtn.Size=New-Object System.Drawing.Size(100,32); $repairBtn.FlatStyle='Flat'; $repairBtn.BackColor=[System.Drawing.Color]::FromArgb(39,51,69); $repairBtn.ForeColor=$cText; $repairBtn.Visible=($null -ne $script:SgDlgRepair -and [string]$script:SgDlgRepair.Commit -eq [string]$installedCommit); $g.Controls.Add($repairBtn)
+    if($script:SgDlgRepair){
+        $repInfo=$script:SgDlgRepair
+        if([string]$repInfo.Commit -eq [string]$installedCommit){
+            $status.Text=('SMART REPAIR AVAILABLE: '+$repInfo.Missing.Count+' engine file(s) missing ('+(($repInfo.Missing | Select-Object -First 3) -join ', ')+$(if($repInfo.Missing.Count -gt 3){', ...'}else{''})+') and the local cache zip for commit '+$repInfo.Commit+' has them. Use Repair files... - no download needed.')
+        } else {
+            $status.Text=('Some engine file(s) are missing, but the local cache zip is for commit '+$repInfo.Commit+' while commit '+$installedCommit+' is installed - repairing from it would mix versions, so Repair files... is hidden. Use Download and install... instead.')
+        }
+    }
     $pageBtn.Add_Click({ try { Start-Process 'https://github.com/leejet/stable-diffusion.cpp/releases' } catch { [System.Windows.Forms.MessageBox]::Show($g,'The releases page could not be opened. Visit github.com/leejet/stable-diffusion.cpp and open Releases.','Engine update')|Out-Null } })
-    $closeBtn.Add_Click({$g.Close()})
-    $restoreBtn.Add_Click({ Show-MossEngineBackupRestore $g $enginePath $engineBin $log $stamp })
+    $closeBtn.Add_Click({
+        if($script:SgEngineUpdateBusy){
+            if([System.Windows.Forms.MessageBox]::Show($g,'Cancel the engine update? If engine files were already replaced, the previous engine will be restored from the backup before the dialog returns.','Cancel engine update',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question) -ne [System.Windows.Forms.DialogResult]::Yes){ return }
+            $script:SgEngineUpdateCancel=$true
+            # v0.3.45 (fix): the button is about to be disabled while it holds
+            # focus; the framework then moves focus to the next tab-stop and
+            # that was the release-notes box, which selects ALL its text when
+            # it receives activation focus. Send focus to the neutral release
+            # list explicitly instead.
+            try { $g.ActiveControl=$releaseList } catch {}
+            Set-SgButtonText $closeBtn 'Cancelling...'; $closeBtn.Enabled=$false
+            return
+        }
+        $g.Close()
+    })
+    $g.Add_FormClosing({
+        if($script:SgEngineUpdateBusy){
+            $_.Cancel=$true
+            try { $closeBtn.PerformClick() } catch {}
+        }
+    })
+    # v0.3.45 (fix): when a modal (Cancel confirm / failed notice) closes, the
+    # form re-activates - and a .NET Framework TextBox that receives focus as
+    # part of form activation gets its WHOLE text selected (same as tab
+    # focus). The release-notes box lit up fully after every cancel/click on
+    # a message box. On every activation: if the notes box holds focus,
+    # collapse its selection and move focus to the neutral release list.
+    $g.Add_Activated({
+        try {
+            if($notes.Focused){ $notes.Select(0,0); [void]$releaseList.Focus() }
+        } catch {}
+    })
+    $restoreBtn.Add_Click({ Show-SgEngineBackupRestore $g $enginePath $engineBin $log $stamp })
     $repairBtn.Add_Click({
-        $rep=$script:MossDlgRepair
+        $rep=$script:SgDlgRepair
         if(-not $rep){ return }
+        # v0.3.45 (fix): same guard as Restore a backup - never write engine
+        # files while an engine process is live (sharing violations / partial
+        # repair mid-generation).
+        $busyR=@(Get-Process -Name 'sd-cli','sd-server' -ErrorAction SilentlyContinue)
+        if($busyR.Count -gt 0){ [System.Windows.Forms.MessageBox]::Show($g,'sd-cli or sd-server is currently running. Wait for it to finish before repairing engine files.','Engine repair',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null; return }
         try {
             $fixed=@()
             $archiveR=[System.IO.Compression.ZipFile]::OpenRead([string]$rep.ZipPath)
@@ -3149,11 +3374,11 @@ Switching downloads only the files that are not already on disk and updates the 
                     $fixed+=$nR
                 }
             } finally { $archiveR.Dispose() }
-            $vOut=Get-MossEngineVersionOutput $enginePath
+            $vOut=Get-SgEngineVersionOutput $enginePath
             if([string]::IsNullOrWhiteSpace($vOut)){ throw 'The missing files were restored, but sd-cli.exe still does not start (no version output). The engine may need a different variant - use Download and install... instead.' }
             [void]$log.Add(('Smart repair: restored '+$fixed.Count+' file(s) from local cache zip '+$rep.ZipPath+': '+(($fixed | Sort-Object) -join ', ')))
             $repairBtn.Visible=$false
-            $script:MossDlgRepair=$null
+            $script:SgDlgRepair=$null
             [System.Windows.Forms.MessageBox]::Show($g,("Repair complete - no download was needed.`r`n`r`nRestored from the local cache (commit "+$rep.Commit+"):`r`n  "+(($fixed | Sort-Object) -join "`r`n  ")+"`r`n`r`nEngine check: "+$vOut),'Engine repaired',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
         } catch {
             [void]$log.Add(('ERROR in smart repair: '+$_.Exception.Message))
@@ -3182,7 +3407,7 @@ Switching downloads only the files that are not already on disk and updates the 
         $vIdx=$variant.SelectedIndex
         $primaryKey=''
         if($vIdx -le 0){ $r=& $resolveAuto $availKeys; $primaryKey=[string]$r[0] }
-        else { $primaryKey=[string]$script:MossDlgKeys[$vIdx]; if($availKeys -notcontains $primaryKey){
+        else { $primaryKey=[string]$script:SgDlgKeys[$vIdx]; if($availKeys -notcontains $primaryKey){
             [void]$log.Add(('ERROR: '+$primaryKey+' not available in release '+$relTag))
             $availText=(($availKeys | ForEach-Object { & $variantLabelOf $_ }) -join ', ')
             [System.Windows.Forms.MessageBox]::Show($g,("The selected release does not include a build for {0}.`r`nThis release offers: {1}`r`nChoose another release or pick one of the available variants." -f (& $variantLabelOf $primaryKey),$availText),'Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
@@ -3193,7 +3418,7 @@ Switching downloads only the files that are not already on disk and updates the 
         # one, so several engines can coexist (switch via Hardware / Setup).
         $extras=@()
         foreach($k in $availKeys){
-            $cb=$script:MossDlgExtras[$k]
+            $cb=$script:SgDlgExtras[$k]
             if($null -ne $cb -and $cb.Enabled -and $cb.Checked -and $k -ne $primaryKey){ $extras+=$k }
         }
         $enginesRoot=Join-Path ([System.IO.Path]::GetDirectoryName($engineBin)) 'engines'
@@ -3249,10 +3474,10 @@ Switching downloads only the files that are not already on disk and updates the 
         # after the engine update succeeds. Sizes warn the user; the old
         # files are renamed (instant) or overwritten per the checkbox.
         $modelPlan=@()
-        foreach($idx in @($modelsList.CheckedIndices)){ if($idx -lt $script:MossDlgModels.Count){ $modelPlan+=$script:MossDlgModels[$idx] } }
+        foreach($idx in @($modelsList.CheckedIndices)){ if($idx -lt $script:SgDlgModels.Count){ $modelPlan+=$script:SgDlgModels[$idx] } }
         $modelsTotal=0
         foreach($mi in $modelPlan){ if($mi.RemoteSize -gt 0){ $modelsTotal+=$mi.RemoteSize } }
-        if($modelPlan.Count -gt 0){ [void]$log.Add(('Models to update: '+(($modelPlan | ForEach-Object { $_.Name }) -join ', ')+' ('+(Format-MossModelSize $modelsTotal)+' total)')) }
+        if($modelPlan.Count -gt 0){ [void]$log.Add(('Models to update: '+(($modelPlan | ForEach-Object { $_.Name }) -join ', ')+' ('+(Format-SgModelSize $modelsTotal)+' total)')) }
         # Disk space pre-check: download + unpack + backup must fit on both
         # the temp drive and the drive holding the engine/models, or the
         # install would fail halfway through replacing files.
@@ -3265,8 +3490,8 @@ Switching downloads only the files that are not already on disk and updates the 
         try { $freeTemp=(New-Object System.IO.DriveInfo([System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath()))).AvailableFreeSpace } catch { $freeTemp=[int64]::MaxValue }
         try { $freeBin=(New-Object System.IO.DriveInfo([System.IO.Path]::GetPathRoot($engineBin))).AvailableFreeSpace } catch { $freeBin=[int64]::MaxValue }
         if($freeTemp -lt $needTemp -or $freeBin -lt $needBin){
-            [void]$log.Add(('ERROR: insufficient disk space (temp free '+(Format-MossModelSize $freeTemp 1)+', engine-drive free '+(Format-MossModelSize $freeBin 1)+', need ~'+(Format-MossModelSize $needTemp 1)+' and ~'+(Format-MossModelSize $needBin 1)+')'))
-            [System.Windows.Forms.MessageBox]::Show($g,("Not enough free disk space for the engine update.`r`n`r`nNeeded: about {0} on the temp drive ({1}) and {2} on {3}`r`nAvailable: {4} and {5}`r`n`r`nFree up some space (or install fewer variants) and try again." -f (Format-MossModelSize $needTemp 1),[System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath()).TrimEnd('\'),(Format-MossModelSize $needBin 1),[System.IO.Path]::GetPathRoot($engineBin).TrimEnd('\'),(Format-MossModelSize $freeTemp 1),(Format-MossModelSize $freeBin 1)),'Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+            [void]$log.Add(('ERROR: insufficient disk space (temp free '+(Format-SgModelSize $freeTemp 1)+', engine-drive free '+(Format-SgModelSize $freeBin 1)+', need ~'+(Format-SgModelSize $needTemp 1)+' and ~'+(Format-SgModelSize $needBin 1)+')'))
+            [System.Windows.Forms.MessageBox]::Show($g,("Not enough free disk space for the engine update.`r`n`r`nNeeded: about {0} on the temp drive ({1}) and {2} on {3}`r`nAvailable: {4} and {5}`r`n`r`nFree up some space (or install fewer variants) and try again." -f (Format-SgModelSize $needTemp 1),[System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath()).TrimEnd('\'),(Format-SgModelSize $needBin 1),[System.IO.Path]::GetPathRoot($engineBin).TrimEnd('\'),(Format-SgModelSize $freeTemp 1),(Format-SgModelSize $freeBin 1)),'Engine update',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
             return
         }
         $busy=@(Get-Process -Name 'sd-cli','sd-server' -ErrorAction SilentlyContinue)
@@ -3283,7 +3508,7 @@ Switching downloads only the files that are not already on disk and updates the 
         }
         $planText=''
         foreach($p in $plan){ $planText+=((('  '+(& $variantLabelOf $p.Key))+$(if($p.IsPrimary){''}else{' (extra)'})+'  ->  '+$p.Target)+"`r`n") }
-        $modelText=if($modelPlan.Count -gt 0){ ((($modelPlan | ForEach-Object { $localBytes=[int64]0; $localAvailable=[int64]::TryParse([string]$_.LocalSize,[System.Globalization.NumberStyles]::Integer,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$localBytes) -and $localBytes -gt 0; '  '+$_.Name+'  ('+(Format-MossModelSize $_.RemoteSize)+' download, current file: '+$(if($localAvailable){Format-MossModelSize $localBytes}else{'not installed'})+')' }) -join "`r`n")+"`r`n  Old model files: "+$(if($modelBackupCheck.Checked){'kept as <name>.old-<time> (renamed, instant - older backups beyond the newest 3 are deleted automatically)'}else{'overwritten WITHOUT a backup'})) } else { '  (no model updates selected)' }
+        $modelText=if($modelPlan.Count -gt 0){ ((($modelPlan | ForEach-Object { $localBytes=[int64]0; $localAvailable=[int64]::TryParse([string]$_.LocalSize,[System.Globalization.NumberStyles]::Integer,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$localBytes) -and $localBytes -gt 0; '  '+$_.Name+'  ('+(Format-SgModelSize $_.RemoteSize)+' download, current file: '+$(if($localAvailable){Format-SgModelSize $localBytes}else{'not installed'})+')' }) -join "`r`n")+"`r`n  Old model files: "+$(if($modelBackupCheck.Checked){'kept as <name>.old-<time> (renamed, instant - older backups beyond the newest 3 are deleted automatically)'}else{'overwritten WITHOUT a backup'})) } else { '  (no model updates selected)' }
         $modelText+="`r`n"
         $timeText='depends on your connection'
         if($measuredSpeed -le 0 -and $modelsTotal -gt 0){
@@ -3291,22 +3516,44 @@ Switching downloads only the files that are not already on disk and updates the 
             # where measuring the speed (6 MB range request) is worth it.
             $probeUrl=''
             foreach($mi in $modelPlan){ if($mi.RemoteUrl){ $probeUrl=[string]$mi.RemoteUrl; break } }
-            if($probeUrl){ $measuredSpeed=Get-MossDownloadSpeedEstimate $probeUrl }
+            if($probeUrl){ $measuredSpeed=Get-SgDownloadSpeedEstimate $probeUrl }
         }
         if($measuredSpeed -gt 0 -and $modelsTotal -gt 0){ $timeText='about '+[math]::Round(($modelsTotal/1MB)/$measuredSpeed/60,0)+' minutes for the models at your measured speed ('+[math]::Round($measuredSpeed,1)+' MB/s)' }
         $dlText=''
         foreach($p in $plan){ $a=$engineAssets[$p.Key]; $dlText+=((('  '+$a.name)+'  ('+[math]::Round($a.size/1MB)+' MB)')+"`r`n") }
         foreach($mj in ($cudartAssets.Keys | Sort-Object)){ $ca=$cudartAssets[$mj]; $dlText+=((('  '+$ca.name)+'  ('+[math]::Round($ca.size/1MB)+' MB)')+"`r`n") }
-        foreach($mi in $modelPlan){ $dlText+=(('  '+$mi.Name+'  ('+(Format-MossModelSize $mi.RemoteSize)+')')+"`r`n") }
+        foreach($mi in $modelPlan){ $dlText+=(('  '+$mi.Name+'  ('+(Format-SgModelSize $mi.RemoteSize)+')')+"`r`n") }
         $backupZip=Join-Path ([System.IO.Path]::GetDirectoryName($engineBin)) ('engine-backup-'+$stamp+'.zip')
         # Legacy (pre-compression) folder name, only checked when no zip exists.
         $backupDir=Join-Path ([System.IO.Path]::GetDirectoryName($engineBin)) ('engine-backup-'+$stamp)
-        $answer=[System.Windows.Forms.MessageBox]::Show($g,("Ready to install the update:`r`n`r`nRelease: {0}`r`nInstall plan:`r`n{1}Models to update:`r`n{2}Download:`r`n{3}Engine backup (compressed zip): {4}`r`nDisk space needed: about {5} on the temp drive and {6} on the engine+models drive`r`nEstimated model download time: {7}`r`n`r`nMOSS will be unresponsive during the download (several minutes on slower connections; GB-sized models take longer).`r`n`r`nInstall now?" -f $relTag,$planText,$modelText,$dlText,$backupZip,(Format-MossModelSize $needTemp 1),(Format-MossModelSize $needBin 1),$timeText),'Install engine & model update',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
+        $answer=[System.Windows.Forms.MessageBox]::Show($g,("Ready to install the update:`r`n`r`nRelease: {0}`r`nInstall plan:`r`n{1}Models to update:`r`n{2}Download:`r`n{3}Engine backup (compressed zip): {4}`r`nDisk space needed: about {5} on the temp drive and {6} on the engine+models drive`r`nEstimated model download time: {7}`r`n`r`nThe window stays responsive during the download - progress and a Cancel button are live throughout (GB-sized models still take minutes on slower connections).`r`n`r`nInstall now?" -f $relTag,$planText,$modelText,$dlText,$backupZip,(Format-SgModelSize $needTemp 1),(Format-SgModelSize $needBin 1),$timeText),'Install engine & model update',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
         if($answer -ne [System.Windows.Forms.DialogResult]::Yes){ return }
+        # v0.3.45: the stamp is taken when the INSTALL starts, not when the
+        # dialog was opened - a dialog left open otherwise produces backup
+        # names older than already-existing ones (the prune could delete the
+        # fresh backup), and repeated installs from one dialog session would
+        # share one backup/model-backup name.
+        $stamp=Get-Date -Format 'yyyyMMdd_HHmmss'
+        $backupZip=Join-Path ([System.IO.Path]::GetDirectoryName($engineBin)) ('engine-backup-'+$stamp+'.zip')
+        $backupDir=Join-Path ([System.IO.Path]::GetDirectoryName($engineBin)) ('engine-backup-'+$stamp)
         $oldProgress=$ProgressPreference; $ProgressPreference='SilentlyContinue'
         $tempRoot=Join-Path ([System.IO.Path]::GetTempPath()) ('Sootglass-Engine-Update-'+[guid]::NewGuid().ToString('N'))
+        # v0.3.45 (bugfix): $movedExtras MUST exist before the try starts - the
+        # catch block iterates it. It used to be initialized only after the
+        # downloads, so a cancel/failure during a download reached the catch
+        # with $movedExtras undefined; @($null) is a ONE-element array holding
+        # null, so the restore loop ran once and threw 'Cannot index into a
+        # null array' on every mid-download cancel (crash dialog after Cancel).
+        $movedExtras=@()
         try {
-            $g.Cursor='WaitCursor'; $installBtn.Enabled=$false; $pageBtn.Enabled=$false; $closeBtn.Enabled=$false
+            $script:SgEngineUpdateBusy=$true; $script:SgEngineUpdateCancel=$false
+            $cancelCheck={ if($script:SgEngineUpdateCancel){ throw 'Engine update cancelled by user.' } }
+            $g.Cursor='WaitCursor'; $installBtn.Enabled=$false; $pageBtn.Enabled=$false
+            $closeBtn.Enabled=$true; Set-SgButtonText $closeBtn 'Cancel install'; $busyBar.Visible=$true
+            # v0.3.45: the pumped install processes clicks - everything that
+            # could re-enter the engine swap is disabled until it finishes.
+            $restoreBtn.Enabled=$false; $repairBtn.Enabled=$false; $releaseList.Enabled=$false; $variant.Enabled=$false; $modelBackupCheck.Enabled=$false; $modelsOnlyBtn.Enabled=$false; $precCombo.Enabled=$false; $modelsList.Enabled=$false
+            foreach($kX in @($script:SgDlgConcrete)){ $cbX=$script:SgDlgExtras[$kX]; if($cbX){ $cbX.Enabled=$false } }
             Add-Type -AssemblyName System.IO.Compression.FileSystem
             $engineFiles=@{}
             $dlTotal=@($engineAssets.Keys).Count + @($cudartAssets.Keys).Count
@@ -3314,16 +3561,23 @@ Switching downloads only the files that are not already on disk and updates the 
             foreach($k in (@($plan | ForEach-Object { $_.Key }) | Sort-Object -Unique)){
                 $a=$engineAssets[$k]; $dlIndex++
                 $status.Text=('Downloading '+(& $variantLabelOf $k)+': '+$a.name+' ('+[math]::Round($a.size/1MB)+' MB) ['+$dlIndex+'/'+$dlTotal+']...')
-                [System.Windows.Forms.Application]::DoEvents()
+                [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
                 [void]$log.Add(('Downloading '+$a.browser_download_url))
                 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
                 $zipPath=Join-Path $tempRoot ($k+'.zip')
-                [void](Save-MossWebFile ([string]$a.browser_download_url) $zipPath 3600)
+                $statusBase=('Downloading '+$a.name)
+                [void](Save-SgWebFile ([string]$a.browser_download_url) $zipPath 3600 {
+                    param($bytesR,$totalR,$mbpsR)
+                    $etaR=''; if($mbpsR -gt 0.01 -and $totalR -gt 0){ $etaR=' - about '+(Format-SgEta ((($totalR-$bytesR)/1MB)/$mbpsR))+' left' }
+                    $status.Text=($statusBase+': '+[math]::Round($bytesR/1MB,1)+' MB'+$(if($totalR -gt 0){' of '+[math]::Round($totalR/1MB,0)+' MB'})+$etaR)
+                    [System.Windows.Forms.Application]::DoEvents()
+                    return [bool]$script:SgEngineUpdateCancel
+                })
                 if(-not (Test-Path -LiteralPath $zipPath -PathType Leaf) -or (Get-Item -LiteralPath $zipPath).Length -le 0){ throw ('The '+$k+' download did not produce a file. Nothing has been changed.') }
-                Test-MossZipDigest $zipPath $a
+                Test-SgZipDigest $zipPath $a
                 [void]$log.Add(($k+' download ok ('+[math]::Round((Get-Item -LiteralPath $zipPath).Length/1MB)+' MB)'))
                 $status.Text=('Verifying and unpacking '+(& $variantLabelOf $k)+'...')
-                [System.Windows.Forms.Application]::DoEvents()
+                [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
                 $archive=[System.IO.Compression.ZipFile]::OpenRead($zipPath)
                 try {
                     $relEntry=@($archive.Entries | Where-Object { [string]$_.FullName -match '(^|/)sd-cli\.exe$' } | Select-Object -First 1)
@@ -3341,12 +3595,19 @@ Switching downloads only the files that are not already on disk and updates the 
             foreach($mj in (@($cudartAssets.Keys) | Sort-Object)){
                 $ca=$cudartAssets[$mj]; $dlIndex++
                 $status.Text=('Downloading the CUDA '+$mj+' runtime: '+$ca.name+' ('+[math]::Round($ca.size/1MB)+' MB) ['+$dlIndex+'/'+$dlTotal+']...')
-                [System.Windows.Forms.Application]::DoEvents()
+                [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
                 [void]$log.Add(('Downloading '+$ca.browser_download_url))
                 $cudartZip=Join-Path $tempRoot ('cudart-cu'+$mj+'.zip')
-                [void](Save-MossWebFile ([string]$ca.browser_download_url) $cudartZip 3600)
+                $statusBase=('Downloading the CUDA '+$mj+' runtime')
+                [void](Save-SgWebFile ([string]$ca.browser_download_url) $cudartZip 3600 {
+                    param($bytesR,$totalR,$mbpsR)
+                    $etaR=''; if($mbpsR -gt 0.01 -and $totalR -gt 0){ $etaR=' - about '+(Format-SgEta ((($totalR-$bytesR)/1MB)/$mbpsR))+' left' }
+                    $status.Text=($statusBase+': '+[math]::Round($bytesR/1MB,1)+' MB'+$(if($totalR -gt 0){' of '+[math]::Round($totalR/1MB,0)+' MB'})+$etaR)
+                    [System.Windows.Forms.Application]::DoEvents()
+                    return [bool]$script:SgEngineUpdateCancel
+                })
                 if(-not (Test-Path -LiteralPath $cudartZip -PathType Leaf) -or (Get-Item -LiteralPath $cudartZip).Length -le 0){ throw 'The CUDA runtime download did not produce a file. Nothing has been changed.' }
-                Test-MossZipDigest $cudartZip $ca
+                Test-SgZipDigest $cudartZip $ca
                 [void]$log.Add(('CUDA '+$mj+' runtime download ok ('+[math]::Round((Get-Item -LiteralPath $cudartZip).Length/1MB)+' MB)'))
                 $stageC=Join-Path $tempRoot ('stage-cudart-'+$mj)
                 [System.IO.Compression.ZipFile]::ExtractToDirectory($cudartZip,$stageC)
@@ -3357,15 +3618,17 @@ Switching downloads only the files that are not already on disk and updates the 
             $busyNow=@(Get-Process -Name 'sd-cli','sd-server' -ErrorAction SilentlyContinue)
             if($busyNow.Count -gt 0){ throw 'sd-cli or sd-server started while the download was running. Nothing has been changed - try again when no engine process is running.' }
             $status.Text='Backing up the current engine files (compressing)...'
-            [System.Windows.Forms.Application]::DoEvents()
+            [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
             [void]$log.Add(('Backup archive: '+$backupZip))
             $primaryPlan=@($plan | Where-Object { $_.IsPrimary })[0]
+            $movedExtras=@()
             Add-Type -AssemblyName System.IO.Compression
             $replaced=@()
             $backupArchive=[System.IO.Compression.ZipFile]::Open($backupZip,[System.IO.Compression.ZipArchiveMode]::Create)
             try {
                 foreach($src in @($engineFiles[$primaryPlan.Key])){
                     $name=[System.IO.Path]::GetFileName($src); $dest=Join-Path $engineBin $name
+                    $status.Text=('Backing up '+$name+'...'); [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
                     if(Test-Path -LiteralPath $dest -PathType Leaf){
                         # Zip via stream copy (CreateEntryFromFile is not
                         # available on every .NET/PowerShell 5.1 setup). Files
@@ -3422,26 +3685,37 @@ Switching downloads only the files that are not already on disk and updates the 
                 }
                 if($p.IsPrimary){
                     $status.Text='Replacing the engine files...'
-                    [System.Windows.Forms.Application]::DoEvents()
-                    foreach($src in $filesP){ Copy-Item -LiteralPath $src -Destination (Join-Path $engineBin ([System.IO.Path]::GetFileName($src))) -Force }
+                    [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
+                    foreach($src in $filesP){
+                        $status.Text=('Replacing engine file '+[System.IO.Path]::GetFileName($src)+'...'); [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
+                        Copy-Item -LiteralPath $src -Destination (Join-Path $engineBin ([System.IO.Path]::GetFileName($src))) -Force
+                    }
                 } else {
                     $status.Text=('Installing extra '+(& $variantLabelOf $p.Key)+'...')
-                    [System.Windows.Forms.Application]::DoEvents()
+                    [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
                     if(Test-Path -LiteralPath $p.Target -PathType Container){
                         $oldTarget=Join-Path ([System.IO.Path]::GetDirectoryName($p.Target)) (($p.Key)+'.old-'+$stamp)
                         Move-Item -LiteralPath $p.Target -Destination $oldTarget -Force
+                        $movedExtras+=,@([string]$p.Target,[string]$oldTarget)
                         [void]$log.Add(('Previous extra folder moved aside: '+$p.Target+' -> '+$oldTarget))
                     }
                     New-Item -ItemType Directory -Path $p.Target -Force | Out-Null
-                    foreach($src in $filesP){ Copy-Item -LiteralPath $src -Destination (Join-Path $p.Target ([System.IO.Path]::GetFileName($src))) -Force }
+                    foreach($src in $filesP){
+                        $status.Text=('Installing '+[System.IO.Path]::GetFileName($src)+'...'); [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
+                        Copy-Item -LiteralPath $src -Destination (Join-Path $p.Target ([System.IO.Path]::GetFileName($src))) -Force
+                    }
                     [void]$log.Add(('Installed extra variant '+$p.Key+' into '+$p.Target))
                 }
             }
+            # v0.3.45: prune moved-aside extra variant folders (*.old-<stamp>)
+            # to the newest 2 - they are several hundred MB each.
+            $oldExtraDirs=@(Get-ChildItem -LiteralPath ([System.IO.Path]::GetDirectoryName($engineBin)) -Directory -Filter '*.old-*' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+            for($ei=2; $ei -lt $oldExtraDirs.Count; $ei++){ try { Remove-Item -LiteralPath $oldExtraDirs[$ei].FullName -Recurse -Force -ErrorAction Stop; [void]$log.Add(('Deleted old extra engine folder beyond the limit of 2: '+$oldExtraDirs[$ei].Name)) } catch { [void]$log.Add(('Could not delete old extra engine folder '+$oldExtraDirs[$ei].Name+': '+$_.Exception.Message)) } }
             # Verify the new engine actually starts BEFORE declaring success:
             # no version output means missing DLLs or a broken exe - restore.
             $status.Text='Checking that the new engine starts...'
-            [System.Windows.Forms.Application]::DoEvents()
-            $newOut=Get-MossEngineVersionOutput $enginePath
+            [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
+            $newOut=Get-SgEngineVersionOutput $enginePath
             if([string]::IsNullOrWhiteSpace($newOut)){ throw 'The new engine files were copied, but sd-cli.exe does not start (no version output). The previous engine files will be restored.' }
             $newCommit=''
             if($newOut -match 'commit\s+([0-9a-fA-F]{6,40})'){ $newCommit=$Matches[1].ToLowerInvariant() }
@@ -3465,6 +3739,7 @@ Switching downloads only the files that are not already on disk and updates the 
                     $cacheArchive=[System.IO.Compression.ZipFile]::Open($cacheZip,[System.IO.Compression.ZipArchiveMode]::Create)
                     try {
                         foreach($srcC in $cacheFiles){
+                            $status.Text=('Caching engine file '+[System.IO.Path]::GetFileName($srcC)+'...'); [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
                             $lvlC=[System.IO.Compression.CompressionLevel]::Optimal
                             if((Get-Item -LiteralPath $srcC).Length -gt 8MB){ $lvlC=[System.IO.Compression.CompressionLevel]::Fastest }
                             $nameC=[System.IO.Path]::GetFileName($srcC)
@@ -3484,14 +3759,14 @@ Switching downloads only the files that are not already on disk and updates the 
                     [void]$log.Add(('Engine file cache saved: '+$cacheZip+' ('+$cacheFiles.Count+' files, '+[math]::Round((Get-Item -LiteralPath $cacheZip).Length/1MB)+' MB) - lost engine files can now be repaired locally without any download'))
                     # Keep at most 2 caches: delete the oldest beyond that.
                     $oldCaches=@(Get-ChildItem -LiteralPath $cacheRoot -File -Filter 'cache-*.zip' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $cacheZip } | Sort-Object -Property Name -Descending)
-                    for($ci=2; $ci -lt $oldCaches.Count; $ci++){ try { Remove-Item -LiteralPath $oldCaches[$ci].FullName -Force -ErrorAction Stop; [void]$log.Add(('Deleted old engine file cache beyond the limit of 2: '+$oldCaches[$ci].Name)) } catch {} }
+                    for($ci=1; $ci -lt $oldCaches.Count; $ci++){ try { Remove-Item -LiteralPath $oldCaches[$ci].FullName -Force -ErrorAction Stop; [void]$log.Add(('Deleted old engine file cache beyond the limit of 2 (total): '+$oldCaches[$ci].Name)) } catch {} }
                 } catch { [void]$log.Add(('WARNING: the engine file cache could not be saved: '+$_.Exception.Message)) }
             }
             $extraLines=''; $extraOk=0; $extraWarn=0
             foreach($p in @($plan | Where-Object { -not $_.IsPrimary })){
                 $exeP=Join-Path $p.Target 'sd-cli.exe'
                 if(Test-Path -LiteralPath $exeP -PathType Leaf){
-                    $oP=Get-MossEngineVersionOutput $exeP
+                    $oP=Get-SgEngineVersionOutput $exeP
                     if([string]::IsNullOrWhiteSpace($oP)){
                         $extraWarn++
                         $extraLines+=("`r`nWARNING: the extra "+(& $variantLabelOf $p.Key)+" did not start (no version output) - it stays in "+$p.Target+" but may need a different variant.")
@@ -3506,25 +3781,32 @@ Switching downloads only the files that are not already on disk and updates the 
             $modelLines=''; $modelOk=0; $modelFail=0
             foreach($mi in $modelPlan){
                 try {
-                    $status.Text=('Downloading model '+$mi.Name+' ('+(Format-MossModelSize $mi.RemoteSize)+')...')
-                    [System.Windows.Forms.Application]::DoEvents()
+                    $status.Text=('Downloading model '+$mi.Name+' ('+(Format-SgModelSize $mi.RemoteSize)+')...')
+                    [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
                     [void]$log.Add(('Downloading model '+$mi.RemoteUrl))
                     $mTemp=Join-Path $tempRoot ('model-'+$mi.Name+'.part')
                     $dlSw=[System.Diagnostics.Stopwatch]::StartNew()
-                    [void](Save-MossWebFile ([string]$mi.RemoteUrl) $mTemp 7200)
+                    $statusBase=('Downloading model '+$mi.Name)
+                    [void](Save-SgWebFile ([string]$mi.RemoteUrl) $mTemp 7200 {
+                        param($bytesR,$totalR,$mbpsR)
+                        $etaR=''; if($mbpsR -gt 0.01 -and $totalR -gt 0){ $etaR=' - about '+(Format-SgEta ((($totalR-$bytesR)/1MB)/$mbpsR))+' left' }
+                        $status.Text=($statusBase+': '+[math]::Round($bytesR/1MB,1)+' MB'+$(if($totalR -gt 0){' of '+[math]::Round($totalR/1MB,0)+' MB'})+$etaR)
+                        [System.Windows.Forms.Application]::DoEvents()
+                        return [bool]$script:SgEngineUpdateCancel
+                    })
                     $dlSw.Stop()
                     $got=(Get-Item -LiteralPath $mTemp).Length
-                    if($mi.RemoteSize -gt 0 -and $got -ne $mi.RemoteSize){ throw ('download size mismatch (got '+(Format-MossModelSize $got)+', expected '+(Format-MossModelSize $mi.RemoteSize)+')') }
+                    if($mi.RemoteSize -gt 0 -and $got -ne $mi.RemoteSize){ throw ('download size mismatch (got '+(Format-SgModelSize $got)+', expected '+(Format-SgModelSize $mi.RemoteSize)+')') }
                     # Record the REAL download speed (v0.1.88): the most honest
                     # signal for future 'about X minutes' estimates - blended
                     # with fresh probes when the cache is stale.
                     $dlMBps=0.0
-                    if($dlSw.Elapsed.TotalSeconds -gt 1 -and $got -gt 1MB){ $dlMBps=($got/1MB)/$dlSw.Elapsed.TotalSeconds; Save-MossRealDownloadSpeed $dlMBps $got }
-                    [void]$log.Add(('Model download ok ('+(Format-MossModelSize $got)+$(if($dlMBps -gt 0){(' at '+[math]::Round($dlMBps,1)+' MB/s')}else{''})+'))'))
+                    if($dlSw.Elapsed.TotalSeconds -gt 1 -and $got -gt 1MB){ $dlMBps=($got/1MB)/$dlSw.Elapsed.TotalSeconds; Save-SgRealDownloadSpeed $dlMBps $got }
+                    [void]$log.Add(('Model download ok ('+(Format-SgModelSize $got)+$(if($dlMBps -gt 0){(' at '+[math]::Round($dlMBps,1)+' MB/s')}else{''})+'))'))
                     $destModel=$mi.LocalPath; if(-not $destModel){ $destModel=Join-Path $script:AppRoot ('models\'+$mi.Name) }
-                    if(-not (Test-MossModelTargetName $destModel ([string]$mi.Name))){ throw ('Model target mismatch: refusing to rename or overwrite '+[System.IO.Path]::GetFileName($destModel)+' as '+[string]$mi.Name) }
+                    if(-not (Test-SgModelTargetName $destModel ([string]$mi.Name))){ throw ('Model target mismatch: refusing to rename or overwrite '+[System.IO.Path]::GetFileName($destModel)+' as '+[string]$mi.Name) }
                     if((Test-Path -LiteralPath $destModel -PathType Leaf) -and $modelBackupCheck.Checked){
-                        $oldName=Get-MossModelBackupPath $destModel $stamp
+                        $oldName=Get-SgModelBackupPath $destModel $stamp
                         Rename-Item -LiteralPath $destModel -Destination $oldName -Force
                         [void]$log.Add(('Old model kept as '+(Split-Path -Leaf $oldName)))
                         # Keep at most 3 backups per model: delete the oldest.
@@ -3534,8 +3816,10 @@ Switching downloads only the files that are not already on disk and updates the 
                         }
                     }
                     $status.Text=('Installing model '+$mi.Name+'...')
-                    [System.Windows.Forms.Application]::DoEvents()
+                    [System.Windows.Forms.Application]::DoEvents(); & $cancelCheck
                     Copy-Item -LiteralPath $mTemp -Destination $destModel -Force
+                    $gotM=(Get-Item -LiteralPath $destModel).Length
+                    if($mi.RemoteSize -gt 0 -and $gotM -ne [int64]$mi.RemoteSize){ throw ('installed model file size mismatch for '+$mi.Name+' (got '+(Format-SgModelSize $gotM)+', expected '+(Format-SgModelSize $mi.RemoteSize)+') - likely a full disk; the copy was not accepted') }
                     Remove-Item -LiteralPath $mTemp -Force -ErrorAction SilentlyContinue
                     # v0.3.4: a PRECISION SWITCH installs a file with a NEW name
                     # (e.g. moss_image_sft_bf16 instead of ..._int8_convrot) -
@@ -3550,9 +3834,10 @@ Switching downloads only the files that are not already on disk and updates the 
                         } catch { [void]$log.Add(('WARNING: could not update settings key '+$mi.Setting+': '+$_.Exception.Message)) }
                     }
                     $modelOk++
-                    $modelLines+=("`r`nModel updated: "+$mi.Name+" ("+(Format-MossModelSize $mi.RemoteSize)+")")
+                    $modelLines+=("`r`nModel updated: "+$mi.Name+" ("+(Format-SgModelSize $mi.RemoteSize)+")")
                     [void]$log.Add(('Model updated: '+$mi.Name))
                 } catch {
+                    if($_.Exception.Message -like '*cancelled by user*'){ throw }
                     $modelFail++
                     $modelLines+=("`r`nWARNING: model "+$mi.Name+" could not be updated: "+$_.Exception.Message)
                     [void]$log.Add(('ERROR updating model '+$mi.Name+': '+$_.Exception.Message))
@@ -3571,6 +3856,19 @@ Switching downloads only the files that are not already on disk and updates the 
         } catch {
             [void]$log.Add(('ERROR: '+$_.Exception.Message))
             $restoredNote='No files needed restoring - the failure happened before anything was replaced.'
+            # v0.3.45: move moved-aside extra variant folders back first.
+            # v0.3.45 (bugfix): belt-and-braces - skip null entries instead of
+            # 'Cannot index into a null array' if anything upstream leaves a
+            # null in the list.
+            foreach($mv in @($movedExtras)){
+                if($null -eq $mv){ continue }
+                $newT=[string]$mv[0]; $oldT=[string]$mv[1]
+                if(Test-Path -LiteralPath $oldT -PathType Container){
+                    if(Test-Path -LiteralPath $newT -PathType Container){ try { Remove-Item -LiteralPath $newT -Recurse -Force -ErrorAction SilentlyContinue } catch {} }
+                    try { Move-Item -LiteralPath $oldT -Destination $newT -Force; [void]$log.Add(('Restored previous extra folder: '+$oldT+' -> '+$newT)) } catch { [void]$log.Add(('ERROR restoring extra folder '+$oldT+': '+$_.Exception.Message)) }
+                }
+            }
+            $restoreStage=''
             try {
                 $hadBackup=@()
                 $restoreStage=''
@@ -3586,7 +3884,7 @@ Switching downloads only the files that are not already on disk and updates the 
                 if($hadBackup.Count -gt 0){
                     foreach($bak in $hadBackup){ Copy-Item -LiteralPath $bak.FullName -Destination (Join-Path $engineBin $bak.Name) -Force }
                     # Verify the previous engine works again after the restore.
-                    $bakOut=Get-MossEngineVersionOutput $enginePath
+                    $bakOut=Get-SgEngineVersionOutput $enginePath
                     if(-not [string]::IsNullOrWhiteSpace($bakOut)){
                         $restoredNote='The previous engine files were restored and verified working again.'
                         [void]$log.Add('Previous engine verified working after restore')
@@ -3595,18 +3893,22 @@ Switching downloads only the files that are not already on disk and updates the 
                         [void]$log.Add(('WARNING: the previous engine did not report a version after restore'))
                     }
                 }
-            } catch { [void]$log.Add(('ERROR during restore: '+$_.Exception.Message)) }
+            } catch { [void]$log.Add(('ERROR during restore: '+$_.Exception.Message)); $restoredNote='The automatic restore attempt failed - the engine may be in a mixed state. Use Restore a backup... in this dialog to restore manually.' }
+            try { if($restoreStage -and (Test-Path -LiteralPath $restoreStage)){ Remove-Item -LiteralPath $restoreStage -Recurse -Force -ErrorAction SilentlyContinue } } catch {}
             $status.Text=('Engine update failed: '+$_.Exception.Message)
             [System.Windows.Forms.MessageBox]::Show($g,("The engine update failed: {0}`r`n`r`n{1}`r`n`r`nDetails: logs\engine-update-{2}.txt" -f $_.Exception.Message,$restoredNote,$stamp),'Engine update failed',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null
         } finally {
-            $g.Cursor='Default'; $installBtn.Enabled=$true; $pageBtn.Enabled=$true; $closeBtn.Enabled=$true; $ProgressPreference=$oldProgress
+            $g.Cursor='Default'; $installBtn.Enabled=$true; $pageBtn.Enabled=$true; $closeBtn.Enabled=$true; Set-SgButtonText $closeBtn 'Close'; $script:SgEngineUpdateBusy=$false; $script:SgEngineUpdateCancel=$false; $busyBar.Visible=$false; $ProgressPreference=$oldProgress
+            $restoreBtn.Enabled=$true; $repairBtn.Enabled=($null -ne $script:SgDlgRepair -and [string]$script:SgDlgRepair.Commit -eq [string]$installedCommit); $releaseList.Enabled=$true; $variant.Enabled=$true; $modelBackupCheck.Enabled=$true; $modelsOnlyBtn.Enabled=($script:SgDlgModels.Count -gt 0); $precCombo.Enabled=$true; $modelsList.Enabled=$true
+            foreach($kX in @($script:SgDlgConcrete)){ $cbX=$script:SgDlgExtras[$kX]; if($cbX){ $cbX.Enabled=$true } }
             try { $logDir=Join-Path $script:AppRoot 'logs'; if(-not(Test-Path -LiteralPath $logDir)){New-Item -ItemType Directory -Path $logDir -Force|Out-Null}; ($log -join "`r`n") | Set-Content -LiteralPath (Join-Path $logDir ('engine-update-'+$stamp+'.txt')) -Encoding UTF8 } catch {}
             Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
     })
     [void]$g.ShowDialog($Owner)
+    $g.Dispose()
 }
-function Start-MossCaptureReaders($Process,$Capture) {
+function Start-SgCaptureReaders($Process,$Capture) {
     $readerScript = {
         param($stream,$capture,$key)
         try {
@@ -3638,7 +3940,7 @@ function Start-MossCaptureReaders($Process,$Capture) {
     return [pscustomobject]@{ Runners=$runners; Async=$asyncResults }
 }
 
-function Show-MossAboutDialog([System.Windows.Forms.Form]$Owner=$null) {
+function Show-SgAboutDialog([System.Windows.Forms.Form]$Owner=$null) {
     $d=New-Object System.Windows.Forms.Form
     $d.Text='About Sootglass Studio'
     $d.ClientSize=New-Object System.Drawing.Size(520,252)
@@ -3724,7 +4026,7 @@ function Show-GeneratorWindow {
     $script:BenchTotal = 0
     $script:BenchStartedAt = $null
 
-    function Get-MossShortName([string]$Text,[int]$MaxChars) {
+    function Get-SgShortName([string]$Text,[int]$MaxChars) {
         # Shortens long device/model names for one-line UI labels: keeps the
         # start of the string and marks the cut with an ellipsis, so a label
         # never pushes neighbouring text off-screen on small displays.
@@ -3746,8 +4048,14 @@ function Show-GeneratorWindow {
     $f.Text = "Sootglass Studio v$($script:AppVersion) | stable-diffusion.cpp GUI"; $f.ClientSize=New-Object System.Drawing.Size(1000,500); $f.MinimumSize=New-Object System.Drawing.Size(880,539); $f.StartPosition='CenterScreen'
     # Restore position and size before the first show so the window opens
     # directly at its saved bounds instead of visibly resizing after startup.
-    # Update-MossWorkspaceLayout sizes the panels once all controls exist.
-    try { Restore-MossWindowBounds $f } catch {}
+    # Update-SgWorkspaceLayout sizes the panels once all controls exist.
+    try { Restore-SgWindowBounds $f } catch {}
+    # v0.3.45 (fix): SgScreenFit was defined but never invoked - on a 175%
+    # DPI display whose working area is smaller than the minimum window the
+    # generator could extend beyond the screen. Fit once now; the Resize
+    # handler re-runs it on every size change.
+    try { & $script:SgScreenFit } catch {}
+    $f.Add_Resize({ try { & $script:SgScreenFit } catch {} })
     # v0.2.3: the window is shown EARLY (frame + header + the two card
     # panels) and the controls are added while the user already looks at it.
     # The old code built every control first and only then showed the
@@ -3757,7 +4065,7 @@ function Show-GeneratorWindow {
     # v0.2.3: this lives in a SCRIPT variable, not on the Form: assigning an
     # unknown property to a .NET object ('$f.ScreenFit = {...}') throws in
     # PowerShell (the same trap as ComboBox.FlatAppearance).
-    $script:MossScreenFit={
+    $script:SgScreenFit={
         $sc=[System.Windows.Forms.Screen]::FromControl($f)
         $wa = $sc.WorkingArea
         $mw = [Math]::Min(880, $wa.Width - 16)
@@ -3787,7 +4095,7 @@ function Show-GeneratorWindow {
     $ttl=New-Object System.Windows.Forms.Label; $ttl.Text="Sootglass  /  IMAGE STUDIO  v$($script:AppVersion)"; $ttl.Font=New-Object System.Drawing.Font('Segoe UI Semibold',13,[System.Drawing.FontStyle]::Bold); $ttl.AutoSize=$true; $ttl.Location=New-Object System.Drawing.Point(20,5); $head.Controls.Add($ttl)
     $gpuSubtitle='GPU: automatic'
     if($script:Settings.Contains('PreferredGpuIndex') -and [int]$script:Settings.PreferredGpuIndex -ge 0){
-        $gpuSubtitle="GPU: $(Get-MossShortName ([string]$script:Settings.PreferredGpuName) 34)"
+        $gpuSubtitle="GPU: $(Get-SgShortName ([string]$script:Settings.PreferredGpuName) 34)"
         if([string]::IsNullOrWhiteSpace([string]$script:Settings.PreferredGpuName)){ $gpuSubtitle="GPU: device $($script:Settings.PreferredGpuIndex)" }
     } else {
         # Automatic still SHOWS which GPU will be used (user: 'it should
@@ -3801,8 +4109,8 @@ function Show-GeneratorWindow {
         # v0.2.4: the CACHED card name is shown instantly (no 'GPU:
         # detecting...' wait). The live scan runs on a background runspace and
         # refreshes the label when it lands.
-        $cachedGpu = Get-MossCachedGpuName
-        if ($cachedGpu) { $gpuSubtitle = "GPU: $(Get-MossShortName $cachedGpu 34)" } else { $gpuSubtitle = 'GPU: detecting...' }
+        $cachedGpu = Get-SgCachedGpuName
+        if ($cachedGpu) { $gpuSubtitle = "GPU: $(Get-SgShortName $cachedGpu 34)" } else { $gpuSubtitle = 'GPU: detecting...' }
     }
     $subt=New-Object System.Windows.Forms.Label; $subt.Text="LOCAL IMAGE GENERATION  -  $gpuSubtitle"; $subt.ForeColor=$cMuted; $subt.AutoSize=$true; $head.Controls.Add($subt)
     # DPI-SAFE HEADER STACK (artifact fix): the old fixed offsets (title y=5,
@@ -3817,10 +4125,10 @@ function Show-GeneratorWindow {
     if ($head.Height -lt $neededHead) { $head.Height = $neededHead }
     # v0.2.3: the GPU name is filled in AFTER the window is visible (the scan
     # costs ~155 ms and must not delay the first paint).
-    # v0.2.3: the truncation is inlined on purpose. Get-MossShortName is a
+    # v0.2.3: the truncation is inlined on purpose. Get-SgShortName is a
     # NESTED function of this one, and GetNewClosure captures variables but
     # NOT nested function definitions - calling it from the closure ended in
-    # 'Get-MossShortName is not recognized' and the header stayed on
+    # 'Get-SgShortName is not recognized' and the header stayed on
     # 'GPU: detecting...' forever.
     # v0.2.4: the header is filled from the BACKGROUND scan - the UI thread
     # is never blocked by the ~120 ms CIM query. If the background scan
@@ -3830,8 +4138,8 @@ function Show-GeneratorWindow {
     # failed, the slow synchronous path is used as a fallback.
     # NOTE: inside a GetNewClosure '$script:' may point at the closure's own
     # module scope, so every write to the app state goes through a top-level
-    # function (Set-MossInventory / Set-MossGpuScanDone) instead.
-    $script:RefreshGpuSubtitle={ $items=Get-MossGpuScanResult; if($null -eq $items){ return }; $all=@($items); if($all.Count -eq 0){ $all=@(Get-GpuInventory) }; Set-MossInventory $all; Set-MossGpuScanDone; $tryGpus=@($all | Where-Object { -not $_.IsVirtual -and $_.Vendor -ne 'Unknown' }); if($tryGpus.Count -gt 0){ $gname=[string]$tryGpus[0].Name; if($gname.Length -gt 34){ $gname=$gname.Substring(0,33).TrimEnd()+[char]0x2026 }; $subt.Text="LOCAL IMAGE GENERATION  -  GPU: $gname"; Save-MossCachedGpuName $gname } else { $subt.Text="LOCAL IMAGE GENERATION  -  GPU: not detected" } }.GetNewClosure()
+    # function (Set-SgInventory / Set-SgGpuScanDone) instead.
+    $script:RefreshGpuSubtitle={ $items=Get-SgGpuScanResult; if($null -eq $items){ return }; $all=@($items); if($all.Count -eq 0){ $all=@(Get-GpuInventory) }; Set-SgInventory $all; Set-SgGpuScanDone; $tryGpus=@($all | Where-Object { -not $_.IsVirtual -and $_.Vendor -ne 'Unknown' }); if($tryGpus.Count -gt 0){ $gname=[string]$tryGpus[0].Name; if($gname.Length -gt 34){ $gname=$gname.Substring(0,33).TrimEnd()+[char]0x2026 }; $subt.Text="LOCAL IMAGE GENERATION  -  GPU: $gname"; Save-SgCachedGpuName $gname } else { $subt.Text="LOCAL IMAGE GENERATION  -  GPU: not detected" } }.GetNewClosure()
     $backendText=[string]$script:Settings.Backend; if (-not $script:Settings.BackendSelectionSaved) { $backendText='Not configured' }
     $backendBadge=New-Object System.Windows.Forms.Label; $backendBadge.Text="BACKEND  $backendText"; $backendBadge.AutoSize=$true; $backendBadge.ForeColor=[System.Drawing.Color]::FromArgb(125,205,164); $backendBadge.Location=New-Object System.Drawing.Point(535,17); $head.Controls.Add($backendBadge)
     # Header OPTIONS MENU (v0.1.97, user: 'these are really options'): the
@@ -3842,13 +4150,13 @@ function Show-GeneratorWindow {
     # of cluttering the main window - Output folder..., Model files...,
     # Benchmarks..., Error report plus Hardware / Setup and the updaters.
     # Item labels show live status (folder name, model-file health) on open.
-    $mossOptionsMenu=New-Object System.Windows.Forms.ContextMenuStrip
-    $mossOptionsMenu.ShowItemToolTips=$true
-    $miHistoryCode=$mossOptionsMenu.Items.Add('Prompt history code...')
+    $sgOptionsMenu=New-Object System.Windows.Forms.ContextMenuStrip
+    $sgOptionsMenu.ShowItemToolTips=$true
+    $miHistoryCode=$sgOptionsMenu.Items.Add('Prompt history code...')
     $miHistoryCode.AccessibleName='Manage encrypted prompt history code'
     $miHistoryCode.ToolTipText='Unlock saved prompts, set a new history code, or turn prompt history off.'
-    $miHistoryCode.Add_Click({ Show-MossHistoryCodeMenu $f })
-    $miOut=$mossOptionsMenu.Items.Add('Output folder...')
+    $miHistoryCode.Add_Click({ Show-SgHistoryCodeMenu $f })
+    $miOut=$sgOptionsMenu.Items.Add('Output folder...')
     $miOut.ToolTipText='Where finished images are saved. Set once - this menu is all you need.'
     $miOut.Add_Click({
         $dlg=New-Object System.Windows.Forms.FolderBrowserDialog
@@ -3857,31 +4165,31 @@ function Show-GeneratorWindow {
         $current=Get-AbsoluteAppPath $out.Text
         if(Test-Path -LiteralPath $current -PathType Container){$dlg.SelectedPath=$current}
         elseif(-not [string]::IsNullOrWhiteSpace($current)){$currentParent=Split-Path -Parent $current;if(Test-Path -LiteralPath $currentParent -PathType Container){$dlg.SelectedPath=$currentParent}}
-        if($dlg.ShowDialog($f) -eq 'OK'){$out.Text=$dlg.SelectedPath}
+        if($dlg.ShowDialog($f) -eq 'OK'){$out.Text=$dlg.SelectedPath; $script:Settings.OutputPath=Get-RelativeAppPath $dlg.SelectedPath; try { Save-Settings } catch {} }
         $dlg.Dispose()
     })
-    $miModels=$mossOptionsMenu.Items.Add('Model files...')
+    $miModels=$sgOptionsMenu.Items.Add('Model files...')
     $miModels.ToolTipText='Shows and changes the engine and model file paths, and reports whether all five files are found.'
-    $miModels.Add_Click({ Show-MossModelFilesDialog })
-    $miLora=$mossOptionsMenu.Items.Add('LoRA models...')
+    $miModels.Add_Click({ Show-SgModelFilesDialog })
+    $miLora=$sgOptionsMenu.Items.Add('LoRA models...')
     $miLora.ToolTipText='Optional LoRA add-ons for Sootglass: see which are published for Sootglass and download the ones you want. Nothing is fetched without your confirmation.'
-    $miLora.Add_Click({ Show-MossLoraDownloadDialog $f })
-    [void]$mossOptionsMenu.Items.Add('-')
-    $miBench=$mossOptionsMenu.Items.Add('Benchmarks...')
+    $miLora.Add_Click({ Show-SgLoraDownloadDialog $f })
+    [void]$sgOptionsMenu.Items.Add('-')
+    $miBench=$sgOptionsMenu.Items.Add('Benchmarks...')
     $miBench.ToolTipText='Measured render times per size/steps, time estimates for your settings and bigger jobs, and the quick benchmark.'
-    $miBench.Add_Click({ Show-MossBenchmarkDialog })
-    $miReport=$mossOptionsMenu.Items.Add('Error report')
+    $miBench.Add_Click({ Show-SgBenchmarkDialog })
+    $miReport=$sgOptionsMenu.Items.Add('Error report')
     $miReport.ToolTipText='Copies an anonymised technical error report to the clipboard and saves it under logs. Nothing is sent over the internet.'
-    $miReport.Add_Click({ Copy-MossErrorReport })
-    [void]$mossOptionsMenu.Items.Add('-')
-    $miAbout=$mossOptionsMenu.Items.Add('About Sootglass Studio...')
+    $miReport.Add_Click({ Copy-SgErrorReport })
+    [void]$sgOptionsMenu.Items.Add('-')
+    $miAbout=$sgOptionsMenu.Items.Add('About Sootglass Studio...')
     $miAbout.ToolTipText='About this GUI for stable-diffusion.cpp, with links to the OpenMOSS MOSS-Image project.'
-    $miAbout.Add_Click({ Show-MossAboutDialog $f })
-    [void]$mossOptionsMenu.Items.Add('-')
+    $miAbout.Add_Click({ Show-SgAboutDialog $f })
+    [void]$sgOptionsMenu.Items.Add('-')
     # POWER SAVER (v0.2.5): a three-level submenu. The chosen level is
     # applied to every engine process started afterwards. Checkmarks show
     # the current level when the menu opens.
-    $miPower=$mossOptionsMenu.Items.Add('Power saver')
+    $miPower=$sgOptionsMenu.Items.Add('Power saver')
     $miPower.ToolTipText='Slow image generation down on purpose so the PC keeps its speed (CPU and GPU) for other programs while images render in the background.'
     $psLevels=@(@('Off','Off (full speed)'),@('Gentle','Gentle (other programs first)'),@('Max saving','Max saving (PC fully responsive)'))
     foreach($psL in $psLevels){
@@ -3892,49 +4200,49 @@ function Show-GeneratorWindow {
             default { 'Full speed - no throttling (the default).' }
         }
         $psLvl=[string]$psL[0]
-        $psItem.Add_Click({ Set-MossPowerSaver $psLvl }.GetNewClosure())
+        $psItem.Add_Click({ Set-SgPowerSaver $psLvl }.GetNewClosure())
     }
     $psMenuRef=$miPower
-    $mossOptionsMenu.Add_Opening({
+    $sgOptionsMenu.Add_Opening({
         try {
             $cur=if($script:Settings.Contains('PowerSaver')){[string]$script:Settings.PowerSaver}else{'Off'}
             $curLabel=($psLevels | Where-Object { $_[0] -eq $cur } | Select-Object -First 1)[1]
             foreach($it in $psMenuRef.DropDownItems){ if($it -is [System.Windows.Forms.ToolStripItem]){ $it.Checked = ($curLabel -and $it.Text.StartsWith($curLabel)) } }
         } catch {}
     })
-    $miSetup=$mossOptionsMenu.Items.Add('Hardware / Setup...')
+    $miSetup=$sgOptionsMenu.Items.Add('Hardware / Setup...')
     $miSetup.Add_Click({ $f.Tag='SETUP'; $f.Close() })
     $miSetup.ToolTipText='Adapter detection, backend selection (CUDA / Vulkan / ROCm / SYCL / CPU) and GPU preference.'
-    $miEngine=$mossOptionsMenu.Items.Add('Update engine...')
-    $miEngine.Add_Click({ Show-MossEngineUpdateDialog $f })
+    $miEngine=$sgOptionsMenu.Items.Add('Update engine...')
+    $miEngine.Add_Click({ Show-SgEngineUpdateDialog $f })
     $miEngine.ToolTipText='Updates the sd-cli engine core files (the renderer in the bin folder): shows release changelogs and installs the newest engine build. Sootglass itself is not changed.'
-    $miSwitch=$mossOptionsMenu.Items.Add('Switch models...')
-    $miSwitch.Add_Click({ Show-MossSwitchModels $f })
+    $miSwitch=$sgOptionsMenu.Items.Add('Switch models...')
+    $miSwitch.Add_Click({ Show-SgSwitchModels $f })
     $miSwitch.ToolTipText='Switch between installed model precisions instantly (Quantized / Q8 / BF16) - or jump to the Update dialog to download a missing variant. Shares VAE, tokenizer and engine; only the diffusion model and the LLM differ.'
-    $miUpdate=$mossOptionsMenu.Items.Add('Update Sootglass...')
+    $miUpdate=$sgOptionsMenu.Items.Add('Update Sootglass...')
     $miUpdate.ToolTipText="Updates the Sootglass application itself (the program files). Models, outputs and the sd-cli engine are not touched. Use 'Update engine...' for the rendering engine."
-    [void]$mossOptionsMenu.Items.Add('-')
-    $miReset=$mossOptionsMenu.Items.Add('Reset all settings to defaults...')
+    [void]$sgOptionsMenu.Items.Add('-')
+    $miReset=$sgOptionsMenu.Items.Add('Reset all settings to defaults...')
     $miReset.ToolTipText='Clear saved preferences and use Sootglass defaults on the next launch. Models, outputs, and encrypted prompt history are preserved.'
-    $miReset.Add_Click({ [void](Reset-MossSettings $f) })
-    $mossOptionsMenu.Add_Opening({
+    $miReset.Add_Click({ [void](Reset-SgSettings $f) })
+    $sgOptionsMenu.Add_Opening({
         try {
             $of = Get-AbsoluteAppPath ([string]$out.Text)
             $miOut.Text = if (Test-Path -LiteralPath $of -PathType Container) { ('Output folder...  (' + (Split-Path -Leaf $of) + ')') } else { 'Output folder...  (not set)' }
             $missing = 0
-            try { $missing = [int](Update-MossModelSummary) } catch { $missing = -1 }
+            try { $missing = [int](Update-SgModelSummary) } catch { $missing = -1 }
             $miModels.Text = if ($missing -eq 0) { 'Model files...  (all found)' } elseif ($missing -gt 0) { ('Model files...  ({0} missing)' -f $missing) } else { 'Model files...' }
         } catch {}
     })
     $optBtn=New-Object System.Windows.Forms.Button; $optBtn.Text=('Options  ' + [char]0x25BE); $optBtn.Size=New-Object System.Drawing.Size(86,24); $optBtn.Location=New-Object System.Drawing.Point(950,13); $optBtn.FlatStyle='Flat'; $optBtn.BackColor=$cAccent; $optBtn.ForeColor=[System.Drawing.Color]::White; $head.Controls.Add($optBtn)
-    $optBtn.Add_Click({ $mossOptionsMenu.Show($optBtn, 0, $optBtn.Height) })
+    $optBtn.Add_Click({ $sgOptionsMenu.Show($optBtn, 0, $optBtn.Height) })
     # Responsive header (v0.1.91/97): the title and subtitle on the left grow
     # with their text, while the BACKEND badge and the Options button used to
     # be anchored to the RIGHT edge - on a narrower window Windows slid them
     # LEFT until they sat on top of the version title. The whole right side
     # is placed by this handler: the button from the right edge, the badge
     # between title and button, clamped so it can never overlap the title.
-    $mossHeadLayout = {
+    $sgHeadLayout = {
         try {
             $optBtn.Left = $head.ClientSize.Width - 25 - $optBtn.Width
             $x = $optBtn.Left - 14 - $backendBadge.Width
@@ -3943,8 +4251,8 @@ function Show-GeneratorWindow {
             $backendBadge.Left = $x
         } catch {}
     }
-    $head.Add_Resize($mossHeadLayout)
-    & $mossHeadLayout
+    $head.Add_Resize($sgHeadLayout)
+    & $sgHeadLayout
 $miUpdate.Add_Click({
     $release=$null
     try {
@@ -3961,12 +4269,35 @@ $miUpdate.Add_Click({
             $asset=@($release.assets | Where-Object { $_.name -eq 'Sootglass-Studio.zip' } | Select-Object -First 1)
             if(-not $asset){ $asset=@($release.assets | Where-Object { [string]$_.name -like 'Sootglass-Studio*.zip' } | Select-Object -First 1) }
             if(-not $asset -or -not $asset[0].browser_download_url){[System.Windows.Forms.MessageBox]::Show('This release does not include Sootglass-Studio.zip, so Sootglass cannot install it automatically.','Sootglass updater',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)|Out-Null;return}
+            if($script:SgSelfUpdateBusy){ return }
+            $script:SgSelfUpdateBusy=$true
             try {
                 $tempRoot=Join-Path ([System.IO.Path]::GetTempPath()) ('Sootglass-Update-'+[guid]::NewGuid().ToString('N'))
                 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
                 $zipPath=Join-Path $tempRoot 'Sootglass-Studio.zip'
-                [void](Save-MossWebFile ([string]$asset[0].browser_download_url) $zipPath 180)
-                Test-MossZipDigest $zipPath $asset[0] -RequireDigest
+                # v0.3.45: uniform download UX - a small progress dialog with a
+                # bar, MB read-out, ETA and Cancel, like every other download.
+                $script:SgSelfUpdateCancel=$false
+                $updDlg=New-Object System.Windows.Forms.Form
+                $updDlg.Text='Updating Sootglass'; $updDlg.ClientSize=New-Object System.Drawing.Size(420,120); $updDlg.StartPosition='CenterParent'; $updDlg.FormBorderStyle='FixedDialog'; $updDlg.MaximizeBox=$false; $updDlg.MinimizeBox=$false; $updDlg.ControlBox=$false; $updDlg.ShowInTaskbar=$false
+                $updLbl=New-Object System.Windows.Forms.Label; $updLbl.Location=New-Object System.Drawing.Point(12,10); $updLbl.Size=New-Object System.Drawing.Size(396,30); $updLbl.AutoEllipsis=$true; $updDlg.Controls.Add($updLbl)
+                $updBar=New-Object System.Windows.Forms.ProgressBar; $updBar.Location=New-Object System.Drawing.Point(12,44); $updBar.Size=New-Object System.Drawing.Size(396,20); $updDlg.Controls.Add($updBar)
+                $updBtn=Add-Button $updDlg 'Cancel download' 292 76 116 28; $updBtn.AccessibleName='Cancel Sootglass update'
+                $updBtn.Add_Click({ $script:SgSelfUpdateCancel=$true; $updLbl.Text='Cancelling...'; $updBtn.Enabled=$false })
+                $updLabelBase='Downloading Sootglass-Studio.zip'
+                $updLbl.Text=$updLabelBase+'...'
+                $updDlg.Show()
+                try {
+                    [void](Save-SgWebFile ([string]$asset[0].browser_download_url) $zipPath 180 {
+                        param($bytesR,$totalR,$mbpsR)
+                        $etaR=''; if($mbpsR -gt 0.01 -and $totalR -gt 0){ $etaR=' - about '+(Format-SgEta ((($totalR-$bytesR)/1MB)/$mbpsR))+' left' }
+                        $updLbl.Text=($updLabelBase+': '+[math]::Round($bytesR/1MB,1)+' MB'+$(if($totalR -gt 0){' of '+[math]::Round($totalR/1MB,1)+' MB'})+$etaR)
+                        if($totalR -gt 0){ $updBar.Value=[Math]::Min(100,[int](($bytesR*100)/$totalR)) }
+                        [System.Windows.Forms.Application]::DoEvents()
+                        return [bool]$script:SgSelfUpdateCancel
+                    })
+                } finally { try { $updDlg.Close(); $updDlg.Dispose() } catch {} }
+                Test-SgZipDigest $zipPath $asset[0] -RequireDigest
                 Add-Type -AssemblyName System.IO.Compression.FileSystem
                 $archive=[System.IO.Compression.ZipFile]::OpenRead($zipPath)
                 try {
@@ -4003,10 +4334,19 @@ try {
                 $powershellExe=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
                 Start-Process -FilePath $powershellExe -ArgumentList $helperArgs -WindowStyle Hidden | Out-Null
                 [System.Windows.Forms.MessageBox]::Show("Sootglass v$tagText is downloaded. This window will close while the app files are replaced; Sootglass will restart when the update is complete.",'Sootglass updater',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+                # v0.3.45 (fix): clear the busy flag BEFORE closing - the main
+                # window's FormClosing guard would otherwise veto the close and
+                # deadlock the update helper (which waits for this process).
+                $script:SgSelfUpdateBusy=$false
                 $f.Close()
                 return
             } catch {
-                [System.Windows.Forms.MessageBox]::Show(('Sootglass could not download or prepare the update: '+$_.Exception.Message),'Sootglass updater',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null
+                $script:SgSelfUpdateBusy=$false
+                if($_.Exception.Message -like '*cancelled by user*'){
+                    [System.Windows.Forms.MessageBox]::Show('Sootglass update cancelled. Nothing was changed - the running version is untouched.','Sootglass updater',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+                } else {
+                    [System.Windows.Forms.MessageBox]::Show(('Sootglass could not download or prepare the update: '+$_.Exception.Message),'Sootglass updater',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null
+                }
                 if($tempRoot -and (Test-Path -LiteralPath $tempRoot)){Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue}
                 return
             }
@@ -4055,31 +4395,31 @@ try {
 
     Add-Label $left 'Prompt' 18 10 180 | Out-Null
     $historyLabel=Add-Label $left 'Recent' 255 12 48
-    $historyPick=New-Object System.Windows.Forms.ComboBox; $historyPick.DropDownStyle='DropDownList'; $historyPick.Location=New-Object System.Drawing.Point(300,7); $historyPick.Size=New-Object System.Drawing.Size(150,25); $historyPick.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $historyPick.ForeColor=$cText; $left.Controls.Add($historyPick); Set-MossComboTheme $historyPick $left
+    $historyPick=New-Object System.Windows.Forms.ComboBox; $historyPick.DropDownStyle='DropDownList'; $historyPick.Location=New-Object System.Drawing.Point(300,7); $historyPick.Size=New-Object System.Drawing.Size(150,25); $historyPick.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $historyPick.ForeColor=$cText; $left.Controls.Add($historyPick); Set-SgComboTheme $historyPick $left
     $resetHistoryCode=Add-Button $left 'History code...' 411 7 100 25
     # The button used to RESET the code directly - which DELETES the saved
     # history and gives no way to enter the existing code after skipping the
     # startup prompt (user: 'i dont get an option to enter the prompt
     # history code'). It is now a small menu: unlock, set new, turn off.
-    function Show-MossHistoryCodeMenu([System.Windows.Forms.Form]$Owner) {
+    function Show-SgHistoryCodeMenu([System.Windows.Forms.Form]$Owner) {
         $menu=New-Object System.Windows.Forms.ContextMenuStrip
         if ($script:LockedHistoryEnvelope) {
             $enterItem=$menu.Items.Add('Enter code to unlock the prompt history...')
-            $enterItem.Add_Click({ Unlock-MossHistoryAfterShow })
+            $enterItem.Add_Click({ Unlock-SgHistoryAfterShow })
         }
         if ($script:HistoryPassphrase) {
             $infoItem=$menu.Items.Add('Code entered - the prompt history is unlocked')
             $infoItem.Enabled=$false
         }
         $newItem=$menu.Items.Add('Set a NEW code (clears the saved history!)...')
-        $newItem.Add_Click({ if(Reset-MossHistoryPassword $Owner){$history=@();$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('New history code saved. The old history was cleared.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
+        $newItem.Add_Click({ if(Reset-SgHistoryPassword $Owner){$script:Settings.PromptHistory=@();$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('New history code saved. The old history was cleared.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
         if ($script:HistoryEnabled) {
             $offItem=$menu.Items.Add('Turn off prompt history (deletes the saved history)...')
-            $offItem.Add_Click({ if(Disable-MossHistory){$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('Prompt history is off. Nothing is stored anymore.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
+            $offItem.Add_Click({ if(Disable-SgHistory){$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('Prompt history is off. Nothing is stored anymore.','History code',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null} })
         }
         $menu.Show($resetHistoryCode, 0, $resetHistoryCode.Height)
     }
-    $resetHistoryCode.Add_Click({ Show-MossHistoryCodeMenu $f })
+    $resetHistoryCode.Add_Click({ Show-SgHistoryCodeMenu $f })
     $resetHistoryCode.Enabled=$true
     foreach($oldPrompt in @($history | Select-Object -First 10)){[void]$historyPick.Items.Add([string]$oldPrompt)}
     $paste=Add-Button $left 'Paste' 517 7 75 25
@@ -4092,15 +4432,15 @@ try {
     $prompt.ReadOnly=$false
     $paste.Add_Click({ try { if ([System.Windows.Forms.Clipboard]::ContainsText()) { $clipText=[System.Windows.Forms.Clipboard]::GetText(); $prompt.Text=$clipText; $status.Text=('Pasted {0} characters from clipboard.' -f $clipText.Length) } else { $status.Text='The clipboard does not contain any text.' } } catch { [System.Windows.Forms.MessageBox]::Show('Clipboard text could not be read.','Clipboard') | Out-Null } })
     $historyPick.Add_SelectedIndexChanged({if($historyPick.SelectedIndex -ge 0){$prompt.Text=[string]$historyPick.SelectedItem}})
-    function Unlock-MossHistoryAfterShow {
+    function Unlock-SgHistoryAfterShow {
         # The history code prompt appears after the main window is visible, so
         # it opens in context over Sootglass instead of floating alone at startup.
         if (-not $script:LockedHistoryEnvelope) { return }
         while ($true) {
-            $candidate = Get-MossHistoryPassphrase $false 'history' $f
+            $candidate = Get-SgHistoryPassphrase $false 'history' $f
             if ($candidate) {
                 try {
-                    $plain = Unprotect-MossPayload ([string]$script:LockedHistoryEnvelope) $candidate
+                    $plain = Unprotect-SgPayload ([string]$script:LockedHistoryEnvelope) $candidate
                     $script:HistoryPassphrase = $candidate
                     $script:Settings.PromptHistory = @($plain | ConvertFrom-Json)
                     $script:HistoryLocked = $false
@@ -4113,12 +4453,12 @@ try {
                     return
                 } catch { $script:HistoryPassphrase = $null }
             }
-            $choice = Show-MossHistoryRecoveryChoice
+            $choice = Show-SgHistoryRecoveryChoice
             if($choice -eq 'retry'){continue}
             if($choice -eq 'skip'){$script:HistoryLocked=$true;$script:Settings.PromptHistory=@();[System.Windows.Forms.MessageBox]::Show('Sootglass will continue without prompt history. The encrypted history is preserved. You can enter the code later via the History code... button (top left, next to Paste).','History locked')|Out-Null;return}
-            if($choice -eq 'reset'){if(Reset-MossHistoryPassword $f){$historyPick.Items.Clear();return};continue}
-            if($choice -eq 'disable'){if(Disable-MossHistory){$historyPick.Items.Clear();return};continue}
-            if($choice -eq 'plaintext'){if(Disable-MossHistoryPassword){$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('The locked history was deleted. New recent prompts will be saved without encryption.','History code off',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return};continue}
+            if($choice -eq 'reset'){if(Reset-SgHistoryPassword $f){$historyPick.Items.Clear();return};continue}
+            if($choice -eq 'disable'){if(Disable-SgHistory){$historyPick.Items.Clear();return};continue}
+            if($choice -eq 'plaintext'){if(Disable-SgHistoryPassword){$historyPick.Items.Clear();[System.Windows.Forms.MessageBox]::Show('The locked history was deleted. New recent prompts will be saved without encryption.','History code off',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return};continue}
         }
     }
 
@@ -4126,7 +4466,7 @@ try {
     # now starts directly with the Generation... button.)
     $negInitial=if([string]$script:Settings.NegativePrompt){'negative prompt: set'}else{'negative prompt: not set'}
     $negState=Add-Label $left $negInitial 108 163 240
-    function Get-MossEnabledOptionsSummary {
+    function Get-SgEnabledOptionsSummary {
         $enabledOptions=New-Object 'System.Collections.Generic.List[string]'
         if([bool]$script:Settings.SafeMode){$enabledOptions.Add('Safe mode')}
         if([string]$script:Settings.SageAttention -eq '1'){$enabledOptions.Add('SageAttention')}
@@ -4149,7 +4489,7 @@ try {
         $samplerRng=[string]$script:Settings.SamplerRng
         if($samplerRng -in @('std_default','cuda','cpu')){$enabledOptions.Add("Sampler RNG ($samplerRng)")}
         $maxVram=0.0
-        if([double]::TryParse(([string]$script:Settings.MaxVram).Trim(),[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$maxVram) -and $maxVram -ge 0){
+        if([double]::TryParse(([string]$script:Settings.MaxVram).Trim(),[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$maxVram) -and $maxVram -ge 0 -and -not [double]::IsInfinity($maxVram) -and -not [double]::IsNaN($maxVram)){
             if($maxVram -eq 0){$enabledOptions.Add('Max VRAM: live free VRAM (0 GiB)')}
             else {$enabledOptions.Add("Max VRAM: $($script:Settings.MaxVram) GiB")}
         }
@@ -4160,7 +4500,7 @@ try {
         if($enabledOptions.Count -eq 0){return 'No optional features are currently enabled.'}
         return "Enabled options:`r`n`r`n- "+($enabledOptions -join "`r`n- ")
     }
-    function Show-MossGenerationOptionsDialog {
+    function Show-SgGenerationOptionsDialog {
         # v0.3.11 LAYOUT REWRITE: this dialog used to be ONE 560x1136 px
         # column - taller than most screens (1080p included) - with every
         # section stacked end to end. It also had real defects: the
@@ -4202,12 +4542,12 @@ try {
         $optSampler=New-Object System.Windows.Forms.ComboBox; $optSampler.AccessibleName='Sampler'; $optSampler.TabIndex=2; $optSampler.DropDownStyle='DropDownList'; $optSampler.Location=New-Object System.Drawing.Point(12,184); $optSampler.Size=New-Object System.Drawing.Size(200,26); $optSampler.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSampler.ForeColor=$cText
         foreach($s in @('Default (euler)','euler','euler_a','heun','dpm2','dpm++2s_a','dpm++2m','dpm++2mv2','ipndm','ipndm_v','lcm','ddim_trailing','tcd','res_multistep','res_2s','er_sde','euler_cfg_pp','euler_a_cfg_pp','euler_ge','dpm++2m_sde','dpm++2m_sde_bt','lms')){[void]$optSampler.Items.Add($s)}
         $storedSampler=[string]$script:Settings.SamplingMethod; if($storedSampler -eq 'Default (model)'){$storedSampler='Default (euler)'}
-        $optSampler.SelectedItem=$storedSampler; if($optSampler.SelectedIndex -lt 0){$optSampler.SelectedIndex=0}; $tabMain.Controls.Add($optSampler); Set-MossComboTheme $optSampler $tabMain
+        $optSampler.SelectedItem=$storedSampler; if($optSampler.SelectedIndex -lt 0){$optSampler.SelectedIndex=0}; $tabMain.Controls.Add($optSampler); Set-SgComboTheme $optSampler $tabMain
         Add-AutoLabel $tabMain 'Scheduler' 300 164 | Out-Null
         $optSched=New-Object System.Windows.Forms.ComboBox; $optSched.AccessibleName='Scheduler'; $optSched.TabIndex=3; $optSched.DropDownStyle='DropDownList'; $optSched.Location=New-Object System.Drawing.Point(300,184); $optSched.Size=New-Object System.Drawing.Size(280,26); $optSched.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $optSched.ForeColor=$cText
         foreach($s in @('Default (Euler/discrete, shift 5)','discrete','karras','exponential','ays','gits','sgm_uniform','simple','smoothstep','kl_optimal','lcm','bong_tangent','ltx2','logit_normal','flux2','flux','beta','llada_image')){[void]$optSched.Items.Add($s)}
         $storedSched=[string]$script:Settings.Scheduler; if($storedSched -eq 'Default (model)'){$storedSched='Default (Euler/discrete, shift 5)'}
-        $optSched.SelectedItem=$storedSched; if($optSched.SelectedIndex -lt 0){$optSched.SelectedIndex=0}; $tabMain.Controls.Add($optSched); Set-MossComboTheme $optSched $tabMain
+        $optSched.SelectedItem=$storedSched; if($optSched.SelectedIndex -lt 0){$optSched.SelectedIndex=0}; $tabMain.Controls.Add($optSched); Set-SgComboTheme $optSched $tabMain
         # Plain-language descriptions: shown inline below each dropdown and on
         # hover, updated as the user browses the lists.
         $samplerDescriptions=@{
@@ -4280,9 +4620,9 @@ try {
         # v0.3.8 LoRA group: files come from models\loras (stems must be
         # usable inside the engine's <lora:stem:strength> prompt tag).
         Add-AutoLabel $tabLora 'LoRA models (optional trained add-ons)' 12 8 | Out-Null
-        $loraFiles=Get-MossLoraFiles
+        $loraFiles=Get-SgLoraFiles
         $loraStems=@(); foreach($lf in $loraFiles){ $loraStems += [string]$lf.Stem }
-        $loraDirAbs=Ensure-MossLoraDir
+        $loraDirAbs=Ensure-SgLoraDir
         $loraList=New-Object System.Windows.Forms.CheckedListBox; $loraList.AccessibleName='Available LoRA models'; $loraList.TabIndex=0; $loraList.CheckOnClick=$true; $loraList.Location=New-Object System.Drawing.Point(12,32); $loraList.Size=New-Object System.Drawing.Size(320,170); $loraList.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $loraList.ForeColor=$cText; $loraList.BorderStyle='FixedSingle'
         foreach($ls in $loraStems){ [void]$loraList.Items.Add($ls,$false) }
         # Restore saved selections/strengths; files deleted since are dropped.
@@ -4301,10 +4641,18 @@ try {
         $loraList.Add_SelectedIndexChanged({ $selS=[string]$loraList.SelectedItem; if($selS -and $loraStrengths.Contains($selS)){ $loraNum.Value=[decimal]$loraStrengths[$selS] } })
         $loraRescan=Add-Button $tabLora 'Rescan folder' 344 88 100 25
         $loraRescan.Add_Click({
+            # v0.3.45 (fix): a Rescan used to wipe all saved strengths, so one
+            # accidental Rescan + Save silently cleared the user's LoRA setup.
+            # Keep strengths for files that still exist; only drop removed ones.
+            $loraSaved=@{}
+            foreach($kS in @($loraStrengths.Keys)){ $loraSaved[$kS]=$loraStrengths[$kS] }
             $loraList.Items.Clear(); $loraStrengths.Clear()
             $any=$false
-            $found=@(Get-MossLoraFiles)
-            foreach($lf2 in $found){ [void]$loraList.Items.Add([string]$lf2.Stem,$false); $any=$true }
+            $found=@(Get-SgLoraFiles)
+            foreach($lf2 in $found){
+                [void]$loraList.Items.Add([string]$lf2.Stem,$false); $any=$true
+                if($loraSaved.Contains([string]$lf2.Stem)){ $loraStrengths[[string]$lf2.Stem]=$loraSaved[[string]$lf2.Stem] }
+            }
             if(-not $any){ [void]$loraList.Items.Add('(no .safetensors files found)'); $loraList.Enabled=$false; $loraHint.Text=('No LoRA files found in: '+$loraDirAbs) } else { $loraList.Enabled=$true; $loraHint.Text=('Found '+$found.Count+' LoRA file(s) in: '+$loraDirAbs) }
         })
         # v0.3.10: optional LoRA downloader - opens a picker with the LoRAs
@@ -4312,15 +4660,15 @@ try {
         # the user ticks one and presses Download there.
         $loraGet=Add-Button $tabLora 'Get LoRAs...' 452 88 100 25
         $loraGet.Add_Click({
-            $before=@(); foreach($lb in (Get-MossLoraFiles)){ $before += [string]$lb.Stem }
-            Show-MossLoraDownloadDialog $g
+            $before=@(); foreach($lb in (Get-SgLoraFiles)){ $before += [string]$lb.Stem }
+            Show-SgLoraDownloadDialog $g
             # A LoRA downloaded in the picker must be USABLE right away:
             # refresh the list, keep the existing checked state and check the
             # newly downloaded ones with the default strength 1.0 so the next
             # generation really uses them.
             $loraList.Items.Clear()
             $have=@()
-            foreach($lf4 in (Get-MossLoraFiles)){ $have += [string]$lf4.Stem }
+            foreach($lf4 in (Get-SgLoraFiles)){ $have += [string]$lf4.Stem }
             $newOnes=@()
             foreach($hs in $have){ if($before -notcontains $hs){ $newOnes += $hs } }
             foreach($hs in $have){
@@ -4336,7 +4684,7 @@ try {
         })
         $loraOpen=Add-Button $tabLora 'Open folder' 344 122 208 25
         $loraOpen.Add_Click({
-            $openPath=Ensure-MossLoraDir
+            $openPath=Ensure-SgLoraDir
             if(-not $openPath){ $loraHint.Text='The LoRA folder could not be opened.'; return }
             try { Start-Process -FilePath $openPath -ErrorAction Stop } catch { $loraHint.Text=('Could not open LoRA folder: '+$_.Exception.Message) }
         })
@@ -4354,11 +4702,11 @@ try {
         $offCheck.Checked = ([string]$script:Settings.OffloadToCpu -eq '1')
         Add-WrapLabel $tabSpeed 'CPU offload saves VRAM but can slow generation. Turn it off again here when you no longer need the extra VRAM.' 12 88 576 38 | Out-Null
         Add-AutoLabel $tabSpeed 'Step cache' 12 134 | Out-Null
-        $cacheCombo=New-Object System.Windows.Forms.ComboBox; $cacheCombo.DropDownStyle='DropDownList'; $cacheCombo.Location=New-Object System.Drawing.Point(12,154); $cacheCombo.Size=New-Object System.Drawing.Size(240,26); $cacheCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $cacheCombo.ForeColor=$cText; foreach($ci in @('Off (full quality)','EasyCache (~1.3-1.6x faster, tiny quality loss)')){[void]$cacheCombo.Items.Add($ci)}; $cacheCombo.SelectedIndex= if([string]$script:Settings.CacheMode -eq 'easycache'){1}else{0}; $tabSpeed.Controls.Add($cacheCombo); Set-MossComboTheme $cacheCombo $tabSpeed
+        $cacheCombo=New-Object System.Windows.Forms.ComboBox; $cacheCombo.DropDownStyle='DropDownList'; $cacheCombo.Location=New-Object System.Drawing.Point(12,154); $cacheCombo.Size=New-Object System.Drawing.Size(240,26); $cacheCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $cacheCombo.ForeColor=$cText; foreach($ci in @('Off (full quality)','EasyCache (~1.3-1.6x faster, tiny quality loss)')){[void]$cacheCombo.Items.Add($ci)}; $cacheCombo.SelectedIndex= if([string]$script:Settings.CacheMode -eq 'easycache'){1}else{0}; $tabSpeed.Controls.Add($cacheCombo); Set-SgComboTheme $cacheCombo $tabSpeed
         $prevCheck=Add-Check $tabSpeed 'Live preview - show the image while it renders' 12 192 576
         $prevCheck.Checked = ([string]$script:Settings.LivePreview -eq '1')
         Add-AutoLabel $tabSpeed 'Preview decoder' 12 226 | Out-Null
-        $pvCombo=New-Object System.Windows.Forms.ComboBox; $pvCombo.DropDownStyle='DropDownList'; $pvCombo.Location=New-Object System.Drawing.Point(12,246); $pvCombo.Size=New-Object System.Drawing.Size(240,26); $pvCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $pvCombo.ForeColor=$cText; foreach($pv in @('proj (fast, default)','vae (exact, slower)','tae (needs taesd file)','Off (no live preview)')){[void]$pvCombo.Items.Add($pv)}; $pvCombo.SelectedIndex= switch([string]$script:Settings.PreviewMethod){'vae'{1}'tae'{2}'none'{3}default{0}}; $tabSpeed.Controls.Add($pvCombo); Set-MossComboTheme $pvCombo $tabSpeed; $dlgTip.SetToolTip($pvCombo,'How the engine decodes the preview while rendering. proj = fast built-in preview. vae = the real VAE, exact colors but slower updates. tae = tiny autoencoder, only used when a taesd.safetensors sits in models. Off = no live preview.')
+        $pvCombo=New-Object System.Windows.Forms.ComboBox; $pvCombo.DropDownStyle='DropDownList'; $pvCombo.Location=New-Object System.Drawing.Point(12,246); $pvCombo.Size=New-Object System.Drawing.Size(240,26); $pvCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $pvCombo.ForeColor=$cText; foreach($pv in @('proj (fast, default)','vae (exact, slower)','tae (needs taesd file)','Off (no live preview)')){[void]$pvCombo.Items.Add($pv)}; $pvCombo.SelectedIndex= switch([string]$script:Settings.PreviewMethod){'vae'{1}'tae'{2}'none'{3}default{0}}; $tabSpeed.Controls.Add($pvCombo); Set-SgComboTheme $pvCombo $tabSpeed; $dlgTip.SetToolTip($pvCombo,'How the engine decodes the preview while rendering. proj = fast built-in preview. vae = the real VAE, exact colors but slower updates. tae = tiny autoencoder, only used when a taesd.safetensors sits in models. Off = no live preview.')
         Add-AutoLabel $tabSpeed 'Write a preview every' 12 280 | Out-Null
         $pvNum=New-Object System.Windows.Forms.NumericUpDown; $pvNum.Location=New-Object System.Drawing.Point(12,300); $pvNum.Size=New-Object System.Drawing.Size(70,23); $pvNum.Minimum=1; $pvNum.Maximum=20; $pvPv=0; if([int]::TryParse([string]$script:Settings.PreviewInterval,[ref]$pvPv)){ $pvNum.Value=[Math]::Max(1,[Math]::Min(20,$pvPv)) }else{ $pvNum.Value=4 }; $tabSpeed.Controls.Add($pvNum); $dlgTip.SetToolTip($pvNum,'Write a preview every N denoiser steps. 1 = smoothest but costs a little speed; 4 is a good middle ground.')
         Add-AutoLabel $tabSpeed 'steps (1-20)' 88 300 | Out-Null
@@ -4373,9 +4721,9 @@ try {
         Add-AutoLabel $tabTune 'Distilled guidance' 12 38 | Out-Null
         $guidBox=Add-TextBox $tabTune ([string]$script:Settings.Guidance) 140 34 90 23; $dlgTip.SetToolTip($guidBox,'Distilled guidance scale (engine default 3.5). Blank = engine default. Only affects models with a guidance input.')
         Add-AutoLabel $tabTune 'Tileable output' 12 70 | Out-Null
-        $tuneCircular=New-Object System.Windows.Forms.ComboBox; $tuneCircular.DropDownStyle='DropDownList'; $tuneCircular.Location=New-Object System.Drawing.Point(140,66); $tuneCircular.Size=New-Object System.Drawing.Size(240,26); $tuneCircular.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $tuneCircular.ForeColor=$cText; foreach($ti in @('Off (normal edges)','Both axes (seamless)','Width only','Height only')){[void]$tuneCircular.Items.Add($ti)}; $tuneCircular.SelectedIndex= switch([string]$script:Settings.Circular){'xy'{1}'x'{2}'y'{3}default{0}}; $tabTune.Controls.Add($tuneCircular); Set-MossComboTheme $tuneCircular $tabTune; $dlgTip.SetToolTip($tuneCircular,'Circular padding for tileable textures (e.g. for tiling backdrops).')
+        $tuneCircular=New-Object System.Windows.Forms.ComboBox; $tuneCircular.DropDownStyle='DropDownList'; $tuneCircular.Location=New-Object System.Drawing.Point(140,66); $tuneCircular.Size=New-Object System.Drawing.Size(240,26); $tuneCircular.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $tuneCircular.ForeColor=$cText; foreach($ti in @('Off (normal edges)','Both axes (seamless)','Width only','Height only')){[void]$tuneCircular.Items.Add($ti)}; $tuneCircular.SelectedIndex= switch([string]$script:Settings.Circular){'xy'{1}'x'{2}'y'{3}default{0}}; $tabTune.Controls.Add($tuneCircular); Set-SgComboTheme $tuneCircular $tabTune; $dlgTip.SetToolTip($tuneCircular,'Circular padding for tileable textures (e.g. for tiling backdrops).')
         Add-AutoLabel $tabTune 'Sampler RNG' 12 102 | Out-Null
-        $tuneRng=New-Object System.Windows.Forms.ComboBox; $tuneRng.DropDownStyle='DropDownList'; $tuneRng.Location=New-Object System.Drawing.Point(140,98); $tuneRng.Size=New-Object System.Drawing.Size(240,26); $tuneRng.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $tuneRng.ForeColor=$cText; foreach($ti in @('Default (cuda)','std_default','cuda','cpu')){[void]$tuneRng.Items.Add($ti)}; $tuneRng.SelectedIndex= switch([string]$script:Settings.SamplerRng){'std_default'{1}'cuda'{2}'cpu'{3}default{0}}; $tabTune.Controls.Add($tuneRng); Set-MossComboTheme $tuneRng $tabTune; $dlgTip.SetToolTip($tuneRng,'Noise generator used by the sampler. Changing it makes seeds non-reproducible against old images.')
+        $tuneRng=New-Object System.Windows.Forms.ComboBox; $tuneRng.DropDownStyle='DropDownList'; $tuneRng.Location=New-Object System.Drawing.Point(140,98); $tuneRng.Size=New-Object System.Drawing.Size(240,26); $tuneRng.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $tuneRng.ForeColor=$cText; foreach($ti in @('Default (cuda)','std_default','cuda','cpu')){[void]$tuneRng.Items.Add($ti)}; $tuneRng.SelectedIndex= switch([string]$script:Settings.SamplerRng){'std_default'{1}'cuda'{2}'cpu'{3}default{0}}; $tabTune.Controls.Add($tuneRng); Set-SgComboTheme $tuneRng $tabTune; $dlgTip.SetToolTip($tuneRng,'Noise generator used by the sampler. Changing it makes seeds non-reproducible against old images.')
         Add-AutoLabel $tabTune 'Max VRAM (GiB)' 12 134 | Out-Null
         $vramBox=Add-TextBox $tabTune ([string]$script:Settings.MaxVram) 140 130 90 23; $dlgTip.SetToolTip($vramBox,'Per-device VRAM budget in GiB for automatic graph cutting, e.g. 6. Blank = engine decides. 0 = use live free VRAM.')
         $eagerCheck=Add-Check $tabTune 'Eager load - load all model weights at start' 12 166 576
@@ -4413,11 +4761,11 @@ try {
             }
             $script:Settings.LoraSelection=($loraSelParts -join '|')
             $gi=0.0
-            if([double]::TryParse(([string]$guidBox.Text).Trim(),[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$gi)){ $script:Settings.Guidance=('{0}' -f $gi) }else{ $script:Settings.Guidance='' }
+            if([double]::TryParse(([string]$guidBox.Text).Trim(),[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$gi) -and -not [double]::IsNaN($gi) -and -not [double]::IsInfinity($gi)){ $script:Settings.Guidance=(ConvertFrom-SgDouble $gi) }else{ $script:Settings.Guidance='' }
             $script:Settings.Circular= switch($tuneCircular.SelectedIndex){1{'xy'}2{'x'}3{'y'}default{'off'}}
             $script:Settings.SamplerRng= switch($tuneRng.SelectedIndex){1{'std_default'}2{'cuda'}3{'cpu'}default{''}}
             $vi=0.0
-            if([double]::TryParse(([string]$vramBox.Text).Trim(),[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$vi) -and $vi -ge 0){ $script:Settings.MaxVram=('{0}' -f $vi) }else{ $script:Settings.MaxVram='' }
+            if([double]::TryParse(([string]$vramBox.Text).Trim(),[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$vi) -and $vi -ge 0 -and -not [double]::IsInfinity($vi) -and -not [double]::IsNaN($vi)){ $script:Settings.MaxVram=(ConvertFrom-SgDouble $vi) }else{ $script:Settings.MaxVram='' }
             $script:Settings.EagerLoad= if($eagerCheck.Checked){'1'}else{'0'}
             $script:Settings.DisablePrefetch= if($prefCheck.Checked){'1'}else{'0'}
             # PERSIST IMMEDIATELY (v0.1.89): Options changes used to be written
@@ -4448,21 +4796,21 @@ try {
     # own Options menu (Setup / engine / Sootglass updates), so the in-panel
     # generation-settings button is named for what it opens. Width measured.
     $negBtn=Add-Button $left 'Generation...' 18 134 90 22
-    $negBtn.Add_Click({ Show-MossGenerationOptionsDialog })
+    $negBtn.Add_Click({ Show-SgGenerationOptionsDialog })
     $enabledOptionsBtn=Add-Button $left 'Active options...' 114 134 110 22
     $enabledOptionsBtn.Add_Click({
-        $activeOptions=Get-MossEnabledOptionsSummary
+        $activeOptions=Get-SgEnabledOptionsSummary
         [System.Windows.Forms.MessageBox]::Show($f,$activeOptions,'Enabled options',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
     })
     $styleLabel=Add-Label $left 'Visual style' 18 163 130
     # Snug dropdown (v0.1.97): fits 'Dark fantasy / gothic', barely.
-    $style=New-Object System.Windows.Forms.ComboBox; $style.DropDownStyle='DropDownList'; $style.Location=New-Object System.Drawing.Point(18,181); $style.Size=New-Object System.Drawing.Size(160,23); $style.MaxDropDownItems=7; $style.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $style.ForeColor=$cText; foreach($item in @('None (no style)','Photorealistic','Anime','Digital illustration','Oil painting','Watercolor','3D render','Comic book','Cinematic','Fantasy art','Dark fantasy / gothic','Cyberpunk / sci-fi','Studio portrait','Sketch / pencil drawing','Pixel art','Synthwave / retro 80s','Low poly 3D')){[void]$style.Items.Add($item)}; $style.SelectedItem=[string]$script:Settings.ImageStyle; if($style.SelectedIndex -lt 0){$style.SelectedIndex=0}; $left.Controls.Add($style); Set-MossComboTheme $style $left
+    $style=New-Object System.Windows.Forms.ComboBox; $style.DropDownStyle='DropDownList'; $style.Location=New-Object System.Drawing.Point(18,181); $style.Size=New-Object System.Drawing.Size(160,23); $style.MaxDropDownItems=7; $style.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $style.ForeColor=$cText; foreach($item in @('None (no style)','Photorealistic','Anime','Digital illustration','Oil painting','Watercolor','3D render','Comic book','Cinematic','Fantasy art','Dark fantasy / gothic','Cyberpunk / sci-fi','Studio portrait','Sketch / pencil drawing','Pixel art','Synthwave / retro 80s','Low poly 3D')){[void]$style.Items.Add($item)}; $style.SelectedItem=[string]$script:Settings.ImageStyle; if($style.SelectedIndex -lt 0){$style.SelectedIndex=0}; $left.Controls.Add($style); Set-SgComboTheme $style $left
     # Resolution sits UNDER Visual style (v0.1.99, user).
     $resLabel=Add-Label $left 'Resolution' 18 209 90
     # Snug dropdown (v0.1.97): fits 'Landscape 16:9  |  1360 x 768', barely.
     $res=New-Object System.Windows.Forms.ComboBox; $res.DropDownStyle='DropDownList'; $res.Location=New-Object System.Drawing.Point(18,226); $res.Size=New-Object System.Drawing.Size(190,23); $res.MaxDropDownItems=7; $res.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $res.ForeColor=$cText
     $resItems=@('Landscape 16:9  |  1360 x 768','Square  |  1024 x 1024','Portrait 3:4  |  768 x 1024','Landscape 4:3  |  1280 x 960','Portrait 9:16  |  768 x 1360','2K Landscape  |  2560 x 1440','2K Square  |  2048 x 2048','2K Portrait  |  1536 x 2048','2K 4:3  |  2048 x 1536','2K 9:16  |  1440 x 2560','4K Landscape  |  3840 x 2160','4K Square  |  4096 x 4096','4K Portrait  |  3072 x 4096','4K 4:3  |  4096 x 3072','4K 9:16  |  2160 x 3840','Custom dimensions')
-    foreach($ri in $resItems){[void]$res.Items.Add($ri)}; $left.Controls.Add($res); Set-MossComboTheme $res $left
+    foreach($ri in $resItems){[void]$res.Items.Add($ri)}; $left.Controls.Add($res); Set-SgComboTheme $res $left
     $wBox=Add-TextBox $left ([string]$script:Settings.Width) 232 226 82 23; $hBox=Add-TextBox $left ([string]$script:Settings.Height) 327 226 82 23
     $widthLabel=Add-Label $left 'Width' 232 209 80; $heightLabel=Add-Label $left 'Height' 327 209 80
     $resMap=@(@(1360,768),@(1024,1024),@(768,1024),@(1280,960),@(768,1360),@(2560,1440),@(2048,2048),@(1536,2048),@(2048,1536),@(1440,2560),@(3840,2160),@(4096,4096),@(3072,4096),@(4096,3072),@(2160,3840))
@@ -4475,7 +4823,7 @@ try {
     $cfgHelp.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("CFG scale (Classifier-Free Guidance) controls how strictly the image follows your prompt.`r`n`r`n- Low (1-4): more artistic freedom, softer prompt adherence. This model is tuned for this range - the default 3 suits it well.`r`n- Medium (5-10): stronger prompt following; colors and contrast grow.`r`n- High (15-30): forces the prompt hard - often causes burned, oversaturated or distorted images.`r`n`r`nRule of thumb: raise it only if the image ignores parts of your prompt; lower it if images look overcooked.",'What is CFG scale?',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null
     })
-    $countLabel=Add-Label $left 'Images' 202 254 70; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDown'; $count.Location=New-Object System.Drawing.Point(202,271); $count.Size=New-Object System.Drawing.Size(75,23); foreach($n in @(1,2,4,8,16,32,64,128,256,512,1000)){[void]$count.Items.Add([string]$n)}; $count.Text=[string]$script:Settings.ImageCount; $left.Controls.Add($count); Set-MossComboTheme $count $left
+    $countLabel=Add-Label $left 'Images' 202 254 70; $count=New-Object System.Windows.Forms.ComboBox; $count.DropDownStyle='DropDown'; $count.Location=New-Object System.Drawing.Point(202,271); $count.Size=New-Object System.Drawing.Size(75,23); foreach($n in @(1,2,4,8,16,32,64,128,256,512,1000)){[void]$count.Items.Add([string]$n)}; $count.Text=[string]$script:Settings.ImageCount; $left.Controls.Add($count); Set-SgComboTheme $count $left
     $seedLabel=Add-Label $left 'Seed (-1 = random)' 284 254 116; $seed=Add-TextBox $left ([string]$script:Settings.Seed) 284 271 90 23
     # Speed modes (v0.1.93): 8x and Fastest REMOVED from the UI - measured,
     # their drafts (35% / 128-px side) are too soft to be useful. The engine
@@ -4484,7 +4832,7 @@ try {
     # v0.3.11: the speed dropdown had NO caption at all (the user saw a
     # combo box with nothing above it) - it now has one.
     $speedLabel=Add-Label $left 'Render speed' 18 301 100
-    $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(18,318); $speedCombo.Size=New-Object System.Drawing.Size(220,23); $speedCombo.MaxDropDownItems=3; $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (full quality)','~2x faster (70%)','~4x faster (50%)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo); Set-MossComboTheme $speedCombo $left
+    $speedCombo=New-Object System.Windows.Forms.ComboBox; $speedCombo.DropDownStyle='DropDownList'; $speedCombo.Location=New-Object System.Drawing.Point(18,318); $speedCombo.Size=New-Object System.Drawing.Size(220,23); $speedCombo.MaxDropDownItems=3; $speedCombo.BackColor=[System.Drawing.Color]::FromArgb(16,21,30); $speedCombo.ForeColor=$cText; foreach($si in @('Exact (full quality)','~2x faster (70%)','~4x faster (50%)')){[void]$speedCombo.Items.Add($si)}; $speedCombo.SelectedIndex=0; $left.Controls.Add($speedCombo); Set-SgComboTheme $speedCombo $left
     $speedHint=New-Object System.Windows.Forms.Label; $speedHint.Text='Faster modes make smaller drafts, then enlarge.'; $speedHint.Location=New-Object System.Drawing.Point(252,320); $speedHint.Size=New-Object System.Drawing.Size(282,34); $speedHint.ForeColor=[System.Drawing.Color]::FromArgb(110,124,148); $speedHint.TextAlign='MiddleLeft'; $left.Controls.Add($speedHint)
     # OUTPUT FOLDER (v0.1.98): MOVED INTO THE HEADER OPTIONS MENU (user).
     # The read-only textbox stays as a HIDDEN state holder - the generate
@@ -4506,12 +4854,12 @@ try {
         $tb=Add-TextBox $left $val 0 0 419 23; $tb.Visible=$false
         $modelControls[$mr[1]]=$tb
     }
-    function Update-MossModelSummary {
+    function Update-SgModelSummary {
         $check=@((Get-AbsoluteAppPath ([string]$script:Settings.EnginePath)))
         foreach($k in @('DiffusionModelPath','LlmPath','VaePath','TokenizerPath')){ $check+=(Get-AbsoluteAppPath $modelControls[$k].Text) }
         return @($check | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count
     }
-    function Show-MossModelFilesDialog {
+    function Show-SgModelFilesDialog {
         $g=New-Object System.Windows.Forms.Form
         $g.Text='Model files'; $g.ClientSize=New-Object System.Drawing.Size(600,296); $g.StartPosition='CenterParent'; $g.FormBorderStyle='FixedDialog'; $g.MaximizeBox=$false; $g.MinimizeBox=$false; $g.ShowInTaskbar=$false
         $g.BackColor=[System.Drawing.Color]::FromArgb(18,22,31); $g.ForeColor=[System.Drawing.Color]::FromArgb(230,236,245); $g.Font=New-Object System.Drawing.Font('Segoe UI',9)
@@ -4539,15 +4887,15 @@ try {
             $bb=Add-Button $g 'Browse...' 502 $y 86 27
             $bb.AccessibleName=('Browse for '+[string]$mr[0]+' file'); $bb.TabIndex=($dlgBoxes.Count+3)
             $key=$mr[1]
-            $bb.Add_Click({$dlg=New-Object System.Windows.Forms.OpenFileDialog;$dlg.Title="Select file";$dlg.Filter='Model and data files|*.safetensors;*.gguf;*.json|All files (*.*)|*.*';$dlg.CheckFileExists=$true;$cur=Get-AbsoluteAppPath $dlgBoxes[$key].Text;if(Test-Path -LiteralPath $cur -PathType Leaf){$dlg.InitialDirectory=Split-Path -Parent $cur;$dlg.FileName=Split-Path -Leaf $cur}else{$modelsDir=Join-Path $script:AppRoot 'models';if(Test-Path -LiteralPath $modelsDir -PathType Container){$dlg.InitialDirectory=$modelsDir}};if($dlg.ShowDialog($g) -eq 'OK'){$dlgBoxes[$key].Text=$dlg.FileName};[void](Update-MossDlgSummaryBoxes $dlgBoxes $dlgSummary);$dlg.Dispose()}.GetNewClosure())
+            $bb.Add_Click({$dlg=New-Object System.Windows.Forms.OpenFileDialog;$dlg.Title="Select file";$dlg.Filter='Model and data files|*.safetensors;*.gguf;*.json|All files (*.*)|*.*';$dlg.CheckFileExists=$true;$cur=Get-AbsoluteAppPath $dlgBoxes[$key].Text;if(Test-Path -LiteralPath $cur -PathType Leaf){$dlg.InitialDirectory=Split-Path -Parent $cur;$dlg.FileName=Split-Path -Leaf $cur}else{$modelsDir=Join-Path $script:AppRoot 'models';if(Test-Path -LiteralPath $modelsDir -PathType Container){$dlg.InitialDirectory=$modelsDir}};if($dlg.ShowDialog($g) -eq 'OK'){$dlgBoxes[$key].Text=$dlg.FileName};[void](Update-SgDlgSummaryBoxes $dlgBoxes $dlgSummary);$dlg.Dispose()}.GetNewClosure())
             $y+=30
         }
         # v0.3.1: the updater is SCRIPT-scoped (with explicit parameters). The old
         # nested function could not be called from the browse-button closure
         # built with GetNewClosure() - cancelling the file picker threw
-        # "The term 'Update-MossDlgSummary' is not recognized" as an unhandled
+        # "The term 'Update-SgDlgSummary' is not recognized" as an unhandled
         # exception dialog.
-        Update-MossDlgSummaryBoxes $dlgBoxes $dlgSummary
+        Update-SgDlgSummaryBoxes $dlgBoxes $dlgSummary
         $ok=Add-Button $g 'OK' 412 226 76 30
         $ok.AccessibleName='Apply model file paths'; $ok.TabIndex=8
         $cancel=Add-Button $g 'Cancel' 496 226 76 30
@@ -4563,7 +4911,7 @@ try {
     }
 
     # Compact action row (v0.1.96/98): half-size buttons (24 px tall). The
-    # row is placed by Update-MossLeftActionLayout right below the speed
+    # row is placed by Update-SgLeftActionLayout right below the speed
     # hint; with Output folder / Model files / Error report / Benchmarks in
     # the header Options menu, only the four generation actions remain.
     try { $f.Refresh() } catch {}
@@ -4577,7 +4925,7 @@ try {
         $st=$script:GenState
         if (-not $st.IsRunning -or $null -eq $st.Process -or $st.Process.HasExited) { return }
         if (-not $st.Paused) {
-            if (Suspend-MossProcess $st.Process) {
+            if (Suspend-SgProcess $st.Process) {
                 $st.Paused=$true; $st.PausedAt=Get-Date
                 $btnPause.Text='Resume'
                 $status.Text=("PAUSED - image {0} of {1} frozen (VRAM stays allocated). Click Resume to continue." -f [int]$st.CurrentImageIndex,[int]$st.Job.Count)
@@ -4586,7 +4934,7 @@ try {
                 $log.AppendText("`r`nPause failed: the engine process could not be suspended (it keeps running).")
             }
         } else {
-            if (Resume-MossProcess $st.Process) {
+            if (Resume-SgProcess $st.Process) {
                 # Shift the time anchors by the paused span so elapsed
                 # times, the ETA and the power meter exclude the pause.
                 $pauseSpan=((Get-Date)-$st.PausedAt).TotalSeconds
@@ -4598,7 +4946,7 @@ try {
                 $st.PowerLastSample=Get-Date
                 $btnPause.Text='Pause'
                 $status.Text='Rendering...'
-                $log.AppendText(("`r`nResumed after {0} paused. Rendering continues." -f (Format-MossDuration $pauseSpan)))
+                $log.AppendText(("`r`nResumed after {0} paused. Rendering continues." -f (Format-SgDuration $pauseSpan)))
             } else {
                 $log.AppendText("`r`nResume failed: the engine process could not be resumed.")
             }
@@ -4622,7 +4970,7 @@ try {
             Start-Process -FilePath $taskkill -ArgumentList @('/PID',[string]$skipPid,'/T','/F') -WindowStyle Hidden -Wait | Out-Null
         } catch { try { $st.Process.Kill() } catch {} }
     })
-    function Show-MossBenchmarkDialog {
+    function Show-SgBenchmarkDialog {
         # Shows every recorded resolution/steps/speed-mode combination with its
         # real measured seconds per image, an estimate for the CURRENT main
         # window settings, and a quick benchmark runner for gaps in the table.
@@ -4651,7 +4999,7 @@ try {
 
         $fillGrid = {
             $grid.Rows.Clear()
-            $list = Load-MossBenchmarks
+            $list = Load-SgBenchmarks
             $groups = @{}
             foreach ($e in $list) {
                 # Old benchmark files can still carry a HiresScale field from
@@ -4672,7 +5020,7 @@ try {
                     $r0.Mode,
                     $(if ($r0.Hr -ge 1.5) { ('img2img + highres {0}x' -f ([string]$r0.Hr).Replace(',', '.')) } elseif ($r0.I2I) { 'img2img' } else { 'fresh' }),
                     ([string]$r0.Steps),
-                    (Format-MossFixedTime $avg),
+                    (Format-SgFixedTime $avg),
                     ([string]$r0.Runs),
                     $r0.Last
                 ))
@@ -4684,9 +5032,9 @@ try {
             try {
                 $wi = [int]$wBox.Text; $he = [int]$hBox.Text; $stn = [int]$steps.Text
                 $mode = switch ([string]$speedCombo.SelectedItem) { '~2x faster (70%)' { '2x' } '~4x faster (50%)' { '4x' } default { 'Exact' } }
-                $bm = Get-MossBenchmarkEstimate $wi $he $mode $stn $false
+                $bm = Get-SgBenchmarkEstimate $wi $he $mode $stn $false
                 if ($bm) {
-                    $estLabel.Text = ('Estimated for your current settings ({0} x {1}, {2}, {3} steps): ~{4} per image  -  ~{5} for a batch of 16.{6}Based on the measured run: {7}.' -f $wi, $he, $mode, $stn, (Format-MossFixedTime $bm.Sec), (Format-MossFixedTime ($bm.Sec * 16)), [Environment]::NewLine, $bm.Based)
+                    $estLabel.Text = ('Estimated for your current settings ({0} x {1}, {2}, {3} steps): ~{4} per image  -  ~{5} for a batch of 16.{6}Based on the measured run: {7}.' -f $wi, $he, $mode, $stn, (Format-SgFixedTime $bm.Sec), (Format-SgFixedTime ($bm.Sec * 16)), [Environment]::NewLine, $bm.Based)
                 } else {
                     $estLabel.Text = 'No benchmark data yet for an estimate - generate a few images (or run the quick benchmark below) and this fills in automatically.'
                 }
@@ -4714,13 +5062,13 @@ try {
             $script:BenchTotal = $script:BenchQueue.Count
             $script:BenchStartedAt = Get-Date
             $g.Close()
-            Start-MossNextBench
+            Start-SgNextBench
         })
         $clearBtn = Add-Button $g 'Clear recorded data...' 226 406 180 32; $clearBtn.AccessibleName = 'Clear recorded benchmark data'; $clearBtn.TabIndex = 2
         $clearBtn.Add_Click({
             $a = [System.Windows.Forms.MessageBox]::Show($g, 'Delete ALL recorded benchmark data? Times are re-learned as you keep generating.', 'Clear benchmark data', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
             if ($a -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-            Save-MossBenchmarks (New-Object System.Collections.ArrayList)
+            Save-SgBenchmarks (New-Object System.Collections.ArrayList)
             & $fillGrid
             & $refreshEstimate
         })
@@ -4744,25 +5092,25 @@ try {
         $cbW.Text = [string]$wBox.Text; $cbH.Text = [string]$hBox.Text; $cbS.Text = [string]$steps.Text
         try { $cbN.Text = [string]([int]$count.Text) } catch { $cbN.Text = '16' }
         $cbMLbl = New-Object System.Windows.Forms.Label; $cbMLbl.Text = 'Mode'; $cbMLbl.Location = New-Object System.Drawing.Point(450, 474); $cbMLbl.Size = New-Object System.Drawing.Size(42, 18); $cbMLbl.ForeColor = $cMuted; $g.Controls.Add($cbMLbl)
-        $cbM = New-Object System.Windows.Forms.ComboBox; $cbM.DropDownStyle = 'DropDownList'; [void]$cbM.Items.AddRange(@('Exact', '2x', '4x')); $cbM.SelectedIndex = 0; $cbM.Location = New-Object System.Drawing.Point(494, 470); $cbM.Size = New-Object System.Drawing.Size(82, 23); $g.Controls.Add($cbM); Set-MossComboTheme $cbM $g
+        $cbM = New-Object System.Windows.Forms.ComboBox; $cbM.DropDownStyle = 'DropDownList'; [void]$cbM.Items.AddRange(@('Exact', '2x', '4x')); $cbM.SelectedIndex = 0; $cbM.Location = New-Object System.Drawing.Point(494, 470); $cbM.Size = New-Object System.Drawing.Size(82, 23); $g.Controls.Add($cbM); Set-SgComboTheme $cbM $g
         $calcBtn = Add-Button $g 'Estimate time...' 594 468 154 28; $calcBtn.AccessibleName = 'Estimate render time and GPU energy'; $calcBtn.TabIndex = 8
         $calcOut = New-Object System.Windows.Forms.Label; $calcOut.Location = New-Object System.Drawing.Point(14, 506); $calcOut.Size = New-Object System.Drawing.Size(734, 88); $calcOut.ForeColor = [System.Drawing.Color]::FromArgb(125, 205, 164); $g.Controls.Add($calcOut)
         $calcBtn.Add_Click({
             try {
                 $wi = [int]$cbW.Text; $he = [int]$cbH.Text; $stn = [int]$cbS.Text; $n = [int]$cbN.Text
                 $gpuName = ''; try { $g0 = @($script:Inventory | Where-Object { -not $_.IsVirtual } | Select-Object -First 1); if ($g0) { $gpuName = [string]$g0.Name } } catch {}
-                $tdp = Get-MossGpuTdp $gpuName
+                $tdp = Get-SgGpuTdp $gpuName
                 # Power / energy: rated GPU watts x render time. The rest of the
                 # PC (CPU, board, fans, monitor) adds roughly 50-150 W on top.
                 $gpuLine = $(if ($tdp) { ('GPU power: your {0} is rated {1} W - rendering for 1 hour uses about {2:N2} kWh, an 8-hour overnight run about {3:N2} kWh (GPU only; the rest of the PC adds roughly 50-150 W).' -f $gpuName, $tdp, ($tdp / 1000.0), (8 * $tdp / 1000.0)) } elseif ($gpuName) { ('GPU power: no rated wattage known for {0} - typical modern GPUs draw 150-350 W while rendering.' -f $gpuName) } else { 'GPU power: no GPU detected for a wattage estimate.' })
                 if ($wi -lt 64 -or $he -lt 64) { $calcOut.Text = 'Sizes below 64 x 64 cannot be rendered.'; return }
                 if ($n -lt 1) { $calcOut.Text = 'Image count must be 1 or more.'; return }
                 $mode = [string]$cbM.SelectedItem
-                $bm = Get-MossBenchmarkEstimate $wi $he $mode $stn $false
+                $bm = Get-SgBenchmarkEstimate $wi $he $mode $stn $false
                 if (-not $bm) { $calcOut.Text = 'No benchmark data yet to extrapolate from - generate a few images or run the quick benchmark first.' + [Environment]::NewLine + $gpuLine; return }
                 $tot = [double]$bm.Sec * $n
                 $energy = $(if ($tdp) { ('  ->  about {0:N2} kWh of GPU power for the job.' -f ($tot / 3600.0 * $tdp / 1000.0)) } else { '' })
-                $calcOut.Text = ('{0} x {1} at {2} steps, {3} speed: ~{4} per image  ->  ~{5} for all {6} images (one engine run; the model loads once).{7}Extrapolated from the measured run: {8}.{9}{10}{11}' -f $wi, $he, $stn, $mode, (Format-MossFixedTime $bm.Sec), (Format-MossDuration $tot), $n, [Environment]::NewLine, $bm.Based, [Environment]::NewLine, $gpuLine, $energy)
+                $calcOut.Text = ('{0} x {1} at {2} steps, {3} speed: ~{4} per image  ->  ~{5} for all {6} images (one engine run; the model loads once).{7}Extrapolated from the measured run: {8}.{9}{10}{11}' -f $wi, $he, $stn, $mode, (Format-SgFixedTime $bm.Sec), (Format-SgDuration $tot), $n, [Environment]::NewLine, $bm.Based, [Environment]::NewLine, $gpuLine, $energy)
             } catch { $calcOut.Text = 'Enter whole numbers in every field (e.g. 1360, 768, 25, 16).' }
         })
         $tip = New-Object System.Windows.Forms.ToolTip; $tip.InitialDelay = 300
@@ -4779,8 +5127,8 @@ try {
         $powerBtn = Add-Button $g 'Refresh power' 14 714 120 28; $powerBtn.AccessibleName = 'Refresh GPU power totals'; $powerBtn.TabIndex = 9
         $powerClear = Add-Button $g 'Reset all-time...' 142 714 130 28; $powerClear.AccessibleName = 'Reset GPU power totals'; $powerClear.TabIndex = 10
         $updatePower = {
-            $sum = Get-MossEnergySummary
-            $fmt = { param($b) ('{0:N3} kWh over {1} across {2} run(s), {3} image(s)' -f ([double]$b.Wh / 1000.0), (Format-MossDuration ([double]$b.Seconds)), [int]$b.Runs, [int]$b.Images) }
+            $sum = Get-SgEnergySummary
+            $fmt = { param($b) ('{0:N3} kWh over {1} across {2} run(s), {3} image(s)' -f ([double]$b.Wh / 1000.0), (Format-SgDuration ([double]$b.Seconds)), [int]$b.Runs, [int]$b.Images) }
             $sessLine = ('Session (since this app start):  {0}' -f (& $fmt $script:SessionEnergy))
             $dayLine = ('Today ({0}):  {1}' -f $sum.Date, (& $fmt $sum.Day))
             # All time with its start: the tracking start date, how long ago
@@ -4810,8 +5158,8 @@ try {
         $powerClear.Add_Click({
             $a = [System.Windows.Forms.MessageBox]::Show($g, 'Reset the recorded POWER usage (day and all-time totals in config\energy.json)? The benchmark time table is NOT touched.', 'Reset power totals', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
             if ($a -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-            $ledger = [pscustomobject]@{ Days = New-Object System.Collections.ArrayList; AllTime = (New-MossEnergyBucket) }
-            Save-MossEnergy $ledger
+            $ledger = [pscustomobject]@{ Days = New-Object System.Collections.ArrayList; AllTime = (New-SgEnergyBucket) }
+            Save-SgEnergy $ledger
             & $updatePower
         })
         $tip.SetToolTip($powerBtn, 'Reloads the session / today / all-time energy numbers.')
@@ -4827,7 +5175,7 @@ try {
     # Output folder / Model files / Error report / Benchmarks moved into the
     # header Options menu, the layout follows prompt growth on taller resizes.
     # The base row starts at y=356; status and progress flow below it.
-    function Update-MossLeftActionLayout([int]$PromptExtra=0) {
+    function Update-SgLeftActionLayout([int]$PromptExtra=0) {
         $rowY = 356 + $PromptExtra
         foreach ($c in @($generate,$cancel,$btnPause,$btnSkip,$openOut)) {
             $c.Location = New-Object System.Drawing.Point($c.Left, $rowY)
@@ -4861,7 +5209,7 @@ try {
     $tip.SetToolTip($out,'Where finished images are saved (Options > Output folder).')
     # Two-line status (v0.1.91, kept): progress %, step N/M, ETA, watts and
     # notes wrap over TWO lines. v0.1.96: the y position is set by
-    # Update-MossLeftActionLayout (flows below the action row); the anchor
+    # Update-SgLeftActionLayout (flows below the action row); the anchor
     # is now Top so the flow layout owns the position.
     $status=New-Object System.Windows.Forms.Label; $status.Text='Ready'; $status.Location=New-Object System.Drawing.Point(18,376); $status.Size=New-Object System.Drawing.Size(564,34); $status.Anchor='Top,Left,Right'; $status.ForeColor=$cMuted; $status.Font=New-Object System.Drawing.Font('Consolas',9); $left.Controls.Add($status)
     # Progress bar (v0.1.96): flows below the status line, full panel width.
@@ -4870,7 +5218,7 @@ try {
     # ETA) live in the status line directly above; the old right-side
     # numeric readout was removed (it duplicated them).
     $prog=New-Object System.Windows.Forms.ProgressBar; $prog.Location=New-Object System.Drawing.Point(18,412); $prog.Size=New-Object System.Drawing.Size(564,14); $prog.Anchor='Top,Left,Right'; $prog.Style='Blocks'; $prog.Visible=$false; $left.Controls.Add($prog)
-    Update-MossLeftActionLayout
+    Update-SgLeftActionLayout
 
     Add-Label $right 'Output preview' 16 14 200 | Out-Null
     $preview=New-Object System.Windows.Forms.PictureBox; $preview.Location=New-Object System.Drawing.Point(16,42); $preview.Size=New-Object System.Drawing.Size(383,285); $preview.Anchor='Top,Left,Right'; $preview.SizeMode='Zoom'; $preview.BackColor=[System.Drawing.Color]::FromArgb(13,17,24); $right.Controls.Add($preview)
@@ -4884,7 +5232,7 @@ try {
     $filesTitle.Width=[Math]::Max(80,$right.ClientSize.Width-32); $filesTitle.Anchor='Top,Left,Right'
     $filesTip=New-Object System.Windows.Forms.ToolTip; $filesTip.InitialDelay=300
     $filesTip.SetToolTip($filesTitle,'Generated files (right-click: info or delete)')
-    function Copy-MossImageUnlocked([string]$path) {
+    function Copy-SgImageUnlocked([string]$path) {
         # Returns a Bitmap copy of an image file without keeping the file
         # locked. Image.FromFile holds a file lock for the lifetime of the
         # image, which blocked deleting the file while it was shown in the
@@ -4919,10 +5267,10 @@ try {
                 $status.Text=('Removed {0} list entr(ies): their file(s) no longer exist on disk (deleted, renamed or moved outside Sootglass).' -f $removed)
                 return
             }
-            try{$newImg=Copy-MossImageUnlocked $p;if($newImg){$old=$preview.Image;$preview.Image=$newImg;if($old){$old.Dispose()}}}catch{}
+            try{$newImg=Copy-SgImageUnlocked $p;if($newImg){$old=$preview.Image;$preview.Image=$newImg;if($old){$old.Dispose()}}}catch{}
         }
     })
-    function Restore-MossGeneratedPreview {
+    function Restore-SgGeneratedPreview {
         if($fileList.Items.Count -gt 0){
             $fileList.ClearSelected()
             $fileList.SelectedIndex=0
@@ -4941,9 +5289,9 @@ try {
     $miDelete=$fileMenu.Items.Add('Delete selected file(s)...')
     $miDeleteAll=$fileMenu.Items.Add('Delete ALL files...')
     $fileList.ContextMenuStrip=$fileMenu
-    $miInfo.Add_Click({ Show-MossImageInfo })
-    $miDelete.Add_Click({ Remove-MossSelectedFiles $false })
-    $miDeleteAll.Add_Click({ Remove-MossSelectedFiles $true })
+    $miInfo.Add_Click({ Show-SgImageInfo })
+    $miDelete.Add_Click({ Remove-SgSelectedFiles $false })
+    $miDeleteAll.Add_Click({ Remove-SgSelectedFiles $true })
     $fileMenu.ShowItemToolTips=$true
     $miDelete.ToolTipText='Delete the selected image(s) and their sidecars from disk (asks first). Ctrl+click or Shift+click to select several.'
     $miDeleteAll.ToolTipText='Delete every image in the list and its sidecar from disk (asks first, shows the total size freed).'
@@ -4972,7 +5320,7 @@ try {
             } catch {}
             $existing=@(Get-ChildItem -LiteralPath $outFolder -Filter 'MOSS_*.png' -File) + @(Get-ChildItem -LiteralPath $outFolder -Filter 'Sootglass_*.png' -File) | Sort-Object LastWriteTime
             # ONE list builder used at startup and after deletions.
-function Update-MossFileList {
+function Update-SgFileList {
                 $fileList.Items.Clear()
                 try { $script:GeneratedFiles.Clear() } catch {}
                 $existing = @(Get-ChildItem -LiteralPath $outFolder -Filter 'MOSS_*.png' -File) + @(Get-ChildItem -LiteralPath $outFolder -Filter 'Sootglass_*.png' -File) | Sort-Object LastWriteTime -Descending
@@ -4983,7 +5331,7 @@ function Update-MossFileList {
                 }
                 if ($fileList.Items.Count -gt 0 -and -not $script:SelectedFile) { $fileList.SelectedIndex = 0 }
             }
-            [void](Update-MossFileList)
+            [void](Update-SgFileList)
             if($fileList.Items.Count -gt 0 -and -not $script:SelectedFile){ $fileList.SelectedIndex=0 }
         }
     } catch {}
@@ -4994,13 +5342,13 @@ function Update-MossFileList {
     $logToggle.Add_Click({
         $script:LogVisible = -not $script:LogVisible
         $logToggle.Text = if ($script:LogVisible) { 'Generation log  [-]' } else { 'Generation log  [+]' }
-        Update-MossRightLayout
+        Update-SgRightLayout
     })
-    function Update-MossRightLayout {
+    function Update-SgRightLayout {
         # One layout for all window states. The old maximized special case
         # HID the Generated Files box, its title and the log when the window
         # was maximized - the user lost the file list exactly when more space
-        # made it most useful (user report: 'when i maximize moss, the
+        # made it most useful (user report: 'when i maximize sg, the
         # generated files box disappears'). The normal formula scales with
         # the panel size, so it works for maximized too: the preview grows,
         # the file list and the log stay usable.
@@ -5043,12 +5391,12 @@ function Update-MossFileList {
         }
     }
     $script:LogVisible = $false
-    Update-MossRightLayout
+    Update-SgRightLayout
     try { $f.Refresh() } catch {}
     # No GetNewClosure here: closures run in a module scope that cannot see
     # functions defined inside Show-GeneratorWindow (caused a
     # CommandNotFoundException crash on show/resize in v0.1.19).
-    $right.Add_Resize({ Update-MossRightLayout })
+    $right.Add_Resize({ Update-SgRightLayout })
     $tip.SetToolTip($logToggle,'Show or hide the generation log.')
     $tip.SetToolTip($preview,'Preview of the selected generated image.')
     $tip.SetToolTip($fileList,'Images you generated. Left-click to preview; right-click for info and delete options.')
@@ -5089,10 +5437,10 @@ function Update-MossFileList {
     # Visible therefore reflects parent visibility here, not each control's
     # configured state. Hidden state-holder controls stay at the origin.
     $elasticLeftControls=@($left.Controls | Where-Object { $_.Top -ge 134 } | ForEach-Object { [pscustomobject]@{Control=$_;Top=$_.Top} })
-    function Get-MossPromptExtra([int]$PanelHeight) {
+    function Get-SgPromptExtra([int]$PanelHeight) {
         return [Math]::Max(-16, ($PanelHeight - 442))
     }
-    function Update-MossWorkspaceLayout {
+    function Update-SgWorkspaceLayout {
         if($f.ClientSize.Width -le 0){return}
         $gap=14; $margin=16
         $head.BringToFront()
@@ -5114,7 +5462,7 @@ function Update-MossFileList {
         $prompt.Width = $innerWidth
         # Use extra height for the prompt, or compact it slightly at minimum
         # size so the progress bar stays inside the panel.
-        $promptExtra=Get-MossPromptExtra ([int]$left.ClientSize.Height)
+        $promptExtra=Get-SgPromptExtra ([int]$left.ClientSize.Height)
         $prompt.Height=96+$promptExtra
         foreach($entry in $elasticLeftControls){$entry.Control.Top=$entry.Top+$promptExtra}
         $paste.Left=$left.ClientSize.Width-18-$paste.Width
@@ -5127,11 +5475,11 @@ function Update-MossFileList {
         $speedHint.Width=[Math]::Max(100,$left.ClientSize.Width-$speedHint.Left-18)
         $historyLabel.Left=$historyPick.Left-($historyLabel.Width+8)
         $status.Width=$innerWidth; $prog.Width=$innerWidth
-        Update-MossLeftActionLayout $promptExtra
-        Update-MossRightLayout
+        Update-SgLeftActionLayout $promptExtra
+        Update-SgRightLayout
     }
-    $f.Add_Resize({ Update-MossWorkspaceLayout })
-    $f.Add_Shown({ Update-MossWorkspaceLayout })
+    $f.Add_Resize({ Update-SgWorkspaceLayout })
+    $f.Add_Shown({ Update-SgWorkspaceLayout })
 
     # --- Timer + Process generation worker (no BackgroundWorker) ---
     $script:GenState = @{
@@ -5185,39 +5533,39 @@ function Update-MossFileList {
     # preview pane while a batch runs; keep a reference for the progress tick.
     $script:GenState.PreviewBox = $preview
     # Session energy totals (v0.1.87): in-memory, reset at every app start.
-    $script:SessionEnergy = New-MossEnergyBucket
+    $script:SessionEnergy = New-SgEnergyBucket
 
     # Pause/Resume (v0.1.91): freeze the engine process mid-batch with ntdll's
     # NtSuspendProcess and continue later with NtResumeProcess. In-flight GPU
     # work finishes before the freeze takes effect; no new work starts until
     # the process is resumed. VRAM stays allocated while paused.
-    if (-not ('Moss.ProcCtl' -as [type])) {
+    if (-not ('Sg.ProcCtl' -as [type])) {
         try {
-            Add-Type -Namespace Moss -Name ProcCtl -MemberDefinition '[DllImport("ntdll.dll")] public static extern uint NtSuspendProcess(IntPtr handle);[DllImport("ntdll.dll")] public static extern uint NtResumeProcess(IntPtr handle);' | Out-Null
+            Add-Type -Namespace Sg -Name ProcCtl -MemberDefinition '[DllImport("ntdll.dll")] public static extern uint NtSuspendProcess(IntPtr handle);[DllImport("ntdll.dll")] public static extern uint NtResumeProcess(IntPtr handle);' | Out-Null
         } catch {}
     }
-    function Suspend-MossProcess {
+    function Suspend-SgProcess {
         param($Process)
         if ($null -eq $Process) { return $false }
         try { if ($Process.HasExited) { return $false } } catch { return $false }
-        if (-not ('Moss.ProcCtl' -as [type])) { return $false }
+        if (-not ('Sg.ProcCtl' -as [type])) { return $false }
         try {
-            $rc = [Moss.ProcCtl]::NtSuspendProcess($Process.Handle)
+            $rc = [Sg.ProcCtl]::NtSuspendProcess($Process.Handle)
             return ($rc -eq 0)
         } catch { return $false }
     }
-    function Resume-MossProcess {
+    function Resume-SgProcess {
         param($Process)
         if ($null -eq $Process) { return $false }
         try { if ($Process.HasExited) { return $false } } catch { return $false }
-        if (-not ('Moss.ProcCtl' -as [type])) { return $false }
+        if (-not ('Sg.ProcCtl' -as [type])) { return $false }
         try {
-            $rc = [Moss.ProcCtl]::NtResumeProcess($Process.Handle)
+            $rc = [Sg.ProcCtl]::NtResumeProcess($Process.Handle)
             return ($rc -eq 0)
         } catch { return $false }
     }
 
-    function Stop-MossGen {
+    function Stop-SgGen {
         # This only stops processes and the timer. The cancel flag itself is set
         # by the Cancel button / window close, so normal completion can still
         # continue a queued run (benchmark).
@@ -5254,7 +5602,7 @@ function Update-MossFileList {
     }
 
     
-    function Get-MossAnonymisedPath([string]$Path) {
+    function Get-SgAnonymisedPath([string]$Path) {
         if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
         try {
             $full = [System.IO.Path]::GetFullPath($Path)
@@ -5268,21 +5616,21 @@ function Update-MossFileList {
         return [System.IO.Path]::GetFileName($Path)
     }
 
-    function Build-MossErrorReport {
+    function Build-SgErrorReport {
         $lines = New-Object System.Collections.Generic.List[string]
         $lines.Add('Sootglass Studio - Error / Diagnostic Report')
         $lines.Add(('Generated: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')))
-        $lines.Add(('Script: ' + (Get-MossAnonymisedPath $PSCommandPath)))
+        $lines.Add(('Script: ' + (Get-SgAnonymisedPath $PSCommandPath)))
         $lines.Add(('AppRoot: <AppRoot>'))
         $lines.Add('')
         $lines.Add('--- Settings ---')
         $lines.Add(('Backend: ' + [string]$script:Settings.Backend))
-        $lines.Add(('Engine: ' + (Get-MossAnonymisedPath ([string]$script:Settings.EnginePath))))
-        $lines.Add(('Diffusion model: ' + (Get-MossAnonymisedPath ([string]$script:Settings.DiffusionModelPath))))
-        $lines.Add(('LLM: ' + (Get-MossAnonymisedPath ([string]$script:Settings.LlmPath))))
-        $lines.Add(('VAE: ' + (Get-MossAnonymisedPath ([string]$script:Settings.VaePath))))
-        $lines.Add(('Tokenizer: ' + (Get-MossAnonymisedPath ([string]$script:Settings.TokenizerPath))))
-        $lines.Add(('Output folder: ' + (Get-MossAnonymisedPath ([string]$script:Settings.OutputPath))))
+        $lines.Add(('Engine: ' + (Get-SgAnonymisedPath ([string]$script:Settings.EnginePath))))
+        $lines.Add(('Diffusion model: ' + (Get-SgAnonymisedPath ([string]$script:Settings.DiffusionModelPath))))
+        $lines.Add(('LLM: ' + (Get-SgAnonymisedPath ([string]$script:Settings.LlmPath))))
+        $lines.Add(('VAE: ' + (Get-SgAnonymisedPath ([string]$script:Settings.VaePath))))
+        $lines.Add(('Tokenizer: ' + (Get-SgAnonymisedPath ([string]$script:Settings.TokenizerPath))))
+        $lines.Add(('Output folder: ' + (Get-SgAnonymisedPath ([string]$script:Settings.OutputPath))))
         $lines.Add(('Default size: {0} x {1}' -f $script:Settings.Width, $script:Settings.Height))
         $lines.Add(('Steps: {0}  CFG: {1}  Seed: {2}' -f $script:Settings.Steps, $script:Settings.CfgScale, $script:Settings.Seed))
         $lines.Add('')
@@ -5311,6 +5659,11 @@ function Update-MossFileList {
             if ($log -and $log.Text) {
                 $tail = $log.Text
                 if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
+                # v0.3.45: the log may contain the engine command line (prompts
+                # included) - scrub the -p/-n values so the report keeps its
+                # 'prompts are omitted' promise.
+                $tail = $tail -replace '(-p ")[^"]*(")', '$1[PROMPT REDACTED]$2'
+                $tail = $tail -replace '(-n ")[^"]*(")', '$1[NEGATIVE REDACTED]$2'
                 $lines.Add($tail)
             } else { $lines.Add('(log empty)') }
         } catch { $lines.Add('(could not read log)') }
@@ -5320,9 +5673,9 @@ function Update-MossFileList {
         return ($lines -join "`r`n")
     }
 
-    function Copy-MossErrorReport {
+    function Copy-SgErrorReport {
         try {
-            $report = Build-MossErrorReport
+            $report = Build-SgErrorReport
             $script:GenState.LastReport = $report
             [System.Windows.Forms.Clipboard]::SetText($report)
             $status.Text = 'Error report copied to clipboard (paths anonymised)'
@@ -5343,7 +5696,7 @@ function Update-MossFileList {
         }
     }
 
-    function Format-MossDuration([double]$Seconds) {
+    function Format-SgDuration([double]$Seconds) {
         if ($Seconds -lt 0) { $Seconds = 0 }
         $span = [TimeSpan]::FromSeconds([Math]::Min([int]::MaxValue, [Math]::Ceiling($Seconds)))
         if ($span.TotalHours -ge 1) { return $span.ToString('h\:mm\:ss') }
@@ -5352,13 +5705,13 @@ function Update-MossFileList {
 
     # Fixed-width time for the status line (h:mm:ss ALWAYS): the numbers stay
     # in place while they grow (user: the line changing length is hard to read).
-    function Format-MossFixedTime([double]$Seconds) {
+    function Format-SgFixedTime([double]$Seconds) {
         if ($Seconds -lt 0) { $Seconds = 0 }
         $span = [TimeSpan]::FromSeconds([Math]::Min([int]::MaxValue, [Math]::Ceiling($Seconds)))
         return $span.ToString('h\:mm\:ss')
     }
 
-    function Update-MossPowerSampling {
+    function Update-SgPowerSampling {
         # Samples the GPU power draw while the engine runs and integrates it
         # over time (joules) - the basis for the watt display and the
         # cumulative energy ledger (session / day / all time). MEASURED via
@@ -5384,7 +5737,7 @@ function Update-MossFileList {
         if ($st.PowerSmi) {
             try {
                 $outLines = & $st.PowerSmi '--query-gpu=power.draw' '--format=csv,noheader,nounits' 2>$null
-                foreach ($ol in @($outLines)) { $w = Parse-MossPowerCsvLine ([string]$ol); if ($null -ne $w) { break } }
+                foreach ($ol in @($outLines)) { $w = Parse-SgPowerCsvLine ([string]$ol); if ($null -ne $w) { break } }
                 if ($null -ne $w) { $measured = $true }
             } catch { $w = $null }
         }
@@ -5395,10 +5748,10 @@ function Update-MossFileList {
     }
 
     # v0.3.6: show the engine's newest step preview in the Output preview
-    # pane. Called from Update-MossLiveProgress on every 400 ms tick. The
+    # pane. Called from Update-SgLiveProgress on every 400 ms tick. The
     # engine (moss_image proj previews) rewrites one small PNG every 4 steps;
     # we copy it unlocked so the engine never sees a file lock.
-    function Update-MossLivePreview {
+    function Update-SgLivePreview {
         $st = $script:GenState
         if ([string]$script:Settings.LivePreview -ne '1') { return }
         if (-not $st.PreviewDir -or -not (Test-Path -LiteralPath $st.PreviewDir)) { return }
@@ -5412,17 +5765,17 @@ function Update-MossFileList {
         if ($null -eq $newest) { return }
         $full = $newest.FullName
         if ($full -eq [string]$st.PreviewLast) { return }
-        $img = Copy-MossImageUnlocked $full
+        $img = Copy-SgImageUnlocked $full
         if ($null -eq $img) { return }
         $st.PreviewLast = $full
         try { $old = $pb.Image; $pb.Image = $img; if ($old) { $old.Dispose() } } catch {}
     }
 
-    function Update-MossLiveProgress {
+    function Update-SgLiveProgress {
         $st = $script:GenState
         if (-not $st.IsRunning -or $null -eq $st.Process -or $st.Process.HasExited) { return }
-        Update-MossLivePreview
-        Update-MossPowerSampling
+        Update-SgLivePreview
+        Update-SgPowerSampling
         if ($null -eq $st.Capture) { return }
         $elapsed = 0.0
         if ($st.JobStartedAt) { $elapsed = [Math]::Max(0, ((Get-Date) - $st.JobStartedAt).TotalSeconds) }
@@ -5488,7 +5841,7 @@ function Update-MossFileList {
             for ($ci = 1; $ci -le $maxDone; $ci++) {
                 if ($st.LiveCompletedImages -contains $ci) { continue }
                 $liveSeed = [long]$st.Job.Seed + ($ci - 1)
-                if (Complete-MossBatchImage -st $st -job $st.Job -i $ci -thisSeed $liveSeed -up $st.UpscaleTarget) { [void]$st.LiveCompletedImages.Add($ci) }
+                if (Complete-SgBatchImage -st $st -job $st.Job -i $ci -thisSeed $liveSeed -up $st.UpscaleTarget) { [void]$st.LiveCompletedImages.Add($ci) }
             }
         }
         } catch {}
@@ -5553,7 +5906,7 @@ function Update-MossFileList {
         if ($null -ne $imageEstimate) {
             $remaining = [Math]::Max(0, $imageEstimate - $imageElapsed) + ([Math]::Max(0, $job.Count - $currentImage) * $imageEstimate)
         }
-        if ($null -ne $remaining) { $etaText = if ([int]$job.Count -gt 1) { "ETA ~$(Format-MossFixedTime $remaining) (all $($job.Count))" } else { "ETA ~$(Format-MossFixedTime $remaining)" } }
+        if ($null -ne $remaining) { $etaText = if ([int]$job.Count -gt 1) { "ETA ~$(Format-SgFixedTime $remaining) (all $($job.Count))" } else { "ETA ~$(Format-SgFixedTime $remaining)" } }
         # Refresh the ETA at most once per second (user: the constant jumping
         # on every 400 ms tick is distracting). The rest of the line keeps
         # updating on every tick; the held value keeps its fixed width.
@@ -5595,7 +5948,7 @@ function Update-MossFileList {
         if ($null -ne $st.PowerLastW -and [double]$st.PowerLastW -gt 0) {
             $powerText = ('| ~{0,3} W {1} ' -f [int][Math]::Round([double]$st.PowerLastW, 0), $(if ([bool]$st.PowerLastMeasured) { '(measured)' } else { '(estimate)' }))
         }
-        $status.Text = ('Image {0,3}/{1,3} | {2,3}% | {3} | elapsed {4} | {5}{6}' -f $currentImage, [int]$job.Count, $overall, $phase.PadRight(17), (Format-MossFixedTime $elapsed), $etaText, $powerText)
+        $status.Text = ('Image {0,3}/{1,3} | {2,3}% | {3} | elapsed {4} | {5}{6}' -f $currentImage, [int]$job.Count, $overall, $phase.PadRight(17), (Format-SgFixedTime $elapsed), $etaText, $powerText)
         # Drive the progress bar from the step counter (same numbers as the
         # status text above; the old right-side numeric readout duplicated it
         # and is gone).
@@ -5607,16 +5960,29 @@ function Update-MossFileList {
     }
 
 
-    function Complete-MossGen {
+    function Complete-SgGen {
         param([string]$FinalStatus)
-        Stop-MossGen
+        Stop-SgGen
         $generate.Enabled = $true
         $cancel.Enabled = $false
         $btnPause.Enabled = $false; $btnPause.Text = 'Pause'
         $btnSkip.Enabled = $false
         $script:GenState.Paused = $false; $script:GenState.PausedAt = $null
         if ($FinalStatus) { $status.Text = $FinalStatus }
-        if ($script:GenState.JobStartedAt) { $status.Text += " | total elapsed $(Format-MossDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds)" }
+        if ($script:GenState.JobStartedAt) { $status.Text += " | total elapsed $(Format-SgDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds)" }
+        # v0.3.45: restore the user's selected image in the preview pane - the
+        # live preview overwrote it with noisy step frames during the run.
+        try {
+            $selImg=[string]$fileList.SelectedItem
+            if($selImg -and (Test-Path -LiteralPath $selImg -PathType Leaf)){
+                $imgR=Copy-SgImageUnlocked $selImg
+                if($imgR){
+                    $pbR=$script:GenState.PreviewBox
+                    if($pbR -and -not $pbR.IsDisposed){ $oldR=$pbR.Image; $pbR.Image=$imgR; if($oldR){$oldR.Dispose()} } else { $imgR.Dispose() }
+                }
+            }
+            $script:GenState.PreviewLast=$null
+        } catch {}
         # Progress bar: full on success, hidden on failures (a full bar next
         # to a failure message would be misleading).
         if ($FinalStatus -like 'Completed*') {
@@ -5628,7 +5994,7 @@ function Update-MossFileList {
         }
     }
 
-    function Start-MossBatchEngine {
+    function Start-SgBatchEngine {
         # v0.3.9: ONE engine process per IMAGE (called again for each image of
         # a batch). Every image is saved the moment it is done, Skip is
         # possible, and Cancel keeps everything already saved. Weight
@@ -5650,7 +6016,7 @@ function Update-MossFileList {
         $argsList.Add('--llm'); $argsList.Add((Quote-ProcessArgument $job.Llm))
         $argsList.Add('--vae'); $argsList.Add((Quote-ProcessArgument $job.Vae))
         $argsList.Add('--tokenizer'); $argsList.Add((Quote-ProcessArgument $job.Tokenizer))
-        $argsList.Add('--cfg-scale'); $argsList.Add((ConvertFrom-MossDouble ([double]$job.Cfg)))
+        $argsList.Add('--cfg-scale'); $argsList.Add((ConvertFrom-SgDouble ([double]$job.Cfg)))
         $argsList.Add('--steps'); $argsList.Add([string]$job.Steps)
         $renderW = [int]$job.Width; $renderH = [int]$job.Height
         $argsList.Add('-H'); $argsList.Add([string]$job.Height)
@@ -5687,8 +6053,8 @@ $speedScale = 0.0
         }
         $st.UpscaleTarget = $null
         if ($speedScale -gt 0) {
-            $smallW = Get-MossScaledDimension ([int]$job.Width) $speedScale
-            $smallH = Get-MossScaledDimension ([int]$job.Height) $speedScale
+            $smallW = Get-SgScaledDimension ([int]$job.Width) $speedScale
+            $smallH = Get-SgScaledDimension ([int]$job.Height) $speedScale
             if ($smallW -lt $job.Width -and $smallH -lt $job.Height) {
                 $argsList.Add('-W'); $argsList.Add([string]$smallW)
                 $argsList.Add('-H'); $argsList.Add([string]$smallH)
@@ -5714,18 +6080,18 @@ $speedScale = 0.0
                 $loraStem=$Matches[1].Trim(); $loraVal=0.0
                 if($loraStem -and [double]::TryParse(([string]$Matches[2]).Trim(),[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$loraVal)){
                     if($loraVal -gt 0 -and $loraVal -le 1.5){
-                        $loraPath = Join-Path (Ensure-MossLoraDir) ($loraStem + '.safetensors')
+                        $loraPath = Join-Path (Ensure-SgLoraDir) ($loraStem + '.safetensors')
                         if(Test-Path -LiteralPath $loraPath -PathType Leaf){
                             $loraTags += ('<lora:' + $loraStem + ':' + [string]$loraVal.ToString([System.Globalization.CultureInfo]::InvariantCulture) + '>')
                         } else {
-                            $log.AppendText(("`r`nLoRA skipped (file missing in {0}): {1}" -f (Ensure-MossLoraDir), $loraStem))
+                            $log.AppendText(("`r`nLoRA skipped (file missing in {0}): {1}" -f (Ensure-SgLoraDir), $loraStem))
                         }
                     }
                 }
             }
         }
         if($loraTags.Count -gt 0){
-            $loraDirAbs2 = Ensure-MossLoraDir
+            $loraDirAbs2 = Ensure-SgLoraDir
             $argsList.Add('--lora-model-dir'); $argsList.Add((Quote-ProcessArgument $loraDirAbs2))
             $effectivePrompt = ($effectivePrompt.Trim() + ' ' + ($loraTags -join ' ')).Trim()
             $log.AppendText(("`r`nLoRA: {0}" -f ($loraTags -join ' ')))
@@ -5770,7 +6136,7 @@ $speedScale = 0.0
         # tuning'). Blank/off values mean the flag is omitted entirely.
         if ($script:Settings.Contains('Guidance')) {
             $tuneGuid=0.0
-            if([double]::TryParse(([string]$script:Settings.Guidance).Trim(),[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$tuneGuid)){ $argsList.Add('--guidance'); $argsList.Add((ConvertFrom-MossDouble $tuneGuid)) }
+            if([double]::TryParse(([string]$script:Settings.Guidance).Trim(),[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$tuneGuid) -and -not [double]::IsNaN($tuneGuid) -and -not [double]::IsInfinity($tuneGuid)){ $argsList.Add('--guidance'); $argsList.Add((ConvertFrom-SgDouble $tuneGuid)) }
         }
         switch ([string]$script:Settings.Circular) {
             'xy' { $argsList.Add('--circular') }
@@ -5781,7 +6147,7 @@ $speedScale = 0.0
         if ($tuneRng -in @('std_default','cuda','cpu')) { $argsList.Add('--sampler-rng'); $argsList.Add($tuneRng) }
         if ($script:Settings.Contains('MaxVram')) {
             $tuneVram=0.0
-            if([double]::TryParse(([string]$script:Settings.MaxVram).Trim(),[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$tuneVram) -and $tuneVram -ge 0){ $argsList.Add('--max-vram'); $argsList.Add((ConvertFrom-MossDouble $tuneVram)) }
+            if([double]::TryParse(([string]$script:Settings.MaxVram).Trim(),[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture,[ref]$tuneVram) -and $tuneVram -ge 0){ $argsList.Add('--max-vram'); $argsList.Add((ConvertFrom-SgDouble $tuneVram)) }
         }
         if ([string]$script:Settings.EagerLoad -eq '1') { $argsList.Add('--eager-load') }
         if ([string]$script:Settings.DisablePrefetch -eq '1') { $argsList.Add('--disable-prefetch') }
@@ -5794,25 +6160,34 @@ $speedScale = 0.0
         # swept first so the temp area never grows unbounded.
         if ([string]$script:Settings.LivePreview -eq '1' -and [string]$script:Settings.PreviewMethod -ne 'none') {
             try {
-                Get-ChildItem ([System.IO.Path]::GetTempPath()) -Filter 'moss-preview-*' -Directory -ErrorAction SilentlyContinue |
+                Get-ChildItem ([System.IO.Path]::GetTempPath()) -Filter 'sg-preview-*' -Directory -ErrorAction SilentlyContinue |
                     Where-Object { $_.FullName -ne [string]$st.PreviewDir } |
                     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                # v0.3.45: also sweep pre-rename leftovers (moss-preview-*, old
+                # MOSS-Model-Download folders) that the renamed sweep no longer matched.
+                foreach($sweepPat in @('moss-preview-*','Sootglass-Model-Download-*','MOSS-Model-Download-*','Sootglass-Engine-Update-*','Sootglass-Update-*','Sootglass-Backup-Restore-*')){
+                    # v0.3.45: never sweep while a self-update download is in
+                    # progress - its staging folder is one of these patterns.
+                    if($script:SgSelfUpdateBusy){ break }
+                    Get-ChildItem ([System.IO.Path]::GetTempPath()) -Filter $sweepPat -Directory -ErrorAction SilentlyContinue |
+                        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                }
             } catch {}
-            $st.PreviewDir = Join-Path ([System.IO.Path]::GetTempPath()) ('moss-preview-' + [System.IO.Path]::GetRandomFileName())
+            $st.PreviewDir = Join-Path ([System.IO.Path]::GetTempPath()) ('sg-preview-' + [System.IO.Path]::GetRandomFileName())
             [void][System.IO.Directory]::CreateDirectory($st.PreviewDir)
             $st.PreviewLast = $null
             # v0.3.9 preview decoder + update frequency (Generation dialog).
             $pvMethod=[string]$script:Settings.PreviewMethod
             if($pvMethod -eq 'tae'){
                 $taesdPath=Join-Path $script:AppRoot 'models\taesd.safetensors'
-                if(Test-Path -LiteralPath $taesdPath -PathType Leaf){ $argsList.Add('--taesd'); $argsList.Add((Quote-ProcessArgument $taesdPath)) }
+                if(Test-Path -LiteralPath $taesdPath -PathType Leaf){ $argsList.Add('--taesd'); $argsList.Add((Quote-ProcessArgument $taesdPath)); $argsList.Add('--taesd-preview-only') }
                 else { $pvMethod='proj'; $log.AppendText("`r`nLive preview: no models\taesd.safetensors found - using the fast built-in proj preview instead.") }
             }
             if($pvMethod -in @('proj','vae','tae')){ $argsList.Add('--preview'); $argsList.Add($pvMethod) }
             $pvInt=4
             if([int]::TryParse([string]$script:Settings.PreviewInterval,[ref]$pvInt)){ $pvInt=[Math]::Max(1,[Math]::Min(20,$pvInt)) }else{ $pvInt=4 }
             $argsList.Add('--preview-interval'); $argsList.Add([string]$pvInt)
-            $argsList.Add('--preview-path'); $argsList.Add((Quote-ProcessArgument (Join-Path $st.PreviewDir 'moss_preview_%03d.png')))
+            $argsList.Add('--preview-path'); $argsList.Add((Quote-ProcessArgument (Join-Path $st.PreviewDir 'sg_preview_%03d.png')))
         } else {
             $st.PreviewDir = $null; $st.PreviewLast = $null
         }
@@ -5858,6 +6233,9 @@ $speedScale = 0.0
         # this feature. One reader per pipe blocks in ReadLine() and appends
         # every line to a synchronized hashtable that the timer tick reads.
         $st.Capture = [hashtable]::Synchronized(@{ Out = ''; Err = '' })
+        # v0.3.45 (fix): dispose the PREVIOUS image's reader runspaces - they
+        # were overwritten unreferenced and leaked two runspaces per image.
+        foreach($oldRunner in @($st.CaptureRunners)) { try { $oldRunner.Stop() } catch {}; try { $oldRunner.Dispose() } catch {} }
         $st.CaptureRunners = @()
         $st.CaptureAsync = @()
 
@@ -5880,7 +6258,7 @@ $speedScale = 0.0
             }
             # Start independent readers after the process exists so neither
             # redirected pipe can fill while the other is being drained.
-            $captureReaders=Start-MossCaptureReaders $proc $st.Capture
+            $captureReaders=Start-SgCaptureReaders $proc $st.Capture
             $st.CaptureRunners=$captureReaders.Runners
             $st.CaptureAsync=$captureReaders.Async
             $st.Process = $proc
@@ -5890,7 +6268,7 @@ $speedScale = 0.0
             $st.StepNum = 0; $st.StepDen = 0
             $st.CurrentImageIndex = $st.BatchIndex
             if ($keepBatchPaused) {
-                if (Suspend-MossProcess $proc) {
+                if (Suspend-SgProcess $proc) {
                     $st.Paused = $true
                     $btnPause.Text = 'Resume'
                     $status.Text = ("PAUSED - image {0} of {1} frozen (VRAM stays allocated). Click Resume to continue." -f $st.BatchIndex, $job.Count)
@@ -5909,14 +6287,14 @@ $speedScale = 0.0
         } catch {
             $msg = "Failed to start engine: $($_.Exception.Message)"
             $log.AppendText("`r`n$msg")
-            [void](Write-MossErrorLog 'Sootglass engine start failure' $msg)
+            [void](Write-SgErrorLog 'Sootglass engine start failure' $msg)
             [void]$st.Results.Add([pscustomobject]@{ Path = ([string]$st.CurrentFile); ExitCode = -1; Seed = $job.Seed; Output = $msg })
-            Complete-MossGen 'Generation failed - the engine could not be started'
-            Start-MossNextBench
+            Complete-SgGen 'Generation failed - the engine could not be started'
+            Start-SgNextBench
         }
     }
 
-    function Resize-MossImageTo([string]$Path,[int]$TargetW,[int]$TargetH) {
+    function Resize-SgImageTo([string]$Path,[int]$TargetW,[int]$TargetH) {
         # Faithful pixel-space enlargement (high-quality bicubic): geometry is
         # preserved exactly; grain may show but features never warp.
         # Read the file bytes first: Image.FromFile keeps a lock on the file and
@@ -5942,17 +6320,17 @@ $speedScale = 0.0
     }
 
 
-    function Complete-MossBatchImage {
+    function Complete-SgBatchImage {
         # Processes ONE finished batch image: upscale (speed modes), sidecar,
         # results and the generated-files list. Used BOTH live (while the
         # engine renders the next images - the resize is CPU work and
         # generation is GPU work, so they overlap; user request) and at batch
         # end for whatever is left. Returns $true when the file was there.
         param($st,$job,$i,$thisSeed,$up)
-        $patternBase = ([string]$st.CurrentFile) -replace '%02d','{0:D2}'
+        $patternBase = ((([string]$st.CurrentFile) -replace '\{','{{' -replace '\}','}}')) -replace '%02d','{0:D2}'
         $file = $patternBase -f $i
         if (-not (Test-Path -LiteralPath $file)) { return $false }
-        if (-not (Test-MossPngValid $file)) {
+        if (-not (Test-SgPngValid $file)) {
             # File exists but is not a decodable PNG (truncated write: disk
             # full, power loss, antivirus interference). Never list it.
             [void]$st.Results.Add([pscustomobject]@{ Path = $file; ExitCode = 0; Seed = $thisSeed; Output = 'Image file is corrupt or incomplete (write interrupted?) - not added to the list; the file stays on disk' })
@@ -5961,7 +6339,7 @@ $speedScale = 0.0
         $upscaledNote = $null
         if ($up) {
             try {
-                Resize-MossImageTo $file ([int]$up.W) ([int]$up.H)
+                Resize-SgImageTo $file ([int]$up.W) ([int]$up.H)
                 $upscaledNote = ('upscaled from {0} x {1}' -f $up.FromW, $up.FromH)
             } catch {
                 $upscaledNote = ('kept at engine size {0} x {1} (resize failed: {2})' -f $up.FromW, $up.FromH, $_.Exception.Message)
@@ -5988,14 +6366,14 @@ $speedScale = 0.0
                 GeneratedAt = (Get-Date).ToString('o'); Engine = $job.Engine
             }
             if ($script:HistoryPassphrase) {
-                $meta.PromptProtected = Protect-MossPayload ([string]$job.Prompt) $script:HistoryPassphrase
-                if ($job.NegativePrompt) { $meta.NegativePromptProtected = Protect-MossPayload ([string]$job.NegativePrompt) $script:HistoryPassphrase }
+                $meta.PromptProtected = Protect-SgPayload ([string]$job.Prompt) $script:HistoryPassphrase
+                if ($job.NegativePrompt) { $meta.NegativePromptProtected = Protect-SgPayload ([string]$job.NegativePrompt) $script:HistoryPassphrase }
             } elseif (-not $script:HistoryLocked) {
                 $meta.Prompt = [string]$job.Prompt
                 if ($job.NegativePrompt) { $meta.NegativePrompt = [string]$job.NegativePrompt }
             }
-            # Sidecar goes into the 'metadata' subfolder (see Get-MossSidecarPath)
-            $sidePath = Get-MossSidecarPath $file
+            # Sidecar goes into the 'metadata' subfolder (see Get-SgSidecarPath)
+            $sidePath = Get-SgSidecarPath $file
             $sideDir = [System.IO.Path]::GetDirectoryName($sidePath)
             if (-not (Test-Path -LiteralPath $sideDir)) { New-Item -ItemType Directory -Path $sideDir -Force | Out-Null }
             $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $sidePath -Encoding UTF8
@@ -6009,8 +6387,9 @@ $speedScale = 0.0
         return $true
     }
 
-    function On-MossGenTimerTick {
+    function On-SgGenTimerTick {
         $st = $script:GenState
+        $up = $st.UpscaleTarget
         if ($null -eq $st.Process) { return }
         # Paused: the engine process is frozen, so no new output appears and
         # progress/ETA/power updates would only lie - skip them entirely. If
@@ -6032,13 +6411,13 @@ $speedScale = 0.0
                 $btnPause.Text = 'Pause'
             }
         }
-        if (-not $st.Process.HasExited) { Update-MossLiveProgress; return }
+        if (-not $st.Process.HasExited) { Update-SgLiveProgress; return }
 
         # This run has finished (one process = one image in v0.3.9).
         $exitCode = $st.Process.ExitCode
         $st.LastExitCode = $exitCode
         $job = $st.Job
-        if ($st.ImageStartedAt -and [int]$st.CurrentImageIndex -gt 0) { [void]$st.ImageDurations.Add([Math]::Max(0.1, ((Get-Date) - $st.ImageStartedAt).TotalSeconds)) }
+        if ($st.ImageStartedAt -and [int]$st.CurrentImageIndex -gt 0 -and -not $st.SkipRequested) { [void]$st.ImageDurations.Add([Math]::Max(0.1, ((Get-Date) - $st.ImageStartedAt).TotalSeconds)) }
 
         # Let both readers finish draining (pipes close at exit) before
         # reading the final output.
@@ -6099,10 +6478,10 @@ $speedScale = 0.0
         }
         if (-not $imgFailed -and -not ($st.SkippedImages -contains $imgIndex) -and -not ($st.LiveCompletedImages -contains $imgIndex)) {
             $thisSeedNow = [long]$job.Seed + ($imgIndex - 1)
-            if (Complete-MossBatchImage -st $st -job $job -i $imgIndex -thisSeed $thisSeedNow -up $st.UpscaleTarget) { [void]$st.LiveCompletedImages.Add($imgIndex) }
+            if (Complete-SgBatchImage -st $st -job $job -i $imgIndex -thisSeed $thisSeedNow -up $st.UpscaleTarget) { [void]$st.LiveCompletedImages.Add($imgIndex) }
         }
         if (-not $st.CancelRequested -and $imgIndex -lt [int]$job.Count) {
-            Start-MossBatchEngine
+            Start-SgBatchEngine
             return
         }
 
@@ -6121,7 +6500,7 @@ $speedScale = 0.0
             $f.Refresh()
         }
 
-        $patternBase = ([string]$st.CurrentFile) -replace '%02d','{0:D2}'
+        $patternBase = ((([string]$st.CurrentFile) -replace '\{','{{' -replace '\}','}}')) -replace '%02d','{0:D2}'
         $ok = 0
         $missing = New-Object System.Collections.Generic.List[string]
         $corrupt = New-Object System.Collections.Generic.List[string]
@@ -6134,12 +6513,12 @@ $speedScale = 0.0
             if ($st.SkippedImages -contains $i) { continue }
             $file = $patternBase -f $i
             $thisSeed = if ($seedMap.ContainsKey($i)) { $seedMap[$i] } else { $job.Seed + ($i - 1) }
-            if ($exitCode -eq 0 -and (Test-Path -LiteralPath $file) -and (Test-MossPngValid $file)) {
+            if ($exitCode -eq 0 -and (Test-Path -LiteralPath $file) -and (Test-SgPngValid $file)) {
                 $ok++
                 $upscaledNote = $null
                 if ($up) {
                     try {
-                        Resize-MossImageTo $file ([int]$up.W) ([int]$up.H)
+                        Resize-SgImageTo $file ([int]$up.W) ([int]$up.H)
                         $upscaledNote = ('upscaled from {0} x {1}' -f $up.FromW, $up.FromH)
                     } catch {
                         $upscaledNote = ('kept at engine size {0} x {1} (resize failed: {2})' -f $up.FromW, $up.FromH, $_.Exception.Message)
@@ -6167,8 +6546,8 @@ $speedScale = 0.0
                     }
                     if ($script:HistoryPassphrase) {
                         # A code is set and entered: prompts stay encrypted in the sidecar.
-                        $meta.PromptProtected = Protect-MossPayload ([string]$job.Prompt) $script:HistoryPassphrase
-                        if ($job.NegativePrompt) { $meta.NegativePromptProtected = Protect-MossPayload ([string]$job.NegativePrompt) $script:HistoryPassphrase }
+                        $meta.PromptProtected = Protect-SgPayload ([string]$job.Prompt) $script:HistoryPassphrase
+                        if ($job.NegativePrompt) { $meta.NegativePromptProtected = Protect-SgPayload ([string]$job.NegativePrompt) $script:HistoryPassphrase }
                     } elseif (-not $script:HistoryLocked) {
                         # With no code configured, sidecar prompts are plain.
                         # If saved history is locked, omit prompts rather than
@@ -6176,8 +6555,8 @@ $speedScale = 0.0
                         $meta.Prompt = [string]$job.Prompt
                         if ($job.NegativePrompt) { $meta.NegativePrompt = [string]$job.NegativePrompt }
                     }
-                    # Sidecar goes into the 'metadata' subfolder (see Get-MossSidecarPath)
-                    $sidePath = Get-MossSidecarPath $file
+                    # Sidecar goes into the 'metadata' subfolder (see Get-SgSidecarPath)
+                    $sidePath = Get-SgSidecarPath $file
                     $sideDir = [System.IO.Path]::GetDirectoryName($sidePath)
                     if (-not (Test-Path -LiteralPath $sideDir)) { New-Item -ItemType Directory -Path $sideDir -Force | Out-Null }
                     $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $sidePath -Encoding UTF8
@@ -6198,24 +6577,24 @@ $speedScale = 0.0
         $outputText = "Engine: $($job.Engine)`r`nWorking directory: $($job.Root)`r`nExit code: $exitCode`r`n--- STDOUT ---`r`n$stdout`r`n--- STDERR ---`r`n$stderr"
         # v0.3.44: keep every run's raw engine output for the pre-flight VRAM
         # refinement (successes too - past tracked-weights lines are the data).
-        [void](Write-MossRunLog $stdout $stderr)
+        [void](Write-SgRunLog $stdout $stderr)
         $finalMsg = $null
         if ($exitCode -ne 0) {
             $outputText = "ERROR: Engine process returned exit code $exitCode.`r`n" + $outputText
-            [void](Write-MossErrorLog ("Sootglass generation error - batch of {0} image(s) (exit {1})" -f $job.Count, $exitCode) $outputText)
+            [void](Write-SgErrorLog ("Sootglass generation error - batch of {0} image(s) (exit {1})" -f $job.Count, $exitCode) $outputText)
             $finalMsg = if ($ok -gt 0) { "Partially completed - $ok of $($job.Count) image(s) generated (engine exit $exitCode)" } else { "Generation failed - engine returned exit code $exitCode" }
         } elseif ($corrupt.Count -gt 0) {
             $outputText = ("ERROR: {0} expected image file(s) exist but are CORRUPT or incomplete (the write was interrupted - often a full disk, power loss or antivirus interference). They are NOT in the list; the broken files stay on disk so you can look at them:`r`n" -f $corrupt.Count) + (($corrupt | ForEach-Object { '  ' + $_ }) -join "`r`n") + "`r`n" + $outputText
-            [void](Write-MossErrorLog ("Sootglass generation error - {0} of {1} image(s) corrupt/incomplete" -f $corrupt.Count, $job.Count) $outputText)
+            [void](Write-SgErrorLog ("Sootglass generation error - {0} of {1} image(s) corrupt/incomplete" -f $corrupt.Count, $job.Count) $outputText)
             $finalMsg = "Partially completed - $ok of $($job.Count) image(s) generated; $($corrupt.Count) corrupt file(s) not listed"
         } elseif ($missing.Count -gt 0) {
             $outputText = ("ERROR: Engine returned exit code 0 but {0} expected image file(s) were not created:`r`n" -f $missing.Count) + (($missing | ForEach-Object { '  ' + $_ }) -join "`r`n") + "`r`n" + $outputText
-            [void](Write-MossErrorLog ("Sootglass generation error - {0} of {1} image(s) missing" -f $missing.Count, $job.Count) $outputText)
+            [void](Write-SgErrorLog ("Sootglass generation error - {0} of {1} image(s) missing" -f $missing.Count, $job.Count) $outputText)
             $finalMsg = "Partially completed - $ok of $($job.Count) image(s) generated"
         }
 
         if ($null -eq $finalMsg) { $finalMsg = "Completed - $ok of $($job.Count) image(s) generated" }
-        Complete-MossGen $finalMsg
+        Complete-SgGen $finalMsg
         if ($ok -gt 0) { $log.AppendText("`r`nCompleted. Output folder: $($job.OutputPath)") }
         if ($exitCode -ne 0 -or $missing.Count -gt 0) {
             $log.AppendText("`r`nOne or more images failed. Engine output above; a technical report was saved to the logs folder.")
@@ -6279,9 +6658,14 @@ $speedScale = 0.0
                                 # batch that just failed is relaunched right away. The rerun is
                                 # deferred with BeginInvoke so it starts only after this completion
                                 # handler has fully finished (avoids nesting a new engine run inside
-                                # the handler for the old one). VramHintShown is already set, so a
-                                # repeat failure will not pop the dialog again and loop.
-                                $log.BeginInvoke([Action]{ Start-MossGeneration $job }) | Out-Null
+                                # the handler for the old one). A repeat failure cannot loop:
+                                # OffloadToCpu is saved above, so the next failure takes the
+                                # OK-only branch instead of asking again.
+                                # v0.3.45: the job is stashed in script scope first - a scriptblock
+                                # invoked later via a delegate no longer sees this handler's locals,
+                                # so a bare $job reference could resolve to $null at rerun time.
+                                $script:SgAutoRetryJob=$job
+                                $log.BeginInvoke([Action]{ $script:SgOomRetryPending=$true; Start-SgGeneration $script:SgAutoRetryJob }) | Out-Null
                             } catch {
                                 $script:Settings.OffloadToCpu=$previousOffload
                                 $saveMessage="CPU offload could not be enabled or saved. The setting was not changed.`r`n`r`n$($_.Exception.Message)"
@@ -6298,10 +6682,10 @@ $speedScale = 0.0
         # saved image can be blank white (verified: ays + dpm++2m). Exit
         # code and file count look normal, so this must be checked on its
         # own - otherwise the user silently gets a blank picture.
-        $rejectedSched = Get-MossSchedulerReject ($stdout + "`n" + $stderr)
+        $rejectedSched = Get-SgSchedulerReject ($stdout + "`n" + $stderr)
         if ($rejectedSched) {
             $log.AppendText(("`r`nWARNING: the engine REJECTED the scheduler '{0}' and rendered WITHOUT it - the saved image(s) can be BLANK or wrong. Pick a different scheduler in Generation options (verified working on this model with all samplers: karras, discrete, exponential, sgm_uniform, simple, smoothstep, kl_optimal, logit_normal, beta, flux, bong_tangent, ltx2, flux2; note: 'ays' fails with second-order samplers like dpm++2m)." -f $rejectedSched))
-            [void](Write-MossErrorLog ('Sootglass scheduler rejected by engine - ' + $rejectedSched) ($stdout + "`n" + $stderr))
+            [void](Write-SgErrorLog ('Sootglass scheduler rejected by engine - ' + $rejectedSched) ($stdout + "`n" + $stderr))
             $finalMsg = ($finalMsg -replace ' - scheduler was REJECTED.*$', '') + ' - scheduler was REJECTED by the engine (see the log above)'
         }
         # Record the measured speed for the benchmark system (actual seconds
@@ -6310,7 +6694,7 @@ $speedScale = 0.0
         try {
             $bmAvg = $null
             if ($st.ImageDurations.Count -gt 0) { $bmAvg = (($st.ImageDurations | Measure-Object -Average).Average) }
-            if ($ok -gt 0 -and $bmAvg) { Add-MossBenchmarkEntry -Job $job -SecondsPerImage ([double]$bmAvg) -Images ([int]$ok) }
+            if ($ok -gt 0 -and $bmAvg) { Add-SgBenchmarkEntry -Job $job -SecondsPerImage ([double]$bmAvg) -Images ([int]$ok) }
         } catch {}
         try {
             # Energy ledger: the integrated draw of THIS engine run (measured
@@ -6319,32 +6703,32 @@ $speedScale = 0.0
             # the power.
             $pSec = [double]$st.PowerSeconds; $pJ = [double]$st.PowerJoules; $pMJ = [double]$st.PowerMeasuredJoules
             if ($pSec -gt 0.5 -and $pJ -gt 0) {
-                Add-MossEnergyUsage -Joules $pJ -MeasuredJoules $pMJ -Seconds $pSec -Images ([int]$ok)
+                Add-SgEnergyUsage -Joules $pJ -MeasuredJoules $pMJ -Seconds $pSec -Images ([int]$ok)
                 $pMethod = if ($st.PowerSmi -and $pMJ -gt 0) { 'measured (nvidia-smi)' } else { 'estimated from the GPU rating' }
-                $log.AppendText(("`r`nPower: this run used about {0:N2} kWh of GPU power over {1} ({2}; day and all-time totals in the Benchmarks dialog)." -f ($pJ / 3600000.0), (Format-MossDuration $pSec), $pMethod))
+                $log.AppendText(("`r`nPower: this run used about {0:N2} kWh of GPU power over {1} ({2}; day and all-time totals in the Benchmarks dialog)." -f ($pJ / 3600000.0), (Format-SgDuration $pSec), $pMethod))
             }
         } catch {}
         $batchTimeText = ''
-        if ($st.JobStartedAt) { $batchTimeText = ' | total time ' + (Format-MossDuration ((Get-Date) - $st.JobStartedAt).TotalSeconds) }
+        if ($st.JobStartedAt) { $batchTimeText = ' | total time ' + (Format-SgDuration ((Get-Date) - $st.JobStartedAt).TotalSeconds) }
         # The log is a persistent record: the total time stays here after the
         # status line moves on (user: the time taken was lost when done).
         $log.AppendText("`r`n--- Batch finished | exit $exitCode | $ok of $($job.Count) image(s)$batchTimeText ---`r`n$outputText`r`n")
         # Continue any pending queued run (benchmark) unless the user cancelled.
-        if (-not $st.CancelRequested) { Start-MossNextBench } else { $script:BenchQueue.Clear(); $script:BenchTotal = 0; $script:BenchStartedAt = $null }
+        if (-not $st.CancelRequested) { Start-SgNextBench } else { $script:BenchQueue.Clear(); $script:BenchTotal = 0; $script:BenchStartedAt = $null }
     }
 
-    function Start-MossGeneration {
+    function Start-SgGeneration {
         param($Job)
         if ($script:GenState.IsRunning) { return }
         # Hard minor-safety gate applies regardless of the optional filter.
-        if (-not (Test-MossPromptHardSafety ([string]$Job.Prompt))) {
+        if (-not (Test-SgPromptHardSafety ([string]$Job.Prompt))) {
             $log.AppendText("`r`nBlocked: prompts sexualizing minors cannot be generated. If this refers to an adult teen, explicitly state 18+ in the prompt.")
             $status.Text = 'Blocked: identify the adult subject as 18+'
             $generate.Enabled = $true
             $cancel.Enabled = $false
             return
         }
-        if ([bool]$script:Settings.SafeMode -and -not (Test-MossPromptSafe ([string]$Job.Prompt))) {
+        if ([bool]$script:Settings.SafeMode -and -not (Test-SgPromptSafe ([string]$Job.Prompt))) {
             $log.AppendText("`r`nThe optional content filter blocked this prompt. Disable it in Generation settings to allow general adult content.")
             $status.Text = 'Blocked by optional content filter'
             $generate.Enabled = $true
@@ -6361,7 +6745,7 @@ $speedScale = 0.0
         # pair to system RAM on its own (documented behavior), so the raw
         # sizes would produce a false warning there.
         try {
-            $smiExe = Get-MossNvidiaSmiPath
+            $smiExe = Get-SgNvidiaSmiPath
             $plannedMB = 0L; $sizesKnown = $true
             $modelLeaves = @()
             foreach ($mpf in @([string]$Job.Diffusion, [string]$Job.Llm)) {
@@ -6376,7 +6760,7 @@ $speedScale = 0.0
             # it exceeds the raw file-size estimate instead of under-warning.
             if ($sizesKnown -and $modelLeaves.Count -eq 2) {
                 try {
-                    $trackedMB = Get-MossTrackedWeightsMB $modelLeaves
+                    $trackedMB = Get-SgTrackedWeightsMB $modelLeaves
                     if ($trackedMB -gt $plannedMB) {
                         $plannedMB = [long]$trackedMB
                         $log.AppendText(("`r`nPre-flight: a past run put about {0} GB of weights into VRAM with these exact models; using the measured figure instead of the file-size estimate." -f ([Math]::Round($trackedMB / 1024.0, 1)))) | Out-Null
@@ -6407,7 +6791,7 @@ $speedScale = 0.0
                             # Restart the SAME job with the new flag: recursive
                             # call is safe because OffloadToCpu is now '1', so
                             # the pre-flight passes on the second entry.
-                            Start-MossGeneration $Job
+                            Start-SgGeneration $Job
                             return
                         }
                         $log.AppendText("`r`nContinuing without CPU offload as requested.")
@@ -6418,7 +6802,10 @@ $speedScale = 0.0
 
         $script:GenState.IsRunning = $true
         $script:GenState.CancelRequested = $false
-        $script:GenState.VramHintShown = $false
+        # v0.3.45: a deferred OOM auto-retry must NOT reset the hint guard,
+        # otherwise a failing rerun re-pops the dialog forever (infinite
+        # generate->OOM->dialog loop). Any non-retry start resets it.
+        if($script:SgOomRetryPending){ $script:SgOomRetryPending=$false } else { $script:GenState.VramHintShown = $false }
         $script:GenState.Job = $Job
         $script:GenState.Results = New-Object System.Collections.ArrayList
         $script:GenState.Process = $null
@@ -6448,11 +6835,11 @@ $speedScale = 0.0
         # once per run (nvidia-smi when present, TDP estimate otherwise).
         $script:GenState.PowerJoules = 0.0; $script:GenState.PowerMeasuredJoules = 0.0; $script:GenState.PowerSeconds = 0.0
         $script:GenState.PowerLastSample = Get-Date; $script:GenState.PowerLastW = 250.0; $script:GenState.PowerLastMeasured = $false
-        $script:GenState.PowerSmi = Get-MossNvidiaSmiPath
+        $script:GenState.PowerSmi = Get-SgNvidiaSmiPath
         $gpuNameEst = ''; try { $g0est = @($script:Inventory | Where-Object { -not $_.IsVirtual } | Select-Object -First 1); if ($g0est) { $gpuNameEst = [string]$g0est.Name } } catch {}
-        $script:GenState.PowerEstimateW = Get-MossPowerEstimateWatts (Get-MossGpuTdp $gpuNameEst)
+        $script:GenState.PowerEstimateW = Get-SgPowerEstimateWatts (Get-SgGpuTdp $gpuNameEst)
         try {
-            $bmEst = Get-MossBenchmarkEstimate ([int]$Job.Width) ([int]$Job.Height) ([string]$Job.SpeedMode) ([int]$Job.Steps) ($null -ne $Job.InitImage)
+            $bmEst = Get-SgBenchmarkEstimate ([int]$Job.Width) ([int]$Job.Height) ([string]$Job.SpeedMode) ([int]$Job.Steps) ($null -ne $Job.InitImage)
             if ($bmEst) {
                 $script:GenState['PredictedPerImage'] = [double]$bmEst.Sec
             }
@@ -6460,12 +6847,17 @@ $speedScale = 0.0
 
         $timer = New-Object System.Windows.Forms.Timer
         $timer.Interval = 400
-        $timer.Add_Tick({ On-MossGenTimerTick })
+        $timer.Add_Tick({ On-SgGenTimerTick })
         $script:GenState.Timer = $timer
         $timer.Start()
 
         $generate.Enabled = $false
         $cancel.Enabled = $true
+        $btnPause.Enabled = $true; $btnPause.Text = 'Pause'
+        $btnSkip.Enabled = $true
+        # v0.3.45: per-batch reset - the previous batch's per-image durations
+        # would otherwise pollute this batch's ETA until new samples land.
+        try { $script:GenState.ImageDurations.Clear() } catch {}
         $log.Clear()
         # Keep the existing file list: it is the full history of generated
         # files (populated at startup). New images are appended as they land.
@@ -6475,11 +6867,11 @@ $speedScale = 0.0
         $prog.Style = 'Marquee'
         $prog.Visible = $true
 
-        Start-MossBatchEngine
+        Start-SgBatchEngine
     }
 
 
-    function Get-MossSchedulerReject([string]$EngineOutput) {
+    function Get-SgSchedulerReject([string]$EngineOutput) {
         # The engine REJECTS an unsupported scheduler with an [E] line and
         # then CONTINUES RENDERING - the result can be a blank white image
         # (verified: --scheduler ays + --sampling-method dpm++2m rendered a
@@ -6491,7 +6883,7 @@ $speedScale = 0.0
         if ($m.Success) { return $m.Groups[1].Value }
         return $null
     }
-    function Remove-MossSelectedFiles([bool]$All) {
+    function Remove-SgSelectedFiles([bool]$All) {
         # Deletes images (and their sidecars) from disk and the list: either
         # the multi-selection (Ctrl+click / Shift+click) or ALL files at once.
         # One confirmation for the whole batch - no per-file prompts.
@@ -6504,7 +6896,7 @@ $speedScale = 0.0
         $files=@($files | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) })
         if($files.Count -eq 0){ [System.Windows.Forms.MessageBox]::Show('Select a file in Generated Files first (Ctrl+click or Shift+click for several).','Delete files')|Out-Null;return }
         $totalBytes=0
-        foreach($f in $files){ try { $totalBytes+=(Get-Item -LiteralPath $f).Length; $side=Get-MossSidecarReadPath $f; if(Test-Path -LiteralPath $side){ $totalBytes+=(Get-Item -LiteralPath $side).Length } } catch {} }
+        foreach($f in $files){ try { $totalBytes+=(Get-Item -LiteralPath $f).Length; $side=Get-SgSidecarReadPath $f; if(Test-Path -LiteralPath $side){ $totalBytes+=(Get-Item -LiteralPath $side).Length } } catch {} }
         $nameLine=if($files.Count -eq 1){$files[0]}else{($files[0]+'  ... and '+($files.Count-1)+' more')}
         $answer=[System.Windows.Forms.MessageBox]::Show(("Delete {0} image(s) permanently?`r`n{1}`r`n`r`nAbout {2} MB will be freed (images + sidecars).`r`nThis cannot be undone." -f $files.Count,$nameLine,[Math]::Round($totalBytes/1MB,1)),'Delete files',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
         if($answer -ne [System.Windows.Forms.DialogResult]::Yes){return}
@@ -6516,7 +6908,7 @@ $speedScale = 0.0
                 Remove-Item -LiteralPath $f -Force
                 # The sidecar may sit in the metadata subfolder (new) or next
                 # to the image (older versions) - clean up both locations.
-                foreach($side in @((Get-MossSidecarPath $f),([System.IO.Path]::ChangeExtension($f,'.json')))){
+                foreach($side in @((Get-SgSidecarPath $f),([System.IO.Path]::ChangeExtension($f,'.json')))){
                     if(Test-Path -LiteralPath $side){ try { Remove-Item -LiteralPath $side -Force } catch {} }
                 }
                 $idx=-1; for($i=0;$i -lt $fileList.Items.Count;$i++){ if([string]$fileList.Items[$i] -eq $f){ $idx=$i; break } }
@@ -6533,7 +6925,7 @@ $speedScale = 0.0
         $status.Text=('Deleted {0} file(s).{1}' -f $deleted,$(if($failed){' '+$failed+' could not be deleted.'}else{''}))
     }
 
-    function Show-MossImageInfo {
+    function Show-SgImageInfo {
         # Shows what is stored for the selected image: prompt (decrypted only
         # when the history code was entered), negative prompt, seed, size,
         # steps, CFG, speed mode, sampler, scheduler and origin. Read-only.
@@ -6547,14 +6939,14 @@ $speedScale = 0.0
         $lines=New-Object System.Collections.Generic.List[string]
         $lines.Add(('File: ' + [System.IO.Path]::GetFileName($selFile)))
         if($imgW -gt 0){ $lines.Add(('Size: ' + $imgW + ' x ' + $imgH)) }
-        $side=Get-MossSidecarReadPath $selFile
+        $side=Get-SgSidecarReadPath $selFile
         if (Test-Path -LiteralPath $side -PathType Leaf) {
             try {
                 $sc = Get-Content -LiteralPath $side -Raw | ConvertFrom-Json
-                if ($sc.Seed) { $lines.Add(('Seed: ' + [string]$sc.Seed)) }
+                if ($null -ne $sc.Seed) { $lines.Add(('Seed: ' + [string]$sc.Seed)) }
                 $setLine=''
-                if ($sc.Steps) { $setLine=('steps ' + [string]$sc.Steps) }
-                if ($sc.CfgScale) { if($setLine){$setLine+=', '}; $setLine+=('CFG ' + [string]$sc.CfgScale) }
+                if ($null -ne $sc.Steps) { $setLine=('steps ' + [string]$sc.Steps) }
+                if ($null -ne $sc.CfgScale) { if($setLine){$setLine+=', '}; $setLine+=('CFG ' + [string]$sc.CfgScale) }
                 if ($sc.Sampler) { $setLine+=(', sampler ' + [string]$sc.Sampler) }
                 if ($sc.Scheduler) { $setLine+=(', scheduler ' + [string]$sc.Scheduler) }
                 if ($setLine) { $lines.Add(('Settings: ' + $setLine)) }
@@ -6570,7 +6962,7 @@ $speedScale = 0.0
                 if ($sc.GeneratedAt) { $lines.Add(('Created: ' + [string]$sc.GeneratedAt)) }
                 if ($sc.PromptProtected) {
                     if (-not $script:HistoryLocked -and $script:HistoryPassphrase) {
-                        try { $p = Unprotect-MossPayload ([string]$sc.PromptProtected) $script:HistoryPassphrase; if ($p) { $prompt=[string]$p } else { $promptLockedNote='(encrypted - the history code did not unlock it)' } } catch { $promptLockedNote='(encrypted - enter your history code in Sootglass to see the prompt)' }
+                        try { $p = Unprotect-SgPayload ([string]$sc.PromptProtected) $script:HistoryPassphrase; if ($p) { $prompt=[string]$p } else { $promptLockedNote='(encrypted - the history code did not unlock it)' } } catch { $promptLockedNote='(encrypted - enter your history code in Sootglass to see the prompt)' }
                     } else {
                         $promptLockedNote='(encrypted - enter your history code in Sootglass to see the prompt)'
                     }
@@ -6582,7 +6974,7 @@ $speedScale = 0.0
                 }
                 if ($sc.NegativePromptProtected) {
                     if (-not $script:HistoryLocked -and $script:HistoryPassphrase) {
-                        try { $np = Unprotect-MossPayload ([string]$sc.NegativePromptProtected) $script:HistoryPassphrase; if ($np) { $neg=[string]$np } } catch {}
+                        try { $np = Unprotect-SgPayload ([string]$sc.NegativePromptProtected) $script:HistoryPassphrase; if ($np) { $neg=[string]$np } } catch {}
                     }
                 }
             } catch {
@@ -6610,7 +7002,7 @@ $speedScale = 0.0
         $g.Dispose()
     }
 
-    function Start-MossNextBench {
+    function Start-SgNextBench {
         # Sequentially processes the queued one-off runs (the quick benchmark
         # is the only user of this queue since v0.3.0): one engine run per item.
         if ($script:GenState.IsRunning) { return }
@@ -6621,7 +7013,7 @@ $speedScale = 0.0
         if ($script:BenchQueue.Count -eq 0) {
             if ($script:BenchTotal -gt 0) {
                 $queueElapsed = ''
-                if ($script:BenchStartedAt) { $queueElapsed = ' | total elapsed ' + (Format-MossDuration ((Get-Date) - $script:BenchStartedAt).TotalSeconds) }
+                if ($script:BenchStartedAt) { $queueElapsed = ' | total elapsed ' + (Format-SgDuration ((Get-Date) - $script:BenchStartedAt).TotalSeconds) }
                 $status.Text = "Benchmark finished - $script:BenchTotal run(s) processed$queueElapsed"
                 $log.AppendText("`r`nBenchmark finished - $script:BenchTotal run(s) processed.")
                 $script:BenchStartedAt = $null
@@ -6656,7 +7048,7 @@ $speedScale = 0.0
             $log.AppendText(("`r`nQuick benchmark run {0} of {1}: {2} x {3} at {4} engine steps..." -f ($script:BenchTotal - $script:BenchQueue.Count), $script:BenchTotal, $item.W, $item.H, $job.Steps))
             $status.Text = ("Benchmark run {0} of {1} at {2} x {3}..." -f ($script:BenchTotal - $script:BenchQueue.Count), $script:BenchTotal, $item.W, $item.H)
         }
-        Start-MossGeneration -Job $job
+        Start-SgGeneration -Job $job
     }
 
     # --- end Timer + Process worker ---
@@ -6669,8 +7061,8 @@ $speedScale = 0.0
         $paths=@($enginePath,(Get-AbsoluteAppPath $modelControls.DiffusionModelPath.Text),(Get-AbsoluteAppPath $modelControls.LlmPath.Text),(Get-AbsoluteAppPath $modelControls.VaePath.Text),(Get-AbsoluteAppPath $modelControls.TokenizerPath.Text))
         foreach($path in $paths){if(-not(Test-Path -LiteralPath $path -PathType Leaf)){[System.Windows.Forms.MessageBox]::Show("Required file not found:`r`n$path`r`n`r`nCheck Hardware / Setup or the model file paths.",'Missing file',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null;return}}
         $outPath=Get-AbsoluteAppPath $out.Text.Trim();if(-not $outPath){[System.Windows.Forms.MessageBox]::Show('Choose an output folder.','Output folder')|Out-Null;return};if(-not(Test-Path -LiteralPath $outPath)){New-Item -ItemType Directory -Path $outPath -Force|Out-Null}
-        $wi=0;$he=0;if(-not [int]::TryParse($wBox.Text,[ref]$wi) -or -not [int]::TryParse($hBox.Text,[ref]$he) -or -not (Test-MossImageDimension $wi) -or -not (Test-MossImageDimension $he)){[System.Windows.Forms.MessageBox]::Show('Width and height must be between 64 and 8192 pixels and multiples of 16.','Invalid dimensions')|Out-Null;return}
-        $st=0;$cf=0.0;$sd=0;if(-not [int]::TryParse($steps.Text,[ref]$st) -or $st -lt 1 -or $st -gt 200){[System.Windows.Forms.MessageBox]::Show('Steps must be between 1 and 200.','Invalid steps')|Out-Null;return};if(-not (ConvertTo-MossDouble $cfg.Text ([ref]$cf)) -or $cf -le 0 -or $cf -gt 30){[System.Windows.Forms.MessageBox]::Show('CFG scale must be greater than 0 and no more than 30 (dot or comma both work, e.g. 3.5 or 3,5).','Invalid CFG')|Out-Null;return};if(-not [int]::TryParse($seed.Text,[ref]$sd) -or $sd -lt -1){[System.Windows.Forms.MessageBox]::Show('Seed must be -1 (random) or a non-negative integer.','Invalid seed')|Out-Null;return}
+        $wi=0;$he=0;if(-not [int]::TryParse($wBox.Text,[ref]$wi) -or -not [int]::TryParse($hBox.Text,[ref]$he) -or -not (Test-SgImageDimension $wi) -or -not (Test-SgImageDimension $he)){[System.Windows.Forms.MessageBox]::Show('Width and height must be between 64 and 8192 pixels and multiples of 16.','Invalid dimensions')|Out-Null;return}
+        $st=0;$cf=0.0;$sd=0;if(-not [int]::TryParse($steps.Text,[ref]$st) -or $st -lt 1 -or $st -gt 200){[System.Windows.Forms.MessageBox]::Show('Steps must be between 1 and 200.','Invalid steps')|Out-Null;return};if(-not (ConvertTo-SgDouble $cfg.Text ([ref]$cf)) -or [double]::IsNaN($cf) -or [double]::IsInfinity($cf) -or $cf -le 0 -or $cf -gt 30){[System.Windows.Forms.MessageBox]::Show('CFG scale must be greater than 0 and no more than 30 (dot or comma both work, e.g. 3.5 or 3,5).','Invalid CFG')|Out-Null;return};if(-not [int]::TryParse($seed.Text,[ref]$sd) -or $sd -lt -1){[System.Windows.Forms.MessageBox]::Show('Seed must be -1 (random) or a non-negative integer.','Invalid seed')|Out-Null;return}
         # Image count: any whole number >= 1 - no artificial cap. Practical
         # limits (disk space, hours of runtime) are the user's choice, with a
         # plain-language warning for very large batches.
@@ -6685,19 +7077,22 @@ $speedScale = 0.0
         $baseSeed=$sd;if($baseSeed -eq -1){$baseSeed=Get-Random -Minimum 1 -Maximum ([Math]::Max(2, 2147483000 - [Math]::Min($n, 2000000000)))}
         if(($wi -ge 2560 -or $he -ge 2560) -and [System.Windows.Forms.MessageBox]::Show("You are about to render at $wi x $he directly. Large renders can use substantial VRAM and RAM and may take a long time. Continue?",'Large image warning',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne 'Yes'){return}
         $script:Settings.ImageStyle=[string]$style.SelectedItem;$script:Settings.EnginePath=Get-RelativeAppPath $enginePath;$script:Settings.DiffusionModelPath=Get-RelativeAppPath $paths[1];$script:Settings.LlmPath=Get-RelativeAppPath $paths[2];$script:Settings.VaePath=Get-RelativeAppPath $paths[3];$script:Settings.TokenizerPath=Get-RelativeAppPath $paths[4];$script:Settings.OutputPath=Get-RelativeAppPath $outPath;$script:Settings.Steps=$st;$script:Settings.CfgScale=$cf;$script:Settings.Width=$wi;$script:Settings.Height=$he;$script:Settings.ImageCount=$n;$script:Settings.Seed=$sd
-        if (-not $script:HistoryLocked) { $hist=@($p)+@($history|Where-Object{$_ -ne $p});$history=@($hist|Select-Object -First 20);$script:Settings.PromptHistory=$history } else { $script:Settings.PromptHistory=@() };if(-not (Save-Settings)){[System.Windows.Forms.MessageBox]::Show('Set a password to save private prompt history. Generation was not started.','Password required')|Out-Null;return};if (-not $script:HistoryLocked) { if($historyPick.Items.Count -eq 0 -or [string]$historyPick.Items[0] -ne $p){$historyPick.Items.Insert(0,$p)};while($historyPick.Items.Count -gt 10){$historyPick.Items.RemoveAt($historyPick.Items.Count-1)} }
+        # v0.3.45 (fix): the write must go through $script:Settings - a local
+        # $history write inside this handler dies with the handler's scope,
+        # which resurrected a stale prompt snapshot on the next save.
+        if (-not $script:HistoryLocked) { $newHist=@($p)+@($script:Settings.PromptHistory|Where-Object{$_ -ne $p});$script:Settings.PromptHistory=@($newHist|Select-Object -First 20) } else { $script:Settings.PromptHistory=@() };if(-not (Save-Settings)){[System.Windows.Forms.MessageBox]::Show('Set a password to save private prompt history. Generation was not started.','Password required')|Out-Null;return};if (-not $script:HistoryLocked) { if($historyPick.Items.Count -eq 0 -or [string]$historyPick.Items[0] -ne $p){$historyPick.Items.Insert(0,$p)};while($historyPick.Items.Count -gt 10){$historyPick.Items.RemoveAt($historyPick.Items.Count-1)} }
         # 'None (no style)' falls through to default{''}: the prompt is sent
         # exactly as typed, with nothing prepended.
         $stylePrefix=switch([string]$style.SelectedItem){'Photorealistic'{'photorealistic, lifelike, realistic textures, natural lighting'}'Anime'{'anime style, expressive line art, cel shading'}'Digital illustration'{'polished digital illustration'}'Oil painting'{'oil painting, rich brush strokes'}'Watercolor'{'watercolor painting, soft pigment texture'}'3D render'{'high quality 3D render, detailed materials'}'Comic book'{'comic book art, inked outlines, bold colors'}'Cinematic'{'cinematic composition, dramatic lighting'}'Fantasy art'{'epic fantasy art, dramatic lighting, highly detailed'}'Dark fantasy / gothic'{'dark fantasy, gothic atmosphere, moody dramatic shadows'}'Cyberpunk / sci-fi'{'cyberpunk, neon lights, futuristic, rain-slick streets'}'Studio portrait'{'professional studio portrait, softbox lighting, clean background'}'Sketch / pencil drawing'{'detailed pencil sketch, graphite shading, white background'}'Pixel art'{'pixel art, 16-bit retro game style, crisp pixels'}'Synthwave / retro 80s'{'retro 80s synthwave, neon grid, sunset glow'}'Low poly 3D'{'low poly 3d render, flat shaded, minimalist'}default{''}}
         # Do not double the style prefix: a prompt picked from the history
         # dropdown already carries it (user saw 'photorealistic, lifelike...'
         # twice in the engine command line).
-        $isLayoutPrompt=Test-MossLayoutPrompt $p
+        $isLayoutPrompt=Test-SgLayoutPrompt $p
         $generationPrompt=if($isLayoutPrompt){$p}elseif($stylePrefix -and -not $p.ToLowerInvariant().StartsWith($stylePrefix.ToLowerInvariant())){"$stylePrefix, $p"}else{$p}
-        if (-not (Test-MossPromptHardSafety $generationPrompt)) {
+        if (-not (Test-SgPromptHardSafety $generationPrompt)) {
             [System.Windows.Forms.MessageBox]::Show("This prompt may sexualize a minor, so it was blocked. If the subject is an adult teen, explicitly state 18+.",'Minor-safety check',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return
         }
-        if ([bool]$script:Settings.SafeMode -and -not (Test-MossPromptSafe $generationPrompt)) {
+        if ([bool]$script:Settings.SafeMode -and -not (Test-SgPromptSafe $generationPrompt)) {
             [System.Windows.Forms.MessageBox]::Show("The optional content filter is enabled and matched this prompt. Disable it in Generation settings to allow general adult content.",'Optional content filter',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return
         }
         $gpuIndex=-1; if($script:Settings.Contains('PreferredGpuIndex')){ try { $gpuIndex=[int]$script:Settings.PreferredGpuIndex } catch { $gpuIndex=-1 } }
@@ -6706,7 +7101,7 @@ $speedScale = 0.0
         $samplingMethod=$null; if([string]$script:Settings.SamplingMethod -and [string]$script:Settings.SamplingMethod -ne 'Default (model)'){ $samplingMethod=[string]$script:Settings.SamplingMethod }
         $scheduler=$null; if([string]$script:Settings.Scheduler -and [string]$script:Settings.Scheduler -ne 'Default (model)'){ $scheduler=[string]$script:Settings.Scheduler }
         $job=[pscustomobject]@{Engine=$enginePath;Root=$script:AppRoot;Backend=[string]$script:Settings.Backend;Diffusion=$paths[1];Llm=$paths[2];Vae=$paths[3];Tokenizer=$paths[4];OutputPath=$outPath;Steps=$st;Cfg=$cf;Width=$wi;Height=$he;Count=$n;Seed=$baseSeed;Prompt=$generationPrompt;GpuIndex=$gpuIndex;SpeedMode=$speedMode;InitImage=$null;InitStrength=0.45;NegativePrompt=$negPrompt;SamplingMethod=$samplingMethod;Scheduler=$scheduler}
-        $generate.Enabled=$false;$cancel.Enabled=$true;$btnPause.Enabled=$true;$btnPause.Text='Pause';$btnSkip.Enabled=$true;$log.Clear();$status.Text='Starting engine...';Start-MossGeneration -Job $job
+        $generate.Enabled=$false;$cancel.Enabled=$true;$btnPause.Enabled=$true;$btnPause.Text='Pause';$btnSkip.Enabled=$true;$log.Clear();$status.Text='Starting engine...';Start-SgGeneration -Job $job
     })
     $cancel.Add_Click({
         if ($script:GenState.IsRunning) {
@@ -6718,29 +7113,31 @@ $speedScale = 0.0
             $status.Text = 'Cancelling generation...'
             $log.AppendText("`r`nCancellation requested. Stopping the engine and any child processes...")
             $f.Refresh()
-            Stop-MossGen
+            Stop-SgGen
             $generate.Enabled = $true
             $cancel.Enabled = $false
-            $elapsedText = if ($script:GenState.JobStartedAt) { Format-MossDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds } else { '0:00' }
+            $elapsedText = if ($script:GenState.JobStartedAt) { Format-SgDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds } else { '0:00' }
             $prog.Visible = $false
-            Restore-MossGeneratedPreview
+            Restore-SgGeneratedPreview
             $status.Text = "Generation cancelled | total elapsed $elapsedText"
             $log.AppendText("`r`nGeneration cancelled. No further images will be started.")
         }
     })
     $openOut.Add_Click({$folder=Get-AbsoluteAppPath $out.Text;if(Test-Path -LiteralPath $folder){Start-Process explorer.exe -ArgumentList (Quote-ProcessArgument $folder)}})
-    $f.Add_FormClosing({if($script:GenState.IsRunning){$script:GenState.CancelRequested=$true;Stop-MossGen}; if($f.Tag -ne 'RESETSETTINGS'){try { Save-MossWindowBounds $f } catch {}}})
+    $f.Add_FormClosing({
+        if($script:SgSelfUpdateBusy){ $_.Cancel=$true; [System.Windows.Forms.MessageBox]::Show('A Sootglass update is downloading. Cancel it in the update window first (or wait for it to finish).','Update in progress',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)|Out-Null; return }
+        if($script:GenState.IsRunning){$script:GenState.CancelRequested=$true;Stop-SgGen}; if($f.Tag -ne 'RESETSETTINGS'){try { Save-SgWindowBounds $f } catch {}}})
     # v0.2.3: the window was already shown (frame + panels) before the
     # controls were added, so the Shown event has long passed by now: the
     # startup work is started explicitly instead of from the Shown event.
     $script:StartWindowWork={
-        Hide-MossConsoleWindow
+        Hide-SgConsoleWindow
         # v0.3.8: make sure the optional LoRA folder exists (empty, never
         # auto-filled) so the Generation dialog has somewhere to point.
-        try { [void](Ensure-MossLoraDir) } catch {}
+        try { [void](Ensure-SgLoraDir) } catch {}
         # v0.2.4: the adapter scan runs on a BACKGROUND runspace - the UI
         # thread stays free while it works.
-        try { Start-MossGpuScan } catch {}
+        try { Start-SgGpuScan } catch {}
         $script:GpuPollTimer=New-Object System.Windows.Forms.Timer
         $script:GpuPollTimer.Interval=120
         # The tick is a PLAIN scriptblock on purpose: $script: inside a
@@ -6786,17 +7183,17 @@ $speedScale = 0.0
             try {
                 $script:StartupDialogTimer.Stop()
                 try { $f.Activate() } catch {}
-                Unlock-MossHistoryAfterShow
-                Test-MossOfferStartupDownload $f
+                Unlock-SgHistoryAfterShow
+                Test-SgOfferStartupDownload $f
                 try { & $script:RefreshGpuSubtitle } catch {
                     # v0.2.3: log instead of silently ignoring - the header then
                     # stays on 'GPU: detecting...' and the cause is invisible.
-                    try { [void](Write-MossErrorLog 'GPU subtitle refresh failed' ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+"`r`n"+$_.Exception.GetType().FullName+': '+$_.Exception.Message+"`r`n"+$_.ScriptStackTrace)) } catch {}
+                    try { [void](Write-SgErrorLog 'GPU subtitle refresh failed' ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+"`r`n"+$_.Exception.GetType().FullName+': '+$_.Exception.Message+"`r`n"+$_.ScriptStackTrace)) } catch {}
                 }
             } catch {
                 # A failure here must never crash Sootglass with the WinForms error
                 # dialog - it is logged instead and startup continues.
-                try { [void](Write-MossErrorLog 'Startup dialog error' ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+"`r`n"+$_.Exception.GetType().FullName+': '+$_.Exception.Message+"`r`n"+$_.ScriptStackTrace)) } catch {}
+                try { [void](Write-SgErrorLog 'Startup dialog error' ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+"`r`n"+$_.Exception.GetType().FullName+': '+$_.Exception.Message+"`r`n"+$_.ScriptStackTrace)) } catch {}
             }
         })
         $script:StartupDialogTimer.Start()
@@ -6806,14 +7203,54 @@ $speedScale = 0.0
     try { $f.ResumeLayout($true) } catch {}
     try { $left.ResumeLayout($true) } catch {}
     try { $right.ResumeLayout($true) } catch {}
+    # v0.3.45 (fix): global UI-exception logging. Any unhandled exception from a
+    # WinForms event handler (button click, timer tick, ...) used to show
+    # only the runtime error dialog - with nothing in logs\ to diagnose
+    # later. It is now logged with the full script stack, so a crash report
+    # from the user pinpoints the exact handler and line.
+    try {
+        [System.Windows.Forms.Application]::add_ThreadException({
+            param($exSender,$exArgs)
+            try {
+                $uiX=$exArgs.Exception
+                # RuntimeExceptions carry an ErrorRecord with the exact
+                # script position - ScriptStackTrace alone is often EMPTY for
+                # them (live-verified on the 'Cannot index into a null array'
+                # crash), so always log the ErrorRecord too.
+                $uiErr=$null
+                try { $uiErr=$uiX.ErrorRecord } catch {}
+                $uiPos=''
+                $uiErrStack=''
+                if($uiErr){
+                    try { $uiPos=$uiErr.InvocationInfo.PositionMessage } catch {}
+                    try { $uiErrStack=$uiErr.ScriptStackTrace } catch {}
+                }
+                [void](Write-SgErrorLog 'UI thread exception (unhandled event handler)' ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+
+                    "`r`n"+$uiX.GetType().FullName+': '+$uiX.Message+
+                    "`r`n`r`n--- Script position (ErrorRecord) ---`r`n"+$uiPos+
+                    "`r`n`r`n--- PowerShell script stack ---`r`n"+$uiErrStack+"`r`n"+$uiX.ScriptStackTrace+
+                    "`r`n`r`n--- .NET stack ---`r`n"+$uiX.StackTrace))
+            } catch {}
+        })
+        [System.AppDomain]::CurrentDomain.add_UnhandledException({
+            param($exSender,$exArgs)
+            try {
+                $unX=$exArgs.ExceptionObject -as [Exception]
+                $unMsg=if($unX){$unX.GetType().FullName+': '+$unX.Message}else{[string]$exArgs.ExceptionObject}
+                $unStack=if($unX){$unX.StackTrace}else{''}
+                [void](Write-SgErrorLog 'Unhandled exception (CLR)' ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+
+                    "`r`n"+$unMsg+"`r`n`r`n--- .NET stack ---`r`n"+$unStack))
+            } catch {}
+        })
+    } catch {}
     # v0.2.3: run the window's message loop instead of ShowDialog - the form
     # is already visible from the early Show() above.
-    try { Update-MossLeftActionLayout } catch {}
-    Update-MossWorkspaceLayout
+    try { Update-SgLeftActionLayout } catch {}
+    Update-SgWorkspaceLayout
     # v0.2.3: start the startup dialogs (history prompt / download offer) and
     # the post-paint GPU name refresh. This must run BEFORE the message loop:
     # the winforms timer that drives it only ticks while the loop runs.
-    try { & $script:StartWindowWork } catch { try { [void](Write-MossErrorLog 'Startup work failed' ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+"`r`n"+$_.Exception.GetType().FullName+': '+$_.Exception.Message+"`r`n"+$_.ScriptStackTrace)) } catch {} }
+    try { & $script:StartWindowWork } catch { try { [void](Write-SgErrorLog 'Startup work failed' ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+"`r`n"+$_.Exception.GetType().FullName+': '+$_.Exception.Message+"`r`n"+$_.ScriptStackTrace)) } catch {} }
     [System.Windows.Forms.Application]::Run($f)
     if($preview.Image){$preview.Image.Dispose()}
     if($f.Tag -eq 'SETUP'){
@@ -6824,10 +7261,10 @@ $speedScale = 0.0
 
 # Show setup on first run or when explicitly requested. Otherwise open the generator directly.
 # Hide the launcher console before ANY window appears (password prompt included).
-try { Hide-MossConsoleWindow } catch {}
+try { Hide-SgConsoleWindow } catch {}
 try {
     if ($SetupOnly -or -not [bool]$script:Settings.HardwareSetupComplete) {
-        Show-MossSetupDialog
+        Show-SgSetupDialog
     }
     if ((-not $SetupOnly -or $ReturnToGenerator) -and [bool]$script:Settings.HardwareSetupComplete) {
         Load-Settings
@@ -6838,7 +7275,7 @@ try {
 } catch {
     # A startup error must never disappear silently (the console may already be hidden).
     $errText = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`n$($_.Exception.GetType().FullName): $($_.Exception.Message)`r`n$($_.ScriptStackTrace)"
-    try { [void](Write-MossErrorLog 'Sootglass startup error' $errText) } catch {}
+    try { [void](Write-SgErrorLog 'Sootglass startup error' $errText) } catch {}
     try { [System.Windows.Forms.MessageBox]::Show(("Sootglass Studio could not start.`r`n`r`n"+$_.Exception.Message+"`r`n`r`nA technical report was saved to the logs folder."),'Sootglass Studio',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null } catch {}
     exit 1
 }

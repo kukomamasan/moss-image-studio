@@ -1,4 +1,4 @@
-SOOTGLASS STUDIO (v0.3.44)
+SOOTGLASS STUDIO (v0.3.45)
 ===========================
 Generate images with the open MOSS-Image model on your own computer - with
 one download, one window, and zero command line.
@@ -24,6 +24,14 @@ installing an app - and as private as keeping a diary.
    offers the missing engine and model files with free-space checks, a time
    estimate, size verification and automatic backups. When the download is
    done, you are ready - there is no step three.
+
+ * EVERY DOWNLOAD SHOWS PROGRESS - AND OBEYS YOU
+   Engine files, CUDA runtimes, models, LoRAs and app updates all share one
+   honest download experience: a live progress bar, a real "X of Y MB"
+   read-out with an ETA from your actual measured speed, and a Cancel button
+   that works within a second - even mid-download of a 500 MB package. The
+   window stays responsive through the whole transfer, so nothing ever
+   looks frozen while it is working.
 
  * A VRAM SAFETY NET THAT ACTS BEFORE IT HURTS
    Before every generation, Sootglass compares the selected models against the
