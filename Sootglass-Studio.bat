@@ -1,10 +1,10 @@
 @echo off
-rem MOSS Image Studio launcher.
-rem Preferred path: the VBScript launcher (stays open with MOSS and closes with it).
+rem Sootglass Studio launcher.
+rem Preferred path: the VBScript launcher (stays open with Sootglass and closes with it).
 rem Fallback: if wscript.exe is unavailable, locate Windows PowerShell 5.1 directly
 rem in its standard Windows installation location, without relying on PATH.
-set "SCRIPT=%~dp0MOSS-Image-Studio.ps1"
-set "VBS=%~dp0MOSS-Image-Studio.vbs"
+set "SCRIPT=%~dp0Sootglass-Studio.ps1"
+set "VBS=%~dp0Sootglass-Studio.vbs"
 set "PS51=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 if not exist "%PS51%" set "PS51=%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
 set "WSCRIPT=%SystemRoot%\System32\wscript.exe"
@@ -24,11 +24,11 @@ exit
 :launch_powershell
 rem /min keeps the fallback console out of the way (same reason as the
 rem hidden console in the VBS launcher - no visible flash at startup).
-start "MOSS" /min /wait "%PS51%" -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File "%SCRIPT%"
+start "Sootglass" /min /wait "%PS51%" -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File "%SCRIPT%"
 exit
 
 :missing_script
-echo ERROR: MOSS-Image-Studio.ps1 was not found beside this launcher.
+echo ERROR: Sootglass-Studio.ps1 was not found beside this launcher.
 pause
 exit
 
