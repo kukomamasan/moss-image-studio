@@ -5508,6 +5508,13 @@ function Update-SgFileList {
         PreviewBox = $null
         ImageStartedAt = $null
         ImageDurations = New-Object System.Collections.ArrayList
+        # v0.3.45: per-image engine timing, keyed by 1-based batch index:
+        # SamplingSec (engine stdout 'sampling completed, taking X s') and
+        # WallSec (ImageStartedAt -> process exit). One process renders
+        # exactly one image, but a sidecar for an earlier image may be
+        # written while a LATER run is already streaming (live overlap), so
+        # the values are stored per index instead of as one 'last' value.
+        ImageTimings = @{}
         ImageProgress = 0
         StepNum = 0
         StepDen = 0
@@ -5970,6 +5977,16 @@ function Update-SgFileList {
         $script:GenState.Paused = $false; $script:GenState.PausedAt = $null
         if ($FinalStatus) { $status.Text = $FinalStatus }
         if ($script:GenState.JobStartedAt) { $status.Text += " | total elapsed $(Format-SgDuration ((Get-Date) - $script:GenState.JobStartedAt).TotalSeconds)" }
+        # v0.3.45 (user): the per-image speed used to vanish when the batch
+        # ended - keep the average on the status line too.
+        try {
+            $genTimingOk=@($script:GenState.ImageTimings.Values | Where-Object { $_.SamplingSec -gt 0 })
+            if($genTimingOk.Count -gt 0){
+                $genAvgWall=($script:GenState.ImageTimings.Values | Measure-Object WallSec -Average).Average
+                $genAvgIts=($genTimingOk | ForEach-Object { [int]$script:GenState.Job.Steps/[double]$_.SamplingSec } | Measure-Object -Average).Average
+                $status.Text += (' | avg {0}s/image, ~{1} it/s' -f ([math]::Round($genAvgWall,1)),[math]::Round($genAvgIts,2))
+            }
+        } catch {}
         # v0.3.45: restore the user's selected image in the preview pane - the
         # live preview overwrote it with noisy step frames during the run.
         try {
@@ -6361,10 +6378,20 @@ $speedScale = 0.0
                 Backend = $job.Backend
                 SpeedMode = [string]$job.SpeedMode
                 UpscaledFrom = $upscaledNote
+                # v0.3.45: engine timing for THIS image (null when unknown,
+                # e.g. a sidecar rewritten by an older version or a failed run).
+                SamplingSeconds = $null; TotalSeconds = $null; ItPerSec = $null
                 Sampler = $(if($job.SamplingMethod){ [string]$job.SamplingMethod }else{ $null })
                 Scheduler = $(if($job.Scheduler){ [string]$job.Scheduler }else{ $null })
                 GeneratedAt = (Get-Date).ToString('o'); Engine = $job.Engine
             }
+            try {
+                if ($st.ImageTimings.ContainsKey([int]$i)) {
+                    $imgT = $st.ImageTimings[[int]$i]
+                    if ($imgT.SamplingSec -gt 0) { $meta.SamplingSeconds = [Math]::Round([double]$imgT.SamplingSec,2); $meta.ItPerSec = [Math]::Round([int]$job.Steps/[double]$imgT.SamplingSec,2) }
+                    if ($imgT.WallSec -gt 0) { $meta.TotalSeconds = [double]$imgT.WallSec }
+                }
+            } catch {}
             if ($script:HistoryPassphrase) {
                 $meta.PromptProtected = Protect-SgPayload ([string]$job.Prompt) $script:HistoryPassphrase
                 if ($job.NegativePrompt) { $meta.NegativePromptProtected = Protect-SgPayload ([string]$job.NegativePrompt) $script:HistoryPassphrase }
@@ -6438,6 +6465,14 @@ $speedScale = 0.0
         $st.LastStdout = $stdout
         $st.LastStderr = $stderr
         $st.LastExitCode = $exitCode
+        # v0.3.45: record THIS image's engine timing while its own stdout is
+        # still the current one (the tick starts the next run right after).
+        if ($st.ImageStartedAt -and [int]$st.CurrentImageIndex -gt 0 -and -not $st.SkipRequested) {
+            $timingWall=[Math]::Max(0.1,((Get-Date) - $st.ImageStartedAt).TotalSeconds)
+            $timingSampling=0.0
+            try { $smT=[regex]::Match($stdout,'(?i)sampling completed, taking ([0-9.]+)\s*s'); if($smT.Success){ $timingSampling=[double]$smT.Groups[1].Value } } catch {}
+            try { $st.ImageTimings[[int]$st.CurrentImageIndex]=[pscustomobject]@{ SamplingSec=$timingSampling; WallSec=[Math]::Round($timingWall,1) } } catch {}
+        }
         if ($exitCode -ne 0) {
             $st.LastErrorSummary = "Engine exit code $exitCode for a batch of $($job.Count) image(s)"
         }
@@ -6710,6 +6745,16 @@ $speedScale = 0.0
         } catch {}
         $batchTimeText = ''
         if ($st.JobStartedAt) { $batchTimeText = ' | total time ' + (Format-SgDuration ((Get-Date) - $st.JobStartedAt).TotalSeconds) }
+        # v0.3.45 (user): keep the per-image speed visible after the batch -
+        # average wall time per image and the sampling rate in it/s.
+        try {
+            $timingOk=@($st.ImageTimings.Values | Where-Object { $_.SamplingSec -gt 0 })
+            if($timingOk.Count -gt 0){
+                $avgWall=($st.ImageTimings.Values | Measure-Object WallSec -Average).Average
+                $avgIts=($timingOk | ForEach-Object { [int]$job.Steps/[double]$_.SamplingSec } | Measure-Object -Average).Average
+                $batchTimeText += (' | avg {0}s per image, ~{1} it/s sampling' -f ([math]::Round($avgWall,1)),[math]::Round($avgIts,2))
+            }
+        } catch {}
         # The log is a persistent record: the total time stays here after the
         # status line moves on (user: the time taken was lost when done).
         $log.AppendText("`r`n--- Batch finished | exit $exitCode | $ok of $($job.Count) image(s)$batchTimeText ---`r`n$outputText`r`n")
@@ -6858,6 +6903,7 @@ $speedScale = 0.0
         # v0.3.45: per-batch reset - the previous batch's per-image durations
         # would otherwise pollute this batch's ETA until new samples land.
         try { $script:GenState.ImageDurations.Clear() } catch {}
+        try { $script:GenState.ImageTimings.Clear() } catch {}
         $log.Clear()
         # Keep the existing file list: it is the full history of generated
         # files (populated at startup). New images are appended as they land.
@@ -6960,6 +7006,10 @@ $speedScale = 0.0
                     $lines.Add('Origin: original generation')
                 }
                 if ($sc.GeneratedAt) { $lines.Add(('Created: ' + [string]$sc.GeneratedAt)) }
+                if ($null -ne $sc.TotalSeconds) { $timingLine=('Time: ' + [string]$sc.TotalSeconds + ' s engine wall time') }
+                if ($null -ne $sc.SamplingSeconds) { $timingLine=('Time: ' + [string]$sc.SamplingSeconds + ' s sampling') }
+                if ($null -ne $sc.ItPerSec) { $timingLine+=(', ~' + [string]$sc.ItPerSec + ' it/s') }
+                if ($timingLine) { $lines.Add($timingLine) }
                 if ($sc.PromptProtected) {
                     if (-not $script:HistoryLocked -and $script:HistoryPassphrase) {
                         try { $p = Unprotect-SgPayload ([string]$sc.PromptProtected) $script:HistoryPassphrase; if ($p) { $prompt=[string]$p } else { $promptLockedNote='(encrypted - the history code did not unlock it)' } } catch { $promptLockedNote='(encrypted - enter your history code in Sootglass to see the prompt)' }
